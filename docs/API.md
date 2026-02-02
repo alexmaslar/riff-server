@@ -160,6 +160,13 @@ Album detail with tracks and AI summary.
       "file_size_bytes": 98304000
     }
   ],
+  "credits": [
+    {
+      "artist_name": "Teo Macero",
+      "role": "Producer",
+      "discogs_artist_id": "15127"
+    }
+  ],
   "added_at": "2026-01-15T10:30:00Z"
 }
 ```
@@ -273,8 +280,42 @@ Trigger a library scan. Admin only.
 **Response:**
 ```json
 {
-  "status": "scanning",
-  "message": "Library scan started"
+  "status": "complete",
+  "artists_added": 5,
+  "albums_added": 12,
+  "tracks_added": 87,
+  "errors": []
+}
+```
+
+### POST `/library/enrich`
+
+Trigger background Discogs enrichment for all unenriched albums. Admin only.
+
+**Response:**
+```json
+{
+  "status": "started"
+}
+```
+
+### POST `/library/enrich/{album_id}`
+
+Enrich a single album from Discogs. Admin only. Synchronous — returns when enrichment completes.
+
+**Response (matched):**
+```json
+{
+  "status": "complete",
+  "matched": true
+}
+```
+
+**Response (no match):**
+```json
+{
+  "status": "complete",
+  "matched": false
 }
 ```
 
@@ -315,5 +356,6 @@ GET /artists?focus=genre:Jazz
 - **Track** — id, album_id, title, track_number, disc_number, duration_seconds, file_path, format, sample_rate, bit_depth, file_size_bytes
 - **Playlist** — id, user_id, name, description, is_public, created_at, updated_at
 - **PlaylistTrack** — playlist_id, track_id, position
+- **AlbumCredits** — id, album_id, artist_name, role, discogs_artist_id, sort_order
 - **PlayHistory** — id, user_id, track_id, played_at, completed
 - **Favorite** — user_id, entity_type, entity_id, created_at

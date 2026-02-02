@@ -49,6 +49,14 @@ pub struct AlbumDetailResponse {
     pub ai_summary: Option<String>,
     pub added_at: String,
     pub tracks: Vec<TrackSummary>,
+    pub credits: Vec<CreditSummary>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CreditSummary {
+    pub artist_name: String,
+    pub role: String,
+    pub discogs_artist_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -169,6 +177,24 @@ pub async fn get_album(
         })
         .collect();
 
+    let credits = sqlx::query_as::<_, (String, String, Option<String>)>(
+        "SELECT artist_name, role, discogs_artist_id
+         FROM album_credits WHERE album_id = ? ORDER BY sort_order",
+    )
+    .bind(&id)
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+
+    let credit_summaries: Vec<CreditSummary> = credits
+        .into_iter()
+        .map(|(artist_name, role, discogs_artist_id)| CreditSummary {
+            artist_name,
+            role,
+            discogs_artist_id,
+        })
+        .collect();
+
     Json(json!(AlbumDetailResponse {
         id: album.0,
         title: album.1,
@@ -183,6 +209,7 @@ pub async fn get_album(
         ai_summary: album.10,
         added_at: album.11,
         tracks: track_summaries,
+        credits: credit_summaries,
     }))
 }
 

@@ -1,3 +1,5 @@
+use tracing::debug;
+
 use super::types::SearchResult;
 
 const THRESHOLD: f64 = 0.6;
@@ -41,7 +43,7 @@ fn score_result(
     let (discogs_artist, discogs_title) = split_discogs_title(&result.title);
 
     let title_score = string_similarity(&normalize(local_title), &normalize(&discogs_title));
-    let artist_score = string_similarity(&normalize(local_artist), &normalize(&discogs_artist));
+    let artist_score = artist_similarity(local_artist, &discogs_artist);
 
     let year_score = match (local_year, result.year.as_ref().and_then(|y| y.parse::<i32>().ok())) {
         (Some(ly), Some(dy)) => {
@@ -57,7 +59,51 @@ fn score_result(
     };
 
     // Weights: title 0.40, artist 0.30, year 0.20, track count 0.10 (track count not available from search)
-    title_score * 0.40 + artist_score * 0.30 + year_score * 0.20 + 0.5 * 0.10
+    let total = title_score * 0.40 + artist_score * 0.30 + year_score * 0.20 + 0.5 * 0.10;
+
+    debug!(
+        "score '{}': title={:.2} artist={:.2} year={:.2} total={:.2}",
+        result.title, title_score, artist_score, year_score, total
+    );
+
+    total
+}
+
+/// Compare artist names with Discogs-aware heuristics.
+/// Extracts the primary artist from comma-separated Discogs credits,
+/// strips disambiguation numbers like "(13)", and takes the better
+/// of primary-vs-primary and full-string comparisons.
+fn artist_similarity(local: &str, discogs: &str) -> f64 {
+    let norm_local = normalize(local);
+    let norm_discogs = normalize(discogs);
+
+    // Full-string bigram comparison
+    let full_score = string_similarity(&norm_local, &norm_discogs);
+
+    // Extract primary artist (first name before comma) and strip disambiguation
+    let primary_discogs = strip_discogs_disambiguation(
+        discogs.split(',').next().unwrap_or(discogs).trim(),
+    );
+    let primary_local = local.split(',').next().unwrap_or(local).trim();
+
+    let primary_score = string_similarity(
+        &normalize(primary_local),
+        &normalize(&primary_discogs),
+    );
+
+    full_score.max(primary_score)
+}
+
+/// Strip Discogs disambiguation numbers like "(13)" from artist names.
+fn strip_discogs_disambiguation(name: &str) -> String {
+    let trimmed = name.trim();
+    if let Some(idx) = trimmed.rfind('(') {
+        let after = &trimmed[idx + 1..];
+        if after.ends_with(')') && after[..after.len() - 1].chars().all(|c| c.is_ascii_digit()) {
+            return trimmed[..idx].trim().to_string();
+        }
+    }
+    trimmed.to_string()
 }
 
 fn split_discogs_title(title: &str) -> (String, String) {

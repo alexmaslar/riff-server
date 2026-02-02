@@ -1,7 +1,8 @@
 use std::path::Path;
 
 use sqlx::SqlitePool;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
+use uuid::Uuid;
 
 use crate::config::DiscogsConfig;
 use super::client::DiscogsClient;
@@ -39,6 +40,54 @@ pub async fn enrich_library(
     );
 
     Ok(result)
+}
+
+/// Enrich a single album by ID. Returns true if a Discogs match was found.
+pub async fn enrich_album(
+    pool: &SqlitePool,
+    config: &DiscogsConfig,
+    album_id: &str,
+) -> anyhow::Result<bool> {
+    let row: Option<(String, String, Option<i32>, Option<String>)> = sqlx::query_as(
+        "SELECT a.title, ar.name, a.year, a.cover_art_path \
+         FROM albums a JOIN artists ar ON a.artist_id = ar.id \
+         WHERE a.id = ?"
+    )
+    .bind(album_id)
+    .fetch_optional(pool)
+    .await?;
+
+    let (title, artist_name, year, cover_path) = match row {
+        Some(r) => r,
+        None => anyhow::bail!("album not found: {}", album_id),
+    };
+
+    let client = DiscogsClient::new(config)?;
+    let matched = enrich_one_album(
+        pool, &client, config, album_id, &title, &artist_name, year, cover_path.as_deref(),
+    ).await?;
+
+    // Also enrich the artist if we got a discogs_id from the album match
+    if matched {
+        let artist_row: Option<(String, String)> = sqlx::query_as(
+            "SELECT ar.id, ar.discogs_id FROM artists ar \
+             JOIN albums a ON a.artist_id = ar.id \
+             WHERE a.id = ? AND ar.discogs_id IS NOT NULL AND ar.bio IS NULL"
+        )
+        .bind(album_id)
+        .fetch_optional(pool)
+        .await?;
+
+        if let Some((artist_id, discogs_id)) = artist_row {
+            if let Ok(did) = discogs_id.parse::<u64>() {
+                if let Err(e) = enrich_one_artist(pool, &client, &artist_id, did).await {
+                    warn!("artist enrichment failed for {}: {}", artist_id, e);
+                }
+            }
+        }
+    }
+
+    Ok(matched)
 }
 
 async fn enrich_albums(
@@ -88,6 +137,18 @@ async fn enrich_one_album(
 ) -> anyhow::Result<bool> {
     let results = client.search_release(artist_name, title, year).await?;
 
+    if results.is_empty() {
+        debug!(
+            "no Discogs search results for '{}' by '{}'",
+            title, artist_name
+        );
+    } else {
+        debug!(
+            "Discogs search returned {} results for '{}' by '{}'",
+            results.len(), title, artist_name
+        );
+    }
+
     let track_count: Option<i64> = sqlx::query_scalar(
         "SELECT COUNT(*) FROM tracks WHERE album_id = ?"
     )
@@ -105,7 +166,13 @@ async fn enrich_one_album(
 
     let candidate = match candidate {
         Some(c) => c,
-        None => return Ok(false),
+        None => {
+            debug!(
+                "no Discogs match above threshold for '{}' by '{}'",
+                title, artist_name
+            );
+            return Ok(false);
+        }
     };
 
     info!(
@@ -139,6 +206,28 @@ async fn enrich_one_album(
         )
         .bind(discogs_artist.id.to_string())
         .bind(album_id)
+        .execute(pool)
+        .await?;
+    }
+
+    // Store album credits from extraartists
+    sqlx::query("DELETE FROM album_credits WHERE album_id = ?")
+        .bind(album_id)
+        .execute(pool)
+        .await?;
+
+    for (i, extra) in release.extraartists.iter().enumerate() {
+        let id = Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO album_credits (id, album_id, artist_name, role, discogs_artist_id, sort_order) \
+             VALUES (?, ?, ?, ?, ?, ?)"
+        )
+        .bind(&id)
+        .bind(album_id)
+        .bind(&extra.name)
+        .bind(&extra.role)
+        .bind(extra.id.to_string())
+        .bind(i as i32)
         .execute(pool)
         .await?;
     }

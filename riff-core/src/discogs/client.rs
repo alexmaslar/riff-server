@@ -56,6 +56,7 @@ impl DiscogsClient {
         title: &str,
         year: Option<i32>,
     ) -> anyhow::Result<Vec<SearchResult>> {
+        // Try specific artist + release_title search first
         let mut url = format!(
             "{}/database/search?type=release&artist={}&release_title={}",
             BASE_URL,
@@ -65,6 +66,21 @@ impl DiscogsClient {
         if let Some(y) = year {
             url.push_str(&format!("&year={}", y));
         }
+        let resp: SearchResponse = self.get(&url).await?;
+        if !resp.results.is_empty() {
+            return Ok(resp.results);
+        }
+
+        // Fallback: general q= query for fuzzy full-text matching.
+        // Don't include year here — it acts as a hard filter on Discogs and
+        // can exclude valid matches when the local year differs from Discogs.
+        // Year comparison is handled in the scoring phase instead.
+        let query = format!("{} {}", artist, title);
+        let url = format!(
+            "{}/database/search?type=release&q={}",
+            BASE_URL,
+            urlencoded(&query),
+        );
         let resp: SearchResponse = self.get(&url).await?;
         Ok(resp.results)
     }

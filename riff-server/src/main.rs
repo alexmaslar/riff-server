@@ -31,6 +31,12 @@ async fn main() -> Result<()> {
     let config = Config::load()?;
     tracing::info!("loaded config, port={}", config.server.port);
 
+    if config.metadata.discogs.api_token.is_some() {
+        tracing::info!("discogs api token loaded");
+    } else {
+        tracing::warn!("no discogs api token configured");
+    }
+
     let pool = db::init_pool().await?;
     tracing::info!("database initialized");
 
@@ -106,6 +112,7 @@ async fn main() -> Result<()> {
     let admin = Router::new()
         .route("/library/scan", post(routes::library::trigger_scan))
         .route("/library/enrich", post(routes::library::trigger_enrichment))
+        .route("/library/enrich/{album_id}", post(routes::library::enrich_album))
         .route("/users", get(routes::users::list_users))
         .route("/users", post(routes::users::create_user))
         .route_layer(axum_mw::from_fn(middleware::require_admin))

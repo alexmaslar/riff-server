@@ -1,4 +1,4 @@
-use axum::{extract::State, Json};
+use axum::{extract::{Path, State}, Json};
 use riff_core::{discogs, scanner};
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -46,4 +46,21 @@ pub async fn trigger_enrichment(State(state): State<Arc<AppState>>) -> Json<Valu
     });
 
     Json(json!({ "status": "started" }))
+}
+
+pub async fn enrich_album(
+    State(state): State<Arc<AppState>>,
+    Path(album_id): Path<String>,
+) -> Json<Value> {
+    if state.config.metadata.discogs.api_token.is_none() {
+        return Json(json!({ "error": "no discogs api_token configured" }));
+    }
+
+    match discogs::enrich_album(&state.db, &state.config.metadata.discogs, &album_id).await {
+        Ok(matched) => Json(json!({
+            "status": "complete",
+            "matched": matched,
+        })),
+        Err(e) => Json(json!({ "error": e.to_string() })),
+    }
 }

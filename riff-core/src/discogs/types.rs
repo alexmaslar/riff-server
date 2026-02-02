@@ -32,6 +32,15 @@ pub struct ReleaseDetail {
     pub artists: Vec<DiscogsArtistRef>,
     #[serde(default)]
     pub tracklist: Vec<DiscogsTrack>,
+    #[serde(default)]
+    pub extraartists: Vec<DiscogsExtraArtist>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DiscogsExtraArtist {
+    pub id: u64,
+    pub name: String,
+    pub role: String,
 }
 
 #[derive(Debug, Deserialize)]

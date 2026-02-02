@@ -58,6 +58,21 @@ fix(server): handle missing album art in stream response
 refactor(core): extract metadata parsing into separate module
 ```
 
+## Server Restart
+
+After any change to `riff-core/` or `riff-server/` that affects runtime behavior (routes, config, enrichment logic, etc.), restart the dev server:
+
+```bash
+lsof -ti :8080 | xargs kill -9 2>/dev/null
+sleep 1
+cd /Users/amaslar/riff-server && cargo run -p riff-server 2>&1 &
+```
+
+Wait ~5 seconds for it to start, then verify:
+```bash
+lsof -ti :8080 >/dev/null 2>&1 && echo "server running" || echo "failed"
+```
+
 ## Code Organization
 
 - Keep `riff-core` (library) separate from `riff-server` (binary) for testability
