@@ -8,6 +8,8 @@ pub struct Config {
     pub library: LibraryConfig,
     #[serde(default)]
     pub auth: AuthConfig,
+    #[serde(default)]
+    pub metadata: MetadataConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,6 +36,44 @@ pub struct AuthConfig {
     pub admin_username: String,
     #[serde(default)]
     pub admin_password: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetadataConfig {
+    #[serde(default)]
+    pub discogs: DiscogsConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiscogsConfig {
+    #[serde(default)]
+    pub api_token: Option<String>,
+    #[serde(default = "default_true")]
+    pub auto_enrich: bool,
+    #[serde(default = "default_true")]
+    pub download_covers: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for MetadataConfig {
+    fn default() -> Self {
+        Self {
+            discogs: DiscogsConfig::default(),
+        }
+    }
+}
+
+impl Default for DiscogsConfig {
+    fn default() -> Self {
+        Self {
+            api_token: None,
+            auto_enrich: true,
+            download_covers: true,
+        }
+    }
 }
 
 fn default_server() -> ServerConfig {
@@ -68,6 +108,7 @@ impl Default for Config {
             server: default_server(),
             library: LibraryConfig::default(),
             auth: AuthConfig::default(),
+            metadata: MetadataConfig::default(),
         }
     }
 }

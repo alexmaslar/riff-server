@@ -9,7 +9,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use riff_core::{auth, config::Config, db, scanner};
+use riff_core::{auth, config::Config, db, discogs, scanner};
 use serde_json::{json, Value};
 use sqlx::SqlitePool;
 use std::sync::Arc;
@@ -53,6 +53,25 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Auto-enrich from Discogs in background
+    if config.metadata.discogs.api_token.is_some() && config.metadata.discogs.auto_enrich {
+        let enrich_pool = pool.clone();
+        let discogs_config = config.metadata.discogs.clone();
+        tokio::spawn(async move {
+            match discogs::enrich_library(&enrich_pool, &discogs_config).await {
+                Ok(result) => {
+                    tracing::info!(
+                        "enrichment complete: {} albums, {} artists, {} covers",
+                        result.albums_enriched,
+                        result.artists_enriched,
+                        result.covers_downloaded,
+                    );
+                }
+                Err(e) => tracing::warn!("background enrichment failed: {}", e),
+            }
+        });
+    }
+
     let state = Arc::new(AppState {
         db: pool,
         config: config.clone(),
@@ -86,6 +105,7 @@ async fn main() -> Result<()> {
     // Admin routes (require auth + admin role)
     let admin = Router::new()
         .route("/library/scan", post(routes::library::trigger_scan))
+        .route("/library/enrich", post(routes::library::trigger_enrichment))
         .route("/users", get(routes::users::list_users))
         .route("/users", post(routes::users::create_user))
         .route_layer(axum_mw::from_fn(middleware::require_admin))

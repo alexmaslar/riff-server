@@ -22,3 +22,5 @@ argon2 = "0.5"
 rand = "0.8"
 dirs = "6"
 hex = "0.4"
+reqwest = { workspace = true }
+governor = "0.8"
