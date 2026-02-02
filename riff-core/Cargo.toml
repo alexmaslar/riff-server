@@ -1,0 +1,24 @@
+[package]
+name = "riff-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "uuid", "chrono", "migrate"] }
+serde_yaml_ng = "0.10"
+symphonia = { version = "0.5", features = ["flac", "isomp4", "aiff", "wav", "pcm", "alac"] }
+walkdir = "2"
+jsonwebtoken = "9"
+argon2 = "0.5"
+rand = "0.8"
+dirs = "6"
+hex = "0.4"

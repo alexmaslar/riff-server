@@ -1,0 +1,28 @@
+# Rust
+/target/
+**/target/
+Cargo.lock
+!Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+*.xcuserstate
+
+# Environment
+.env
+.env.local
+
+# Config (may contain secrets)
+config.yaml
+
+# Database
+*.db
+*.db-shm
+*.db-wal
