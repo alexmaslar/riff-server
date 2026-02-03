@@ -6,12 +6,13 @@ use anyhow::Result;
 use axum::{
     extract::State,
     middleware as axum_mw,
-    routing::{get, post},
+    routing::{delete, get, post},
     Json, Router,
 };
-use riff_core::{auth, config::Config, db, discogs, scanner};
+use riff_core::{analysis, auth, config::Config, db, discogs, scanner};
 use serde_json::{json, Value};
 use sqlx::SqlitePool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
@@ -20,6 +21,8 @@ use tracing_subscriber::EnvFilter;
 pub struct AppState {
     pub db: SqlitePool,
     pub config: Config,
+    pub enrichment_running: AtomicBool,
+    pub analysis_running: AtomicBool,
 }
 
 #[tokio::main]
@@ -59,29 +62,68 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Auto-enrich from Discogs in background
-    if config.metadata.discogs.api_token.is_some() && config.metadata.discogs.auto_enrich {
-        let enrich_pool = pool.clone();
-        let discogs_config = config.metadata.discogs.clone();
-        tokio::spawn(async move {
-            match discogs::enrich_library(&enrich_pool, &discogs_config).await {
-                Ok(result) => {
-                    tracing::info!(
-                        "enrichment complete: {} albums, {} artists, {} covers",
-                        result.albums_enriched,
-                        result.artists_enriched,
-                        result.covers_downloaded,
-                    );
-                }
-                Err(e) => tracing::warn!("background enrichment failed: {}", e),
-            }
-        });
-    }
-
     let state = Arc::new(AppState {
         db: pool,
         config: config.clone(),
+        enrichment_running: AtomicBool::new(false),
+        analysis_running: AtomicBool::new(false),
     });
+
+    // Auto-enrich from Discogs in background, then chain analysis
+    if config.metadata.discogs.api_token.is_some() && config.metadata.discogs.auto_enrich {
+        if state.enrichment_running.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+            let enrich_state = state.clone();
+            tokio::spawn(async move {
+                match discogs::enrich_library(&enrich_state.db, &enrich_state.config.metadata.discogs).await {
+                    Ok(result) => {
+                        tracing::info!(
+                            "enrichment complete: {} albums, {} artists, {} covers",
+                            result.albums_enriched,
+                            result.artists_enriched,
+                            result.covers_downloaded,
+                        );
+                    }
+                    Err(e) => tracing::warn!("background enrichment failed: {}", e),
+                }
+                enrich_state.enrichment_running.store(false, Ordering::SeqCst);
+
+                // Chain analysis after enrichment
+                if enrich_state.analysis_running.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+                    match analysis::analyze_library(&enrich_state.db).await {
+                        Ok(result) => {
+                            tracing::info!(
+                                "analysis complete: {} analyzed, {} failed, {} skipped",
+                                result.tracks_analyzed,
+                                result.tracks_failed,
+                                result.tracks_skipped,
+                            );
+                        }
+                        Err(e) => tracing::warn!("background analysis failed: {}", e),
+                    }
+                    enrich_state.analysis_running.store(false, Ordering::SeqCst);
+                }
+            });
+        }
+    } else {
+        // No Discogs configured — run analysis directly
+        if state.analysis_running.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+            let analysis_state = state.clone();
+            tokio::spawn(async move {
+                match analysis::analyze_library(&analysis_state.db).await {
+                    Ok(result) => {
+                        tracing::info!(
+                            "analysis complete: {} analyzed, {} failed, {} skipped",
+                            result.tracks_analyzed,
+                            result.tracks_failed,
+                            result.tracks_skipped,
+                        );
+                    }
+                    Err(e) => tracing::warn!("background analysis failed: {}", e),
+                }
+                analysis_state.analysis_running.store(false, Ordering::SeqCst);
+            });
+        }
+    }
 
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -103,6 +145,17 @@ async fn main() -> Result<()> {
         .route("/albums/{id}", get(routes::albums::get_album))
         .route("/tracks/{id}/stream", get(routes::tracks::stream_track))
         .route("/tracks/{id}/download", get(routes::tracks::download_track))
+        .route("/playlists", get(routes::playlists::list_playlists).post(routes::playlists::create_playlist))
+        .route("/playlists/{id}", get(routes::playlists::get_playlist).delete(routes::playlists::delete_playlist))
+        .route("/playlists/{id}/tracks", post(routes::playlists::add_track).put(routes::playlists::reorder_tracks))
+        .route("/playlists/{id}/tracks/{track_id}", delete(routes::playlists::remove_track))
+        // History
+        .route("/history", post(routes::history::record_play))
+        .route("/history/albums", get(routes::history::recently_played_albums))
+        .route("/history/continue", get(routes::history::continue_listening))
+        // Favorites
+        .route("/favorites", post(routes::favorites::toggle_favorite).get(routes::favorites::list_favorites))
+        .route("/favorites/check", get(routes::favorites::check_favorite))
         .route_layer(axum_mw::from_fn_with_state(
             state.clone(),
             middleware::require_auth,
@@ -113,8 +166,11 @@ async fn main() -> Result<()> {
         .route("/library/scan", post(routes::library::trigger_scan))
         .route("/library/enrich", post(routes::library::trigger_enrichment))
         .route("/library/enrich/{album_id}", post(routes::library::enrich_album))
+        .route("/library/analyze", post(routes::library::trigger_analysis))
+        .route("/library/stats", get(routes::library::library_stats))
         .route("/users", get(routes::users::list_users))
         .route("/users", post(routes::users::create_user))
+        .route("/users/{id}", delete(routes::users::delete_user))
         .route_layer(axum_mw::from_fn(middleware::require_admin))
         .route_layer(axum_mw::from_fn_with_state(
             state.clone(),

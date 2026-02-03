@@ -45,6 +45,14 @@ pub async fn scan_library(pool: &SqlitePool, library_path: &str) -> anyhow::Resu
             continue;
         }
 
+        // Skip macOS resource fork files (._filename)
+        if entry.path().file_name()
+            .and_then(|n| n.to_str())
+            .map_or(false, |n| n.starts_with("._"))
+        {
+            continue;
+        }
+
         let ext = entry
             .path()
             .extension()
@@ -79,10 +87,23 @@ pub async fn scan_library(pool: &SqlitePool, library_path: &str) -> anyhow::Resu
 
         // Extract metadata
         let meta = match metadata::extract_metadata(file_path) {
-            Ok(m) => m,
+            Ok(mut m) => {
+                // Fill in unknown fields from directory structure
+                if m.artist == "Unknown Artist" || m.album == "Unknown Album" {
+                    if let Some(path_meta) = metadata::metadata_from_path(file_path, path) {
+                        if m.artist == "Unknown Artist" {
+                            m.artist = path_meta.artist;
+                        }
+                        if m.album == "Unknown Album" {
+                            m.album = path_meta.album;
+                        }
+                    }
+                }
+                m
+            }
             Err(e) => {
                 // Fallback to directory structure
-                match metadata::metadata_from_path(file_path) {
+                match metadata::metadata_from_path(file_path, path) {
                     Some(m) => {
                         warn!("tag extraction failed for {}, using path fallback: {}", file_str, e);
                         m
@@ -95,20 +116,20 @@ pub async fn scan_library(pool: &SqlitePool, library_path: &str) -> anyhow::Resu
             }
         };
 
-        // Upsert artist
-        let artist_name = meta.artist.clone();
-        let artist_id = if let Some(&id) = artist_cache.get(&artist_name) {
+        // Upsert artist (normalize cache key for case-insensitive matching)
+        let artist_key = meta.artist.trim().to_lowercase();
+        let artist_id = if let Some(&id) = artist_cache.get(&artist_key) {
             id
         } else {
-            let id = upsert_artist(pool, &artist_name).await?;
-            if artist_cache.insert(artist_name.clone(), id).is_none() {
+            let id = upsert_artist(pool, meta.artist.trim()).await?;
+            if artist_cache.insert(artist_key, id).is_none() {
                 result.artists_added += 1;
             }
             id
         };
 
-        // Upsert album
-        let album_key = (artist_id, meta.album.clone());
+        // Upsert album (normalize cache key for case-insensitive matching)
+        let album_key = (artist_id, meta.album.trim().to_lowercase());
         let album_id = if let Some(&id) = album_cache.get(&album_key) {
             id
         } else {
@@ -135,9 +156,13 @@ pub async fn scan_library(pool: &SqlitePool, library_path: &str) -> anyhow::Resu
         result.tracks_added += 1;
     }
 
+    // Merge any duplicate artists/albums from prior scans
+    let (artists_deduped, albums_deduped) = deduplicate_library(pool).await?;
+
     info!(
-        "scan complete: {} artists, {} albums, {} tracks added, {} errors",
-        result.artists_added, result.albums_added, result.tracks_added, result.errors.len()
+        "scan complete: {} artists, {} albums, {} tracks added, {} errors, deduped {} artists + {} albums",
+        result.artists_added, result.albums_added, result.tracks_added, result.errors.len(),
+        artists_deduped, albums_deduped
     );
 
     Ok(result)
@@ -145,7 +170,7 @@ pub async fn scan_library(pool: &SqlitePool, library_path: &str) -> anyhow::Resu
 
 async fn upsert_artist(pool: &SqlitePool, name: &str) -> anyhow::Result<Uuid> {
     let row: Option<(String,)> =
-        sqlx::query_as("SELECT id FROM artists WHERE name = ?")
+        sqlx::query_as("SELECT id FROM artists WHERE name COLLATE NOCASE = ?")
             .bind(name)
             .fetch_optional(pool)
             .await?;
@@ -165,9 +190,9 @@ async fn upsert_artist(pool: &SqlitePool, name: &str) -> anyhow::Result<Uuid> {
 
 async fn upsert_album(pool: &SqlitePool, artist_id: Uuid, meta: &TrackMetadata) -> anyhow::Result<Uuid> {
     let row: Option<(String,)> =
-        sqlx::query_as("SELECT id FROM albums WHERE artist_id = ? AND title = ?")
+        sqlx::query_as("SELECT id FROM albums WHERE artist_id = ? AND title COLLATE NOCASE = ?")
             .bind(artist_id.to_string())
-            .bind(&meta.album)
+            .bind(meta.album.trim())
             .fetch_optional(pool)
             .await?;
 
@@ -228,8 +253,8 @@ async fn insert_track(
 ) -> anyhow::Result<()> {
     let id = Uuid::new_v4();
     sqlx::query(
-        "INSERT INTO tracks (id, album_id, title, track_number, disc_number, duration_seconds, file_path, format, sample_rate, bit_depth, file_size_bytes)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO tracks (id, album_id, title, track_number, disc_number, duration_seconds, file_path, format, sample_rate, bit_depth, file_size_bytes, composer, language, bpm_tag, musical_key, mood, replay_gain_track_gain, replay_gain_track_peak, replay_gain_album_gain, replay_gain_album_peak, musicbrainz_recording_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(id.to_string())
     .bind(album_id.to_string())
@@ -242,7 +267,141 @@ async fn insert_track(
     .bind(meta.sample_rate)
     .bind(meta.bit_depth)
     .bind(meta.file_size_bytes)
+    .bind(&meta.composer)
+    .bind(&meta.language)
+    .bind(meta.bpm)
+    .bind(&meta.musical_key)
+    .bind(&meta.mood)
+    .bind(meta.replay_gain_track_gain)
+    .bind(meta.replay_gain_track_peak)
+    .bind(meta.replay_gain_album_gain)
+    .bind(meta.replay_gain_album_peak)
+    .bind(&meta.musicbrainz_recording_id)
     .execute(pool)
     .await?;
+
+    // Set is_compilation on the album if the track tag says so
+    if meta.is_compilation {
+        sqlx::query("UPDATE albums SET is_compilation = 1 WHERE id = ?")
+            .bind(album_id.to_string())
+            .execute(pool)
+            .await?;
+    }
+
     Ok(())
+}
+
+/// Merge duplicate artists and albums (case-insensitive name matches).
+/// Returns (artists_merged, albums_merged).
+async fn deduplicate_library(pool: &SqlitePool) -> anyhow::Result<(u32, u32)> {
+    let artists_merged = deduplicate_artists(pool).await?;
+    let albums_merged = deduplicate_albums(pool).await?;
+    Ok((artists_merged, albums_merged))
+}
+
+async fn deduplicate_artists(pool: &SqlitePool) -> anyhow::Result<u32> {
+    let dupes: Vec<(String,)> = sqlx::query_as(
+        "SELECT lower(name) FROM artists GROUP BY lower(name) HAVING COUNT(*) > 1",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut merged = 0u32;
+
+    for (lower_name,) in &dupes {
+        let artists: Vec<(String,)> = sqlx::query_as(
+            "SELECT id FROM artists WHERE lower(name) = ? ORDER BY id ASC",
+        )
+        .bind(lower_name)
+        .fetch_all(pool)
+        .await?;
+
+        if artists.len() < 2 {
+            continue;
+        }
+
+        let keep_id = &artists[0].0;
+        for dupe in &artists[1..] {
+            let dupe_id = &dupe.0;
+
+            sqlx::query("UPDATE albums SET artist_id = ? WHERE artist_id = ?")
+                .bind(keep_id)
+                .bind(dupe_id)
+                .execute(pool)
+                .await?;
+
+            sqlx::query("DELETE FROM artists WHERE id = ?")
+                .bind(dupe_id)
+                .execute(pool)
+                .await?;
+
+            merged += 1;
+        }
+    }
+
+    if merged > 0 {
+        info!("deduplicated {} duplicate artist entries", merged);
+    }
+    Ok(merged)
+}
+
+async fn deduplicate_albums(pool: &SqlitePool) -> anyhow::Result<u32> {
+    let dupes: Vec<(String, String)> = sqlx::query_as(
+        "SELECT artist_id, lower(title) FROM albums GROUP BY artist_id, lower(title) HAVING COUNT(*) > 1",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut merged = 0u32;
+
+    for (artist_id, lower_title) in &dupes {
+        let albums: Vec<(String,)> = sqlx::query_as(
+            "SELECT id FROM albums WHERE artist_id = ? AND lower(title) = ? ORDER BY added_at ASC NULLS LAST, id ASC",
+        )
+        .bind(artist_id)
+        .bind(lower_title)
+        .fetch_all(pool)
+        .await?;
+
+        if albums.len() < 2 {
+            continue;
+        }
+
+        let keep_id = &albums[0].0;
+        for dupe in &albums[1..] {
+            let dupe_id = &dupe.0;
+
+            // Move tracks to kept album
+            sqlx::query("UPDATE tracks SET album_id = ? WHERE album_id = ?")
+                .bind(keep_id)
+                .bind(dupe_id)
+                .execute(pool)
+                .await?;
+
+            // Move album credits
+            sqlx::query("DELETE FROM album_credits WHERE album_id = ?")
+                .bind(dupe_id)
+                .execute(pool)
+                .await?;
+
+            // Move favorites
+            sqlx::query("UPDATE OR IGNORE favorites SET item_id = ? WHERE item_id = ? AND item_type = 'album'")
+                .bind(keep_id)
+                .bind(dupe_id)
+                .execute(pool)
+                .await?;
+
+            sqlx::query("DELETE FROM albums WHERE id = ?")
+                .bind(dupe_id)
+                .execute(pool)
+                .await?;
+
+            merged += 1;
+        }
+    }
+
+    if merged > 0 {
+        info!("deduplicated {} duplicate album entries", merged);
+    }
+    Ok(merged)
 }

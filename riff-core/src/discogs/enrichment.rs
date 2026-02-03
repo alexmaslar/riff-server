@@ -99,7 +99,7 @@ async fn enrich_albums(
     let rows: Vec<(String, String, String, Option<i32>, Option<String>)> = match sqlx::query_as(
         "SELECT a.id, a.title, ar.name, a.year, a.cover_art_path \
          FROM albums a JOIN artists ar ON a.artist_id = ar.id \
-         WHERE a.discogs_id IS NULL"
+         WHERE a.metadata_status IN ('pending', 'not_found')"
     )
     .fetch_all(pool)
     .await
@@ -171,6 +171,10 @@ async fn enrich_one_album(
                 "no Discogs match above threshold for '{}' by '{}'",
                 title, artist_name
             );
+            sqlx::query("UPDATE albums SET metadata_status = 'not_found' WHERE id = ?")
+                .bind(album_id)
+                .execute(pool)
+                .await?;
             return Ok(false);
         }
     };
@@ -186,15 +190,24 @@ async fn enrich_one_album(
     let catno = release.labels.first().and_then(|l| l.catno.clone());
     let style_json = serde_json::to_string(&release.styles)?;
     let genre_json = serde_json::to_string(&release.genres)?;
+    let all_labels_json = serde_json::to_string(&release.labels)?;
+    let release_notes = release.notes.as_deref().map(clean_discogs_markup);
+    let is_compilation = release.formats.iter().any(|f| {
+        f.descriptions.iter().any(|d| d.eq_ignore_ascii_case("compilation"))
+    });
 
     sqlx::query(
-        "UPDATE albums SET discogs_id = ?, label = ?, catalog_number = ?, style = ?, genre = ? WHERE id = ?"
+        "UPDATE albums SET discogs_id = ?, label = ?, catalog_number = ?, style = ?, genre = ?, country = ?, release_notes = ?, all_labels = ?, is_compilation = ?, metadata_status = 'matched' WHERE id = ?"
     )
     .bind(release.id.to_string())
     .bind(&label)
     .bind(&catno)
     .bind(&style_json)
     .bind(&genre_json)
+    .bind(&release.country)
+    .bind(&release_notes)
+    .bind(&all_labels_json)
+    .bind(is_compilation as i32)
     .bind(album_id)
     .execute(pool)
     .await?;

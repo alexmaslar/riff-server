@@ -20,6 +20,17 @@ pub struct TrackMetadata {
     pub year: Option<i32>,
     pub genre: Vec<String>,
     pub style: Vec<String>,
+    pub composer: Option<String>,
+    pub language: Option<String>,
+    pub bpm: Option<f64>,
+    pub musical_key: Option<String>,
+    pub mood: Option<String>,
+    pub is_compilation: bool,
+    pub replay_gain_track_gain: Option<f64>,
+    pub replay_gain_track_peak: Option<f64>,
+    pub replay_gain_album_gain: Option<f64>,
+    pub replay_gain_album_peak: Option<f64>,
+    pub musicbrainz_recording_id: Option<String>,
 }
 
 pub fn extract_metadata(path: &Path) -> anyhow::Result<TrackMetadata> {
@@ -92,6 +103,17 @@ pub fn extract_metadata(path: &Path) -> anyhow::Result<TrackMetadata> {
         year: None,
         genre: Vec::new(),
         style: Vec::new(),
+        composer: None,
+        language: None,
+        bpm: None,
+        musical_key: None,
+        mood: None,
+        is_compilation: false,
+        replay_gain_track_gain: None,
+        replay_gain_track_peak: None,
+        replay_gain_album_gain: None,
+        replay_gain_album_peak: None,
+        musicbrainz_recording_id: None,
     };
 
     for tag in &tags {
@@ -139,18 +161,57 @@ pub fn extract_metadata(path: &Path) -> anyhow::Result<TrackMetadata> {
                     }
                 }
             }
-            _ => {}
-        }
-    }
-
-    // If still unknown, try path-based fallback for artist/album
-    if meta.artist == "Unknown Artist" || meta.album == "Unknown Album" {
-        if let Some(path_meta) = metadata_from_path(path) {
-            if meta.artist == "Unknown Artist" {
-                meta.artist = path_meta.artist;
+            Some(StandardTagKey::Composer) => {
+                meta.composer = Some(tag.value.to_string());
             }
-            if meta.album == "Unknown Album" {
-                meta.album = path_meta.album;
+            Some(StandardTagKey::Language) => {
+                meta.language = Some(tag.value.to_string());
+            }
+            Some(StandardTagKey::Bpm) => {
+                if let Ok(bpm) = tag.value.to_string().parse::<f64>() {
+                    if (0.0..=500.0).contains(&bpm) {
+                        meta.bpm = Some(bpm);
+                    }
+                }
+            }
+            Some(StandardTagKey::Mood) => {
+                meta.mood = Some(tag.value.to_string());
+            }
+            Some(StandardTagKey::Compilation) => {
+                let val = tag.value.to_string().to_lowercase();
+                meta.is_compilation = val == "1" || val == "true";
+            }
+            Some(StandardTagKey::ReplayGainTrackGain) => {
+                let s = tag.value.to_string().trim_end_matches(" dB").to_string();
+                if let Ok(v) = s.parse::<f64>() {
+                    meta.replay_gain_track_gain = Some(v);
+                }
+            }
+            Some(StandardTagKey::ReplayGainTrackPeak) => {
+                if let Ok(v) = tag.value.to_string().parse::<f64>() {
+                    meta.replay_gain_track_peak = Some(v);
+                }
+            }
+            Some(StandardTagKey::ReplayGainAlbumGain) => {
+                let s = tag.value.to_string().trim_end_matches(" dB").to_string();
+                if let Ok(v) = s.parse::<f64>() {
+                    meta.replay_gain_album_gain = Some(v);
+                }
+            }
+            Some(StandardTagKey::ReplayGainAlbumPeak) => {
+                if let Ok(v) = tag.value.to_string().parse::<f64>() {
+                    meta.replay_gain_album_peak = Some(v);
+                }
+            }
+            Some(StandardTagKey::MusicBrainzRecordingId) => {
+                meta.musicbrainz_recording_id = Some(tag.value.to_string());
+            }
+            _ => {
+                // Handle tags without standard key mappings via raw key string
+                let key_lower = tag.key.to_lowercase();
+                if key_lower == "initialkey" || key_lower == "key" {
+                    meta.musical_key = Some(tag.value.to_string());
+                }
             }
         }
     }
@@ -159,16 +220,39 @@ pub fn extract_metadata(path: &Path) -> anyhow::Result<TrackMetadata> {
 }
 
 /// Fallback: parse metadata from directory structure
-/// Expects: /library/Artist Name/Album Name (Year)/01 - Track Name.flac
-pub fn metadata_from_path(path: &Path) -> Option<TrackMetadata> {
+/// Supports:
+///   /library/Artist - Album Name (Year)/01 - Track Name.flac
+///   /library/Artist - Album Name (Year)/CD1/01 - Track Name.flac
+///   /library/Artist Name/Album Name (Year)/01 - Track Name.flac
+pub fn metadata_from_path(path: &Path, library_root: &Path) -> Option<TrackMetadata> {
     let parent = path.parent()?;
-    let grandparent = parent.parent()?;
+    let parent_name = parent.file_name()?.to_str()?;
 
-    let album_dir = parent.file_name()?.to_str()?;
-    let artist_name = grandparent.file_name()?.to_str()?.to_string();
+    // Handle disc subfolders (CD1, CD2, Disc 1, etc.) — go up one level
+    let (album_dir, disc_number) = if let Some(disc_num) = parse_disc_folder(parent_name) {
+        (parent.parent()?, disc_num)
+    } else {
+        (parent, 1)
+    };
 
-    // Parse "Album Name (Year)" or just "Album Name"
-    let (album_name, year) = parse_album_dir(album_dir);
+    let album_dir_name = album_dir.file_name()?.to_str()?;
+    let is_direct_child = album_dir.parent().map_or(true, |gp| gp == library_root);
+
+    let (artist_name, album_name, year) = if is_direct_child {
+        // Flat structure: try "Artist - Album (Year)" pattern
+        if let Some(parsed) = parse_artist_album_dir(album_dir_name) {
+            parsed
+        } else {
+            let (album, year) = parse_album_dir(album_dir_name);
+            ("Unknown Artist".to_string(), album, year)
+        }
+    } else {
+        // Two-level: /Artist/Album/track.flac
+        let grandparent = album_dir.parent()?;
+        let artist = grandparent.file_name()?.to_str()?.to_string();
+        let (album, year) = parse_album_dir(album_dir_name);
+        (artist, album, year)
+    };
 
     // Parse "01 - Track Name.flac"
     let filename = filename_without_ext(path);
@@ -187,7 +271,7 @@ pub fn metadata_from_path(path: &Path) -> Option<TrackMetadata> {
         artist: artist_name,
         album: album_name,
         track_number,
-        disc_number: 1,
+        disc_number,
         duration_seconds: 0,
         format: detect_format(path),
         sample_rate: 44100,
@@ -196,7 +280,30 @@ pub fn metadata_from_path(path: &Path) -> Option<TrackMetadata> {
         year,
         genre: Vec::new(),
         style: Vec::new(),
+        composer: None,
+        language: None,
+        bpm: None,
+        musical_key: None,
+        mood: None,
+        is_compilation: false,
+        replay_gain_track_gain: None,
+        replay_gain_track_peak: None,
+        replay_gain_album_gain: None,
+        replay_gain_album_peak: None,
+        musicbrainz_recording_id: None,
     })
+}
+
+/// Parse disc subfolder names like "CD1", "CD 1", "Disc 1", "Disc1"
+fn parse_disc_folder(name: &str) -> Option<i32> {
+    let lower = name.to_lowercase();
+    if lower.starts_with("cd") {
+        return lower[2..].trim().parse::<i32>().ok();
+    }
+    if lower.starts_with("disc") {
+        return lower[4..].trim().parse::<i32>().ok();
+    }
+    None
 }
 
 fn detect_format(path: &Path) -> String {
@@ -220,6 +327,20 @@ fn filename_without_ext(path: &Path) -> String {
         .and_then(|s| s.to_str())
         .unwrap_or("Unknown")
         .to_string()
+}
+
+/// Parse flat "Artist - Album (Year)" folder name
+fn parse_artist_album_dir(dir_name: &str) -> Option<(String, String, Option<i32>)> {
+    let sep_pos = dir_name.find(" - ")?;
+    let artist = dir_name[..sep_pos].trim().to_string();
+    let album_part = dir_name[sep_pos + 3..].trim();
+
+    if artist.is_empty() || album_part.is_empty() {
+        return None;
+    }
+
+    let (album, year) = parse_album_dir(album_part);
+    Some((artist, album, year))
 }
 
 fn parse_album_dir(dir_name: &str) -> (String, Option<i32>) {

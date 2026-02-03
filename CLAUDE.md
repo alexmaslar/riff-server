@@ -1,10 +1,6 @@
 # Riff Server
 
-A self-hosted music server (macOS menu bar app) for audiophiles. Rust backend + Swift macOS wrapper.
-
-## Documentation
-
-- [API Reference](./docs/API.md) — REST endpoints, auth, data model
+Rust backend + macOS menu bar app for the Riff music server.
 
 ## Project Structure
 
@@ -14,9 +10,6 @@ riff-server/
 ├── riff-server/        # Rust binary (Axum HTTP server, routes, middleware)
 ├── RiffApp/            # Swift macOS menu bar app
 ├── Cargo.toml          # Workspace root
-├── docs/
-│   └── API.md
-├── LICENSE
 └── README.md
 ```
 
@@ -38,18 +31,24 @@ cargo test
 cargo clippy
 ```
 
-## Git Workflow
+## Server Restart
 
-**Branching:**
-- `main` — Stable, release-ready
-- `feature/<name>` — New features
-- `fix/<name>` — Bug fixes
+After any change to `riff-core/` or `riff-server/` that affects runtime behavior (routes, config, enrichment logic, etc.), restart the dev server:
 
-**Commits:**
-- Use conventional commits: `type(scope): message`
-- Types: `feat`, `fix`, `refactor`, `docs`, `test`, `chore`
-- Scope: `core`, `server`, `macos`, `docs`
-- Keep commits small and focused
+```bash
+lsof -ti :8080 | xargs kill -9 2>/dev/null
+sleep 1
+cd /Users/amaslar/riff/riff-server && cargo run -p riff-server 2>&1 &
+```
+
+Wait ~5 seconds for it to start, then verify:
+```bash
+lsof -ti :8080 >/dev/null 2>&1 && echo "server running" || echo "failed"
+```
+
+## Commit Scopes
+
+`core`, `server`, `macos`, `docs`
 
 Examples:
 ```
@@ -58,31 +57,9 @@ fix(server): handle missing album art in stream response
 refactor(core): extract metadata parsing into separate module
 ```
 
-## Server Restart
-
-After any change to `riff-core/` or `riff-server/` that affects runtime behavior (routes, config, enrichment logic, etc.), restart the dev server:
-
-```bash
-lsof -ti :8080 | xargs kill -9 2>/dev/null
-sleep 1
-cd /Users/amaslar/riff-server && cargo run -p riff-server 2>&1 &
-```
-
-Wait ~5 seconds for it to start, then verify:
-```bash
-lsof -ti :8080 >/dev/null 2>&1 && echo "server running" || echo "failed"
-```
-
 ## Code Organization
 
 - Keep `riff-core` (library) separate from `riff-server` (binary) for testability
 - Scanner lives in `riff-core/src/scanner/`
 - Routes live in `riff-server/src/routes/`
 - Database migrations in `riff-core/migrations/`
-
-## Key Decisions
-
-- **No transcoding** — Serve FLAC/ALAC as-is, clients handle decoding
-- **Discogs for metadata** — Primary source; AI summaries are supplemental
-- **SQLite** — Single-file database, no external DB dependency
-- **Axum** — Async web framework with Tower middleware

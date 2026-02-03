@@ -1,6 +1,9 @@
 pub mod albums;
 pub mod artists;
 pub mod auth;
+pub mod favorites;
+pub mod history;
 pub mod library;
+pub mod playlists;
 pub mod tracks;
 pub mod users;

@@ -1,5 +1,8 @@
-use axum::{extract::State, Json};
-use riff_core::auth;
+use axum::{
+    extract::{Path, State},
+    Extension, Json,
+};
+use riff_core::auth::{self, Claims};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -74,4 +77,43 @@ pub async fn create_user(
         })),
         Err(e) => Json(json!({ "error": e.to_string() })),
     }
+}
+
+pub async fn delete_user(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<Claims>,
+    Path(user_id): Path<String>,
+) -> Json<Value> {
+    if claims.sub == user_id {
+        return Json(json!({ "error": "cannot delete yourself" }));
+    }
+
+    // Verify user exists
+    let exists = sqlx::query_as::<_, (i64,)>("SELECT COUNT(*) FROM users WHERE id = ?")
+        .bind(&user_id)
+        .fetch_one(&state.db)
+        .await;
+
+    match exists {
+        Ok((0,)) => return Json(json!({ "error": "user not found" })),
+        Err(e) => return Json(json!({ "error": e.to_string() })),
+        _ => {}
+    }
+
+    // Delete related data then the user
+    let queries = [
+        "DELETE FROM favorites WHERE user_id = ?",
+        "DELETE FROM play_history WHERE user_id = ?",
+        "DELETE FROM playlist_tracks WHERE playlist_id IN (SELECT id FROM playlists WHERE user_id = ?)",
+        "DELETE FROM playlists WHERE user_id = ?",
+        "DELETE FROM users WHERE id = ?",
+    ];
+
+    for query in queries {
+        if let Err(e) = sqlx::query(query).bind(&user_id).execute(&state.db).await {
+            return Json(json!({ "error": e.to_string() }));
+        }
+    }
+
+    Json(json!({ "status": "deleted" }))
 }

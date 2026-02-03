@@ -1,7 +1,8 @@
 use axum::{
     extract::{Path, Query, State},
-    Json,
+    Extension, Json,
 };
+use riff_core::auth::Claims;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -30,6 +31,7 @@ pub struct ArtistDetailResponse {
     pub bio: Option<String>,
     pub image_url: Option<String>,
     pub albums: Vec<AlbumSummary>,
+    pub is_favorited: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -86,6 +88,7 @@ pub async fn list_artists(
 
 pub async fn get_artist(
     State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<Claims>,
     Path(id): Path<String>,
 ) -> Json<Value> {
     let artist = sqlx::query_as::<_, (String, String, Option<String>, Option<String>)>(
@@ -119,11 +122,22 @@ pub async fn get_artist(
         })
         .collect();
 
+    let is_favorited = sqlx::query_as::<_, (i64,)>(
+        "SELECT COUNT(*) FROM favorites WHERE user_id = ? AND entity_type = 'artist' AND entity_id = ?",
+    )
+    .bind(&claims.sub)
+    .bind(&id)
+    .fetch_one(&state.db)
+    .await
+    .map(|(count,)| count > 0)
+    .unwrap_or(false);
+
     Json(json!(ArtistDetailResponse {
         id: artist.0,
         name: artist.1,
         bio: artist.2,
         image_url: artist.3,
         albums: album_summaries,
+        is_favorited,
     }))
 }

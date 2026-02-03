@@ -35,7 +35,12 @@ pub struct Album {
     pub catalog_number: Option<String>,
     pub cover_art_path: Option<String>,
     pub ai_summary: Option<String>,
+    pub metadata_status: String,
     pub added_at: NaiveDateTime,
+    pub country: Option<String>,
+    pub release_notes: Option<String>,
+    pub all_labels: Vec<String>,
+    pub is_compilation: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,4 +56,20 @@ pub struct Track {
     pub sample_rate: i32,
     pub bit_depth: i32,
     pub file_size_bytes: i64,
+    pub composer: Option<String>,
+    pub language: Option<String>,
+    pub bpm_tag: Option<f64>,
+    pub musical_key: Option<String>,
+    pub mood: Option<String>,
+    pub replay_gain_track_gain: Option<f64>,
+    pub replay_gain_track_peak: Option<f64>,
+    pub replay_gain_album_gain: Option<f64>,
+    pub replay_gain_album_peak: Option<f64>,
+    pub musicbrainz_recording_id: Option<String>,
+    pub bpm_analyzed: Option<f64>,
+    pub key_analyzed: Option<String>,
+    pub loudness_lufs: Option<f64>,
+    pub bliss_features: Option<String>,
+    pub analysis_status: String,
+    pub analyzed_at: Option<String>,
 }

@@ -34,6 +34,19 @@ pub struct ReleaseDetail {
     pub tracklist: Vec<DiscogsTrack>,
     #[serde(default)]
     pub extraartists: Vec<DiscogsExtraArtist>,
+    #[serde(default)]
+    pub country: Option<String>,
+    #[serde(default)]
+    pub notes: Option<String>,
+    #[serde(default)]
+    pub formats: Vec<DiscogsFormat>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DiscogsFormat {
+    pub name: String,
+    #[serde(default)]
+    pub descriptions: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -43,7 +56,7 @@ pub struct DiscogsExtraArtist {
     pub role: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, serde::Serialize)]
 pub struct Label {
     pub name: String,
     pub catno: Option<String>,
