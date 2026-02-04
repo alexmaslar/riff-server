@@ -2,6 +2,7 @@
 name = "riff-core"
 version = "0.1.0"
 edition = "2021"
+include = ["assets/**/*", "src/**/*", "migrations/**/*"]
 
 [dependencies]
 tokio = { workspace = true }
@@ -27,3 +28,6 @@ governor = "0.8"
 bliss-audio = { version = "0.11", default-features = false, features = ["aubio-static", "update-aubio-bindings", "symphonia-all"] }
 ebur128 = "0.1"
 stratum-dsp = "1.0"
+async-trait = "0.1"
+image = { version = "0.25", features = ["png", "jpeg"] }
+imageproc = "0.25"

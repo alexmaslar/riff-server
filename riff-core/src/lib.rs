@@ -1,4 +1,6 @@
+pub mod ai;
 pub mod analysis;
+pub mod artwork;
 pub mod auth;
 pub mod config;
 pub mod db;

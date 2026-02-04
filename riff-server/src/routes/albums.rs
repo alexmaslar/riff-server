@@ -50,6 +50,7 @@ pub struct AlbumDetailResponse {
     pub catalog_number: Option<String>,
     pub cover_art_path: Option<String>,
     pub ai_summary: Option<String>,
+    pub ai_rating: Option<f64>,
     pub metadata_status: String,
     pub added_at: String,
     pub country: Option<String>,
@@ -277,7 +278,7 @@ pub async fn get_album(
     Path(id): Path<String>,
 ) -> Json<Value> {
     let album_row = sqlx::query(
-        "SELECT a.id, a.title, a.artist_id, ar.name, a.year, a.genre, a.style, a.label, a.catalog_number, a.cover_art_path, a.ai_summary, a.metadata_status, a.added_at, a.country, a.release_notes, a.all_labels, a.is_compilation
+        "SELECT a.id, a.title, a.artist_id, ar.name, a.year, a.genre, a.style, a.label, a.catalog_number, a.cover_art_path, a.ai_summary, a.ai_rating, a.metadata_status, a.added_at, a.country, a.release_notes, a.all_labels, a.is_compilation
          FROM albums a JOIN artists ar ON a.artist_id = ar.id
          WHERE a.id = ?",
     )
@@ -347,8 +348,8 @@ pub async fn get_album(
 
     let genre_str: String = album_row.get(5);
     let style_str: String = album_row.get(6);
-    let all_labels_str: String = album_row.get(15);
-    let is_compilation_int: i32 = album_row.get(16);
+    let all_labels_str: String = album_row.get(16);
+    let is_compilation_int: i32 = album_row.get(17);
 
     Json(json!(AlbumDetailResponse {
         id: album_row.get(0),
@@ -362,10 +363,11 @@ pub async fn get_album(
         catalog_number: album_row.get(8),
         cover_art_path: album_row.get(9),
         ai_summary: album_row.get(10),
-        metadata_status: album_row.get(11),
-        added_at: album_row.get(12),
-        country: album_row.get(13),
-        release_notes: album_row.get(14),
+        ai_rating: album_row.get(11),
+        metadata_status: album_row.get(12),
+        added_at: album_row.get(13),
+        country: album_row.get(14),
+        release_notes: album_row.get(15),
         all_labels: serde_json::from_str(&all_labels_str).unwrap_or_default(),
         is_compilation: is_compilation_int != 0,
         tracks: track_summaries,
@@ -374,20 +376,29 @@ pub async fn get_album(
     }))
 }
 
+#[derive(Debug, Deserialize)]
+pub struct CoverParams {
+    pub effect: Option<String>,
+    pub size: Option<u32>,
+    pub hole: Option<bool>,
+}
+
 pub async fn get_cover(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    Query(params): Query<CoverParams>,
 ) -> Response {
-    let row = sqlx::query_as::<_, (Option<String>,)>(
-        "SELECT cover_art_path FROM albums WHERE id = ?",
+    // Fetch album cover path and play count
+    let row = sqlx::query_as::<_, (Option<String>, i64)>(
+        "SELECT cover_art_path, play_count FROM albums WHERE id = ?",
     )
     .bind(&id)
     .fetch_optional(&state.db)
     .await;
 
-    let cover_path = match row {
-        Ok(Some((Some(path),))) => path,
-        Ok(Some((None,))) => {
+    let (cover_path, play_count) = match row {
+        Ok(Some((Some(path), count))) => (path, count as u32),
+        Ok(Some((None, _))) => {
             return (StatusCode::NOT_FOUND, Json(json!({ "error": "no cover art" })))
                 .into_response()
         }
@@ -404,18 +415,172 @@ pub async fn get_cover(
         }
     };
 
-    let mime = if cover_path.ends_with(".png") {
-        "image/png"
+    // Parse effect parameters
+    let effect = params.effect.as_deref().unwrap_or("none");
+    let size = params.size.unwrap_or(1024).clamp(256, 2048);
+    let with_hole = params.hole.unwrap_or(false);
+
+    // Check if we need to generate an effect
+    if effect == "none" && params.size.is_none() {
+        // Serve raw album art unchanged
+        let mime = if cover_path.ends_with(".png") {
+            "image/png"
+        } else {
+            "image/jpeg"
+        };
+
+        let file = match File::open(&cover_path).await {
+            Ok(f) => f,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": format!("file open failed: {}", e) })),
+                )
+                    .into_response()
+            }
+        };
+
+        let stream = tokio_util::io::ReaderStream::new(file);
+
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, mime)
+            .header(header::CACHE_CONTROL, "public, max-age=86400")
+            .body(Body::from_stream(stream))
+            .unwrap();
+    }
+
+    // Build cache key
+    let cache_key = if with_hole && effect == "vinyl" {
+        format!("{}_hole", effect)
     } else {
-        "image/jpeg"
+        effect.to_string()
     };
 
-    let file = match File::open(&cover_path).await {
+    // Check cache first
+    if let Some(cached_path) = riff_core::artwork::check_cache(&state.db, &id, &cache_key, size).await {
+        let file = match File::open(&cached_path).await {
+            Ok(f) => f,
+            Err(_) => {
+                // Cache miss - file was deleted, continue to generation
+                let _ = riff_core::artwork::cache::clear_album_cache(&state.db, &id).await;
+                return generate_and_serve(&state, &id, &cover_path, effect, size, with_hole, play_count).await;
+            }
+        };
+
+        let stream = tokio_util::io::ReaderStream::new(file);
+
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "image/png")
+            .header(header::CACHE_CONTROL, "public, max-age=86400")
+            .body(Body::from_stream(stream))
+            .unwrap();
+    }
+
+    // Generate effect
+    generate_and_serve(&state, &id, &cover_path, effect, size, with_hole, play_count).await
+}
+
+async fn generate_and_serve(
+    state: &Arc<AppState>,
+    album_id: &str,
+    cover_path: &str,
+    effect: &str,
+    size: u32,
+    with_hole: bool,
+    play_count: u32,
+) -> Response {
+    use riff_core::artwork::generator::{generate_effect, EffectType};
+
+    // Parse effect type
+    let effect_type = match effect {
+        "vinyl" => EffectType::Vinyl { with_hole },
+        "wrapped" => EffectType::Wrapped,
+        "highlights" => EffectType::Highlights,
+        _ => EffectType::None,
+    };
+
+    // Generate effect (CPU-bound, runs in blocking pool)
+    let result = generate_effect(
+        std::path::Path::new(cover_path),
+        effect_type,
+        size,
+        play_count,
+        with_hole,
+    )
+    .await;
+
+    let image = match result {
+        Ok(img) => img,
+        Err(e) => {
+            tracing::error!("Effect generation failed: {}", e);
+            // Fallback to raw album art
+            let file = match File::open(cover_path).await {
+                Ok(f) => f,
+                Err(e) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({ "error": format!("file open failed: {}", e) })),
+                    )
+                        .into_response()
+                }
+            };
+
+            let stream = tokio_util::io::ReaderStream::new(file);
+            let mime = if cover_path.ends_with(".png") {
+                "image/png"
+            } else {
+                "image/jpeg"
+            };
+
+            return Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, mime)
+                .header(header::CACHE_CONTROL, "public, max-age=86400")
+                .body(Body::from_stream(stream))
+                .unwrap();
+        }
+    };
+
+    // Build cache key
+    let cache_key = if with_hole && effect == "vinyl" {
+        format!("{}_hole", effect)
+    } else {
+        effect.to_string()
+    };
+
+    // Store in cache
+    let cached_path = match riff_core::artwork::store_cache(&state.db, album_id, &cache_key, size, &image).await {
+        Ok(path) => path,
+        Err(e) => {
+            tracing::warn!("Failed to store cache: {}", e);
+            // Continue serving even if cache fails
+            let mut bytes = Vec::new();
+            if let Err(e) = image.write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png) {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": format!("image encoding failed: {}", e) })),
+                )
+                    .into_response();
+            }
+
+            return Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, "image/png")
+                .header(header::CACHE_CONTROL, "public, max-age=86400")
+                .body(Body::from(bytes))
+                .unwrap();
+        }
+    };
+
+    // Serve from cached file
+    let file = match File::open(&cached_path).await {
         Ok(f) => f,
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": format!("file open failed: {}", e) })),
+                Json(json!({ "error": format!("cached file open failed: {}", e) })),
             )
                 .into_response()
         }
@@ -425,8 +590,35 @@ pub async fn get_cover(
 
     Response::builder()
         .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, mime)
+        .header(header::CONTENT_TYPE, "image/png")
         .header(header::CACHE_CONTROL, "public, max-age=86400")
         .body(Body::from_stream(stream))
         .unwrap()
+}
+
+pub async fn increment_play_count(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let result = sqlx::query("UPDATE albums SET play_count = play_count + 1 WHERE id = ?")
+        .bind(&id)
+        .execute(&state.db)
+        .await;
+
+    match result {
+        Ok(r) => {
+            if r.rows_affected() == 0 {
+                Err((
+                    StatusCode::NOT_FOUND,
+                    Json(json!({ "error": "album not found" })),
+                ))
+            } else {
+                Ok(Json(json!({ "success": true })))
+            }
+        }
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )),
+    }
 }

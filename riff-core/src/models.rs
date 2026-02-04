@@ -41,6 +41,7 @@ pub struct Album {
     pub release_notes: Option<String>,
     pub all_labels: Vec<String>,
     pub is_compilation: bool,
+    pub play_count: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

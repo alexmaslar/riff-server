@@ -9,7 +9,7 @@ use axum::{
     routing::{delete, get, post},
     Json, Router,
 };
-use riff_core::{analysis, auth, config::Config, db, discogs, scanner};
+use riff_core::{ai, analysis, auth, config::Config, db, discogs, scanner};
 use serde_json::{json, Value};
 use sqlx::SqlitePool;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -23,6 +23,8 @@ pub struct AppState {
     pub config: Config,
     pub enrichment_running: AtomicBool,
     pub analysis_running: AtomicBool,
+    pub summarization_running: AtomicBool,
+    pub rating_running: AtomicBool,
 }
 
 #[tokio::main]
@@ -38,6 +40,12 @@ async fn main() -> Result<()> {
         tracing::info!("discogs api token loaded");
     } else {
         tracing::warn!("no discogs api token configured");
+    }
+
+    if config.metadata.ai.enabled {
+        tracing::info!("AI summarization enabled (provider: {:?})", config.metadata.ai.provider);
+    } else {
+        tracing::debug!("AI summarization not configured");
     }
 
     let pool = db::init_pool().await?;
@@ -67,6 +75,8 @@ async fn main() -> Result<()> {
         config: config.clone(),
         enrichment_running: AtomicBool::new(false),
         analysis_running: AtomicBool::new(false),
+        summarization_running: AtomicBool::new(false),
+        rating_running: AtomicBool::new(false),
     });
 
     // Auto-enrich from Discogs in background, then chain analysis
@@ -87,7 +97,39 @@ async fn main() -> Result<()> {
                 }
                 enrich_state.enrichment_running.store(false, Ordering::SeqCst);
 
-                // Chain analysis after enrichment
+                // Chain summarization after enrichment
+                if enrich_state.config.metadata.ai.enabled {
+                    if enrich_state.summarization_running.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+                        match ai::summarize_library(&enrich_state.db, &enrich_state.config.metadata.ai).await {
+                            Ok(result) => {
+                                tracing::info!(
+                                    "summarization complete: {} summarized, {} errors",
+                                    result.albums_summarized,
+                                    result.errors.len(),
+                                );
+                            }
+                            Err(e) => tracing::warn!("background summarization failed: {}", e),
+                        }
+                        enrich_state.summarization_running.store(false, Ordering::SeqCst);
+                    }
+
+                    // Chain rating after summarization
+                    if enrich_state.rating_running.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+                        match ai::rate_library(&enrich_state.db, &enrich_state.config.metadata.ai).await {
+                            Ok(result) => {
+                                tracing::info!(
+                                    "rating complete: {} rated, {} errors",
+                                    result.albums_rated,
+                                    result.errors.len(),
+                                );
+                            }
+                            Err(e) => tracing::warn!("background rating failed: {}", e),
+                        }
+                        enrich_state.rating_running.store(false, Ordering::SeqCst);
+                    }
+                }
+
+                // Chain analysis after rating
                 if enrich_state.analysis_running.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
                     match analysis::analyze_library(&enrich_state.db).await {
                         Ok(result) => {
@@ -105,11 +147,44 @@ async fn main() -> Result<()> {
             });
         }
     } else {
-        // No Discogs configured — run analysis directly
-        if state.analysis_running.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
-            let analysis_state = state.clone();
-            tokio::spawn(async move {
-                match analysis::analyze_library(&analysis_state.db).await {
+        // No Discogs configured — run summarization first, then analysis
+        let startup_state = state.clone();
+        tokio::spawn(async move {
+            // Summarization first (user-visible)
+            if startup_state.config.metadata.ai.enabled {
+                if startup_state.summarization_running.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+                    match ai::summarize_library(&startup_state.db, &startup_state.config.metadata.ai).await {
+                        Ok(result) => {
+                            tracing::info!(
+                                "summarization complete: {} summarized, {} errors",
+                                result.albums_summarized,
+                                result.errors.len(),
+                            );
+                        }
+                        Err(e) => tracing::warn!("background summarization failed: {}", e),
+                    }
+                    startup_state.summarization_running.store(false, Ordering::SeqCst);
+                }
+
+                // Then rating
+                if startup_state.rating_running.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+                    match ai::rate_library(&startup_state.db, &startup_state.config.metadata.ai).await {
+                        Ok(result) => {
+                            tracing::info!(
+                                "rating complete: {} rated, {} errors",
+                                result.albums_rated,
+                                result.errors.len(),
+                            );
+                        }
+                        Err(e) => tracing::warn!("background rating failed: {}", e),
+                    }
+                    startup_state.rating_running.store(false, Ordering::SeqCst);
+                }
+            }
+
+            // Then analysis (background-only)
+            if startup_state.analysis_running.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+                match analysis::analyze_library(&startup_state.db).await {
                     Ok(result) => {
                         tracing::info!(
                             "analysis complete: {} analyzed, {} failed, {} skipped",
@@ -120,9 +195,9 @@ async fn main() -> Result<()> {
                     }
                     Err(e) => tracing::warn!("background analysis failed: {}", e),
                 }
-                analysis_state.analysis_running.store(false, Ordering::SeqCst);
-            });
-        }
+                startup_state.analysis_running.store(false, Ordering::SeqCst);
+            }
+        });
     }
 
     let cors = CorsLayer::new()
@@ -143,6 +218,7 @@ async fn main() -> Result<()> {
         .route("/artists/{id}", get(routes::artists::get_artist))
         .route("/albums", get(routes::albums::list_albums))
         .route("/albums/{id}", get(routes::albums::get_album))
+        .route("/albums/{id}/play", post(routes::albums::increment_play_count))
         .route("/tracks/{id}/stream", get(routes::tracks::stream_track))
         .route("/tracks/{id}/download", get(routes::tracks::download_track))
         .route("/playlists", get(routes::playlists::list_playlists).post(routes::playlists::create_playlist))
@@ -167,6 +243,10 @@ async fn main() -> Result<()> {
         .route("/library/enrich", post(routes::library::trigger_enrichment))
         .route("/library/enrich/{album_id}", post(routes::library::enrich_album))
         .route("/library/analyze", post(routes::library::trigger_analysis))
+        .route("/library/summarize", post(routes::library::trigger_summarization))
+        .route("/library/summarize/{album_id}", post(routes::library::summarize_album))
+        .route("/library/rate", post(routes::library::trigger_rating))
+        .route("/library/rate/{album_id}", post(routes::library::rate_album))
         .route("/library/stats", get(routes::library::library_stats))
         .route("/users", get(routes::users::list_users))
         .route("/users", post(routes::users::create_user))
