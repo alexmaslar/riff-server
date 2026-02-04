@@ -27,6 +27,66 @@ pub struct AppState {
     pub rating_running: AtomicBool,
 }
 
+async fn pregenerate_album_art(db: &SqlitePool) {
+    use riff_core::artwork::generator::{generate_effect, EffectType};
+    use std::path::Path;
+
+    tracing::info!("pre-generating album art effects");
+
+    // Get albums with cover art
+    let albums = sqlx::query_as::<_, (String, String, i64)>(
+        "SELECT id, cover_art_path, play_count FROM albums
+         WHERE cover_art_path IS NOT NULL"
+    )
+    .fetch_all(db)
+    .await
+    .unwrap_or_default();
+
+    let total = albums.len();
+    let mut generated = 0;
+    let mut skipped = 0;
+    let mut failed = 0;
+
+    for (album_id, cover_path, play_count) in albums {
+        // Check if vinyl effect already cached
+        if riff_core::artwork::check_cache(db, &album_id, "vinyl_hole", 512).await.is_none() {
+            match generate_effect(
+                Path::new(&cover_path),
+                EffectType::Vinyl { with_hole: true },
+                512,
+                play_count as u32,
+                true,
+            )
+            .await
+            {
+                Ok(img) => {
+                    match riff_core::artwork::store_cache(db, &album_id, "vinyl_hole", 512, &img).await {
+                        Ok(_) => generated += 1,
+                        Err(e) => {
+                            tracing::warn!("failed to cache vinyl for {}: {}", album_id, e);
+                            failed += 1;
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("failed to generate vinyl for {}: {}", album_id, e);
+                    failed += 1;
+                }
+            }
+        } else {
+            skipped += 1;
+        }
+    }
+
+    tracing::info!(
+        "album art pre-generation complete: {} generated, {} skipped, {} failed (total: {})",
+        generated,
+        skipped,
+        failed,
+        total
+    );
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -144,6 +204,9 @@ async fn main() -> Result<()> {
                     }
                     enrich_state.analysis_running.store(false, Ordering::SeqCst);
                 }
+
+                // Pre-generate album art effects
+                pregenerate_album_art(&enrich_state.db).await;
             });
         }
     } else {
@@ -197,6 +260,9 @@ async fn main() -> Result<()> {
                 }
                 startup_state.analysis_running.store(false, Ordering::SeqCst);
             }
+
+            // Pre-generate album art effects
+            pregenerate_album_art(&startup_state.db).await;
         });
     }
 
