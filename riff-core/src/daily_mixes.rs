@@ -1,14 +1,33 @@
 use anyhow::Result;
-use chrono::{Datelike, NaiveDate, Utc};
+use chrono::{NaiveDate, NaiveDateTime, Utc};
 use sqlx::{Row, SqlitePool};
+use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 const MAX_TRACKS_PER_MIX: usize = 25;
 const MAX_TRACKS_PER_ALBUM: usize = 3;
 const MAX_TRACKS_PER_ARTIST: usize = 5;
 const MIN_DISTINCT_ARTISTS: usize = 3;
+
+// Scoring weights
+const SCORE_FAV_TRACK: f64 = 3.0;
+const SCORE_PLAY_FREQ_CAP: f64 = 2.0;
+const SCORE_SKIP_MAX: f64 = 3.0;
+const SCORE_RECENCY_MAX: f64 = 2.0;
+const SCORE_RECENCY_DAYS: f64 = 7.0;
+const SCORE_COOLDOWN_PENALTY: f64 = 3.0;
+const SCORE_COOLDOWN_DAYS: i64 = 3;
+const SCORE_COMPILATION_PENALTY: f64 = 1.5;
+const SCORE_BLISS_MAX: f64 = 3.0;
+const SCORE_BLISS_SCALE: f64 = 0.6;
+
+// Flow ordering weights
+const FLOW_BLISS_WEIGHT: f64 = 0.8;
+const FLOW_MOOD_PENALTY: f64 = 0.3;
+const FLOW_LOUDNESS_ARC_WEIGHT: f64 = 0.15;
 
 struct MixTrack {
     id: String,
@@ -17,6 +36,67 @@ struct MixTrack {
     bpm: Option<f64>,
     key: Option<String>,
     loudness: Option<f64>,
+    bliss: Option<Vec<f64>>,
+    duration_seconds: Option<i32>,
+    mood: Option<String>,
+}
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+fn parse_bliss(row: &sqlx::sqlite::SqliteRow) -> Option<Vec<f64>> {
+    let json_str: Option<String> = row.try_get("bliss_features").ok().flatten();
+    json_str.and_then(|s| serde_json::from_str(&s).ok())
+}
+
+fn bliss_euclidean_distance(a: &[f64], b: &[f64]) -> f64 {
+    if a.len() != b.len() {
+        return f64::MAX;
+    }
+    a.iter()
+        .zip(b.iter())
+        .map(|(x, y)| (x - y).powi(2))
+        .sum::<f64>()
+        .sqrt()
+}
+
+/// Deterministic seed index from (user_id, date_str) — avoids annual cycle repeats
+/// and gives different users different seeds on the same day.
+fn seed_index(user_id: &str, date_str: &str, len: usize) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    let mut hasher = std::hash::DefaultHasher::new();
+    user_id.hash(&mut hasher);
+    date_str.hash(&mut hasher);
+    let h = hasher.finish();
+    (h as usize) % len
+}
+
+fn compute_centroid(vectors: &[&[f64]]) -> Option<Vec<f64>> {
+    if vectors.is_empty() {
+        return None;
+    }
+    let dim = vectors[0].len();
+    if dim == 0 {
+        return None;
+    }
+    let mut centroid = vec![0.0; dim];
+    let mut count = 0usize;
+    for v in vectors {
+        if v.len() == dim {
+            for (i, val) in v.iter().enumerate() {
+                centroid[i] += val;
+            }
+            count += 1;
+        }
+    }
+    if count == 0 {
+        return None;
+    }
+    for val in &mut centroid {
+        *val /= count as f64;
+    }
+    Some(centroid)
 }
 
 /// Generate all 4 daily mixes for a single user.
@@ -45,28 +125,26 @@ pub async fn generate_daily_mixes(pool: &SqlitePool, user_id: &str, date: NaiveD
         .execute(pool)
         .await?;
 
-    let day_of_year = date.ordinal() as usize;
-
     // Collect IDs already used across mixes today (for cross-mix dedup)
     let mut used_track_ids: Vec<String> = Vec::new();
 
     // Mix 1: Artist Mix
-    if let Err(e) = generate_artist_mix(pool, user_id, &date_str, day_of_year, &mut used_track_ids).await {
+    if let Err(e) = generate_artist_mix(pool, user_id, &date_str, &mut used_track_ids).await {
         warn!("artist mix generation failed for {user_id}: {e}");
     }
 
     // Mix 2: Genre Mix
-    if let Err(e) = generate_genre_mix(pool, user_id, &date_str, day_of_year, &mut used_track_ids).await {
+    if let Err(e) = generate_genre_mix(pool, user_id, &date_str, &mut used_track_ids).await {
         warn!("genre mix generation failed for {user_id}: {e}");
     }
 
     // Mix 3: Deep Cuts
-    if let Err(e) = generate_deep_cuts_mix(pool, user_id, &date_str, day_of_year, &mut used_track_ids).await {
+    if let Err(e) = generate_deep_cuts_mix(pool, user_id, &date_str, &mut used_track_ids).await {
         warn!("deep cuts mix generation failed for {user_id}: {e}");
     }
 
     // Mix 4: Decade Mix
-    if let Err(e) = generate_decade_mix(pool, user_id, &date_str, day_of_year, &mut used_track_ids).await {
+    if let Err(e) = generate_decade_mix(pool, user_id, &date_str, &mut used_track_ids).await {
         warn!("decade mix generation failed for {user_id}: {e}");
     }
 
@@ -126,7 +204,6 @@ async fn generate_artist_mix(
     pool: &SqlitePool,
     user_id: &str,
     date_str: &str,
-    day_of_year: usize,
     used_track_ids: &mut Vec<String>,
 ) -> Result<()> {
     // Find top-played artists for this user
@@ -162,14 +239,14 @@ async fn generate_artist_mix(
             return Ok(());
         }
 
-        let idx = day_of_year % fallback_artists.len();
+        let idx = seed_index(user_id, date_str, fallback_artists.len());
         let artist_id: String = fallback_artists[idx].get("id");
         let artist_name: String = fallback_artists[idx].get("name");
 
         return build_artist_mix(pool, user_id, date_str, &artist_id, &artist_name, used_track_ids).await;
     }
 
-    let idx = day_of_year % top_artists.len();
+    let idx = seed_index(user_id, date_str, top_artists.len());
     let artist_id: String = top_artists[idx].get("id");
     let artist_name: String = top_artists[idx].get("name");
 
@@ -208,8 +285,9 @@ async fn build_artist_mix(
             "SELECT t.id, t.title, t.album_id, a.artist_id, ar.name as artist_name,
                     t.duration_seconds, t.bpm_analyzed, t.bpm_tag,
                     t.key_analyzed, t.loudness_lufs,
+                    t.bliss_features, t.mood,
                     COALESCE(a.ai_rating, 5.0) as rating,
-                    a.play_count
+                    a.play_count, a.is_compilation
              FROM tracks t
              JOIN albums a ON t.album_id = a.id
              JOIN artists ar ON a.artist_id = ar.id
@@ -228,8 +306,9 @@ async fn build_artist_mix(
             "SELECT t.id, t.title, t.album_id, a.artist_id, ar.name as artist_name,
                     t.duration_seconds, t.bpm_analyzed, t.bpm_tag,
                     t.key_analyzed, t.loudness_lufs,
+                    t.bliss_features, t.mood,
                     COALESCE(a.ai_rating, 5.0) as rating,
-                    a.play_count
+                    a.play_count, a.is_compilation
              FROM tracks t
              JOIN albums a ON t.album_id = a.id
              JOIN artists ar ON a.artist_id = ar.id
@@ -259,13 +338,16 @@ async fn build_artist_mix(
         genres.iter().take(3).cloned().collect::<Vec<_>>().join(", ")
     };
 
-    let selected = score_and_select(
-        &candidate_tracks,
+    let artist_centroid = compute_artist_bliss_centroid(pool, seed_artist_id).await?;
+    let ctx = ScoringContext {
         pool,
         user_id,
+        date_str,
         used_track_ids,
-    )
-    .await?;
+        compilation_penalty: SCORE_COMPILATION_PENALTY,
+        bliss_centroid: artist_centroid.as_deref(),
+    };
+    let selected = score_and_select(&candidate_tracks, &ctx).await?;
 
     if selected.is_empty() {
         return Ok(());
@@ -293,7 +375,6 @@ async fn generate_genre_mix(
     pool: &SqlitePool,
     user_id: &str,
     date_str: &str,
-    day_of_year: usize,
     used_track_ids: &mut Vec<String>,
 ) -> Result<()> {
     // Find most-played genres
@@ -332,7 +413,7 @@ async fn generate_genre_mix(
         return Ok(());
     }
 
-    let idx = day_of_year % genres.len();
+    let idx = seed_index(user_id, date_str, genres.len());
     let seed_genre = &genres[idx];
 
     // Get tracks from this genre, diverse artists
@@ -340,8 +421,9 @@ async fn generate_genre_mix(
         "SELECT t.id, t.title, t.album_id, a.artist_id, ar.name as artist_name,
                 t.duration_seconds, t.bpm_analyzed, t.bpm_tag,
                 t.key_analyzed, t.loudness_lufs,
+                t.bliss_features, t.mood,
                 COALESCE(a.ai_rating, 5.0) as rating,
-                a.play_count
+                a.play_count, a.is_compilation
          FROM tracks t
          JOIN albums a ON t.album_id = a.id
          JOIN artists ar ON a.artist_id = ar.id
@@ -360,7 +442,15 @@ async fn generate_genre_mix(
     .fetch_all(pool)
     .await?;
 
-    let selected = score_and_select(&candidate_tracks, pool, user_id, used_track_ids).await?;
+    let ctx = ScoringContext {
+        pool,
+        user_id,
+        date_str,
+        used_track_ids,
+        compilation_penalty: 0.0,
+        bliss_centroid: None,
+    };
+    let selected = score_and_select(&candidate_tracks, &ctx).await?;
 
     if selected.is_empty() {
         return Ok(());
@@ -385,7 +475,6 @@ async fn generate_deep_cuts_mix(
     pool: &SqlitePool,
     user_id: &str,
     date_str: &str,
-    _day_of_year: usize,
     used_track_ids: &mut Vec<String>,
 ) -> Result<()> {
     // Tracks from well-rated albums that have never been played by this user
@@ -393,8 +482,9 @@ async fn generate_deep_cuts_mix(
         "SELECT t.id, t.title, t.album_id, a.artist_id, ar.name as artist_name,
                 t.duration_seconds, t.bpm_analyzed, t.bpm_tag,
                 t.key_analyzed, t.loudness_lufs,
+                t.bliss_features, t.mood,
                 COALESCE(a.ai_rating, 5.0) as rating,
-                a.play_count
+                a.play_count, a.is_compilation
          FROM tracks t
          JOIN albums a ON t.album_id = a.id
          JOIN artists ar ON a.artist_id = ar.id
@@ -410,14 +500,17 @@ async fn generate_deep_cuts_mix(
     .fetch_all(pool)
     .await?;
 
+    let user_centroid = compute_user_bliss_centroid(pool, user_id).await?;
+
     if candidate_tracks.is_empty() {
         // Fallback: rarely played tracks
         let fallback = sqlx::query(
             "SELECT t.id, t.title, t.album_id, a.artist_id, ar.name as artist_name,
                     t.duration_seconds, t.bpm_analyzed, t.bpm_tag,
                     t.key_analyzed, t.loudness_lufs,
+                    t.bliss_features, t.mood,
                     COALESCE(a.ai_rating, 5.0) as rating,
-                    a.play_count
+                    a.play_count, a.is_compilation
              FROM tracks t
              JOIN albums a ON t.album_id = a.id
              JOIN artists ar ON a.artist_id = ar.id
@@ -428,7 +521,15 @@ async fn generate_deep_cuts_mix(
         .fetch_all(pool)
         .await?;
 
-        let selected = score_and_select(&fallback, pool, user_id, used_track_ids).await?;
+        let ctx = ScoringContext {
+            pool,
+            user_id,
+            date_str,
+            used_track_ids,
+            compilation_penalty: 0.0,
+            bliss_centroid: user_centroid.as_deref(),
+        };
+        let selected = score_and_select(&fallback, &ctx).await?;
         if selected.is_empty() {
             return Ok(());
         }
@@ -443,7 +544,15 @@ async fn generate_deep_cuts_mix(
         return Ok(());
     }
 
-    let selected = score_and_select(&candidate_tracks, pool, user_id, used_track_ids).await?;
+    let ctx = ScoringContext {
+        pool,
+        user_id,
+        date_str,
+        used_track_ids,
+        compilation_penalty: 0.0,
+        bliss_centroid: user_centroid.as_deref(),
+    };
+    let selected = score_and_select(&candidate_tracks, &ctx).await?;
     if selected.is_empty() {
         return Ok(());
     }
@@ -464,7 +573,6 @@ async fn generate_decade_mix(
     pool: &SqlitePool,
     user_id: &str,
     date_str: &str,
-    day_of_year: usize,
     used_track_ids: &mut Vec<String>,
 ) -> Result<()> {
     // Find most-played decades
@@ -503,7 +611,7 @@ async fn generate_decade_mix(
         return Ok(());
     }
 
-    let idx = day_of_year % decades.len();
+    let idx = seed_index(user_id, date_str, decades.len());
     let seed_decade = decades[idx];
     let decade_end = seed_decade + 9;
 
@@ -511,8 +619,9 @@ async fn generate_decade_mix(
         "SELECT t.id, t.title, t.album_id, a.artist_id, ar.name as artist_name,
                 t.duration_seconds, t.bpm_analyzed, t.bpm_tag,
                 t.key_analyzed, t.loudness_lufs,
+                t.bliss_features, t.mood,
                 COALESCE(a.ai_rating, 5.0) as rating,
-                a.play_count
+                a.play_count, a.is_compilation
          FROM tracks t
          JOIN albums a ON t.album_id = a.id
          JOIN artists ar ON a.artist_id = ar.id
@@ -525,7 +634,15 @@ async fn generate_decade_mix(
     .fetch_all(pool)
     .await?;
 
-    let selected = score_and_select(&candidate_tracks, pool, user_id, used_track_ids).await?;
+    let ctx = ScoringContext {
+        pool,
+        user_id,
+        date_str,
+        used_track_ids,
+        compilation_penalty: 0.0,
+        bliss_centroid: None,
+    };
+    let selected = score_and_select(&candidate_tracks, &ctx).await?;
     if selected.is_empty() {
         return Ok(());
     }
@@ -553,24 +670,42 @@ struct ScoredTrack {
     bpm: Option<f64>,
     key: Option<String>,
     loudness: Option<f64>,
+    bliss: Option<Vec<f64>>,
+    duration_seconds: Option<i32>,
+    mood: Option<String>,
+    is_compilation: bool,
+}
+
+struct ScoringContext<'a> {
+    pool: &'a SqlitePool,
+    user_id: &'a str,
+    date_str: &'a str,
+    used_track_ids: &'a [String],
+    compilation_penalty: f64,
+    bliss_centroid: Option<&'a [f64]>,
+}
+
+/// Per-track play statistics from play_history.
+struct PlayStats {
+    completed_plays: u32,
+    total_plays: u32,
+    last_played: Option<NaiveDateTime>,
 }
 
 async fn score_and_select(
     candidate_rows: &[sqlx::sqlite::SqliteRow],
-    pool: &SqlitePool,
-    user_id: &str,
-    used_track_ids: &[String],
+    ctx: &ScoringContext<'_>,
 ) -> Result<Vec<MixTrack>> {
     if candidate_rows.is_empty() {
         return Ok(Vec::new());
     }
 
-    // Pre-fetch user's favorited album and artist IDs
+    // Pre-fetch user's favorited album, artist, and track IDs
     let fav_albums: Vec<String> = sqlx::query_as::<_, (String,)>(
         "SELECT entity_id FROM favorites WHERE user_id = ? AND entity_type = 'album'",
     )
-    .bind(user_id)
-    .fetch_all(pool)
+    .bind(ctx.user_id)
+    .fetch_all(ctx.pool)
     .await?
     .into_iter()
     .map(|r| r.0)
@@ -579,28 +714,81 @@ async fn score_and_select(
     let fav_artists: Vec<String> = sqlx::query_as::<_, (String,)>(
         "SELECT entity_id FROM favorites WHERE user_id = ? AND entity_type = 'artist'",
     )
-    .bind(user_id)
-    .fetch_all(pool)
+    .bind(ctx.user_id)
+    .fetch_all(ctx.pool)
     .await?
     .into_iter()
     .map(|r| r.0)
     .collect();
 
-    // Pre-fetch played track IDs
-    let played_tracks: Vec<String> = sqlx::query_as::<_, (String,)>(
-        "SELECT DISTINCT track_id FROM play_history WHERE user_id = ?",
+    let fav_tracks: Vec<String> = sqlx::query_as::<_, (String,)>(
+        "SELECT entity_id FROM favorites WHERE user_id = ? AND entity_type = 'track'",
     )
-    .bind(user_id)
-    .fetch_all(pool)
+    .bind(ctx.user_id)
+    .fetch_all(ctx.pool)
     .await?
     .into_iter()
     .map(|r| r.0)
     .collect();
 
-    let played_set: std::collections::HashSet<&str> = played_tracks.iter().map(|s| s.as_str()).collect();
-    let fav_album_set: std::collections::HashSet<&str> = fav_albums.iter().map(|s| s.as_str()).collect();
-    let fav_artist_set: std::collections::HashSet<&str> = fav_artists.iter().map(|s| s.as_str()).collect();
-    let used_set: std::collections::HashSet<&str> = used_track_ids.iter().map(|s| s.as_str()).collect();
+    // Pre-fetch play stats per track for this user
+    let play_stat_rows = sqlx::query(
+        "SELECT track_id,
+                SUM(completed) as completed_plays,
+                COUNT(*) as total_plays,
+                MAX(played_at) as last_played
+         FROM play_history
+         WHERE user_id = ?
+         GROUP BY track_id",
+    )
+    .bind(ctx.user_id)
+    .fetch_all(ctx.pool)
+    .await?;
+
+    let mut play_stats: HashMap<String, PlayStats> = HashMap::new();
+    for row in &play_stat_rows {
+        let track_id: String = row.get("track_id");
+        let completed_plays: i64 = row.get("completed_plays");
+        let total_plays: i64 = row.get("total_plays");
+        let last_played_str: Option<String> = row.try_get("last_played").ok().flatten();
+        let last_played = last_played_str.and_then(|s| {
+            NaiveDateTime::parse_from_str(&s, "%Y-%m-%d %H:%M:%S").ok()
+        });
+        play_stats.insert(track_id, PlayStats {
+            completed_plays: completed_plays as u32,
+            total_plays: total_plays as u32,
+            last_played,
+        });
+    }
+
+    // Pre-fetch tracks from recent mixes (cooldown)
+    let cooldown_tracks: HashSet<String> = sqlx::query_as::<_, (String,)>(
+        "SELECT dmt.track_id
+         FROM daily_mix_tracks dmt
+         JOIN daily_mixes dm ON dmt.mix_id = dm.id
+         WHERE dm.user_id = ?
+           AND dm.mix_date >= date(?, '-' || ? || ' days')
+           AND dm.mix_date < ?",
+    )
+    .bind(ctx.user_id)
+    .bind(ctx.date_str)
+    .bind(SCORE_COOLDOWN_DAYS)
+    .bind(ctx.date_str)
+    .fetch_all(ctx.pool)
+    .await?
+    .into_iter()
+    .map(|r| r.0)
+    .collect();
+
+    let fav_album_set: HashSet<&str> = fav_albums.iter().map(|s| s.as_str()).collect();
+    let fav_artist_set: HashSet<&str> = fav_artists.iter().map(|s| s.as_str()).collect();
+    let fav_track_set: HashSet<&str> = fav_tracks.iter().map(|s| s.as_str()).collect();
+    let used_set: HashSet<&str> = ctx.used_track_ids.iter().map(|s| s.as_str()).collect();
+
+    let now = ctx.date_str.parse::<NaiveDate>()
+        .unwrap_or_else(|_| Utc::now().date_naive())
+        .and_hms_opt(0, 0, 0)
+        .unwrap_or_else(|| Utc::now().naive_utc());
 
     let mut scored: Vec<ScoredTrack> = candidate_rows
         .iter()
@@ -614,40 +802,100 @@ async fn score_and_select(
             let bpm = bpm_analyzed.or(bpm_tag);
             let key: Option<String> = row.try_get("key_analyzed").ok().flatten();
             let loudness: Option<f64> = row.try_get("loudness_lufs").ok().flatten();
+            let bliss = parse_bliss(row);
+            let duration_seconds: Option<i32> = row.try_get("duration_seconds").ok().flatten();
+            let mood: Option<String> = row.try_get("mood").ok().flatten();
+            let is_compilation: bool = row.try_get::<i32, _>("is_compilation")
+                .ok()
+                .map(|v| v != 0)
+                .unwrap_or(false);
 
-            // Base score from AI rating (0-10 normalized)
+            // Base score from AI rating (0-10)
             let mut score = rating;
 
-            // Bonus for favorited album/artist
+            // Favorites bonuses
             if fav_album_set.contains(album_id.as_str()) {
                 score += 2.0;
             }
             if fav_artist_set.contains(artist_id.as_str()) {
                 score += 2.0;
             }
+            if fav_track_set.contains(id.as_str()) {
+                score += SCORE_FAV_TRACK;
+            }
 
-            // Bonus for unplayed tracks (discovery)
-            if !played_set.contains(id.as_str()) {
+            // Play frequency & skip penalty
+            if let Some(stats) = play_stats.get(&id) {
+                // Play frequency bonus: ln(1 + completed_plays), capped
+                let freq_bonus = (1.0 + stats.completed_plays as f64).ln().min(SCORE_PLAY_FREQ_CAP);
+                score += freq_bonus;
+
+                // Skip penalty: only if enough plays for meaningful signal
+                if stats.total_plays >= 3 {
+                    let skip_rate = 1.0 - (stats.completed_plays as f64 / stats.total_plays as f64);
+                    score -= skip_rate * SCORE_SKIP_MAX;
+                }
+
+                // Recency decay: linear penalty over SCORE_RECENCY_DAYS
+                if let Some(last) = stats.last_played {
+                    let days_ago = (now - last).num_days() as f64;
+                    if days_ago < SCORE_RECENCY_DAYS {
+                        let decay = (1.0 - days_ago / SCORE_RECENCY_DAYS) * SCORE_RECENCY_MAX;
+                        score -= decay;
+                    }
+                }
+            } else {
+                // Unplayed track bonus (discovery)
                 score += 1.0;
             }
 
-            // Penalty for already used in another mix today
+            // Cooldown: was in a mix within the last N days
+            if cooldown_tracks.contains(&id) {
+                score -= SCORE_COOLDOWN_PENALTY;
+            }
+
+            // Already used in another mix today
             if used_set.contains(id.as_str()) {
                 score -= 5.0;
             }
 
-            ScoredTrack { id, album_id, artist_id, score, bpm, key, loudness }
+            // Compilation penalty (artist mix only)
+            if is_compilation && ctx.compilation_penalty > 0.0 {
+                score -= ctx.compilation_penalty;
+            }
+
+            // Bliss similarity bonus
+            if let (Some(centroid), Some(ref track_bliss)) = (ctx.bliss_centroid, &bliss) {
+                let dist = bliss_euclidean_distance(centroid, track_bliss);
+                // Convert distance to similarity score: closer = higher bonus
+                // Scale distance by SCORE_BLISS_SCALE, then invert
+                let similarity = (SCORE_BLISS_MAX - dist / SCORE_BLISS_SCALE).clamp(0.0, SCORE_BLISS_MAX);
+                score += similarity;
+            }
+
+            ScoredTrack {
+                id, album_id, artist_id, score, bpm, key, loudness,
+                bliss, duration_seconds, mood, is_compilation,
+            }
         })
         .collect();
 
     // Sort by score descending
     scored.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
 
+    // Log top few scores for debugging
+    for track in scored.iter().take(3) {
+        debug!(
+            "scored track {} = {:.2} (compilation={}, bliss={})",
+            track.id, track.score, track.is_compilation, track.bliss.is_some()
+        );
+    }
+
     // Apply diversity constraints
     let mut selected: Vec<MixTrack> = Vec::new();
-    let mut album_count: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    let mut artist_count: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    let mut artist_set: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut album_count: HashMap<String, usize> = HashMap::new();
+    let mut artist_count: HashMap<String, usize> = HashMap::new();
+    let mut artist_set: HashSet<String> = HashSet::new();
 
     for track in &scored {
         if selected.len() >= MAX_TRACKS_PER_MIX {
@@ -675,18 +923,78 @@ async fn score_and_select(
             bpm: track.bpm,
             key: track.key.clone(),
             loudness: track.loudness,
+            bliss: track.bliss.clone(),
+            duration_seconds: track.duration_seconds,
+            mood: track.mood.clone(),
         });
     }
 
     // Enforce minimum distinct artists
     if artist_set.len() < MIN_DISTINCT_ARTISTS && selected.len() < MIN_DISTINCT_ARTISTS {
-        // Not enough diversity, but still return what we have
         return Ok(selected);
     }
 
     order_for_flow(&mut selected);
 
     Ok(selected)
+}
+
+// ─── Bliss Centroid Functions ─────────────────────────────────────────────────
+
+/// Mean bliss vector for all analyzed tracks by a given artist.
+async fn compute_artist_bliss_centroid(
+    pool: &SqlitePool,
+    artist_id: &str,
+) -> Result<Option<Vec<f64>>> {
+    let rows = sqlx::query_as::<_, (String,)>(
+        "SELECT t.bliss_features
+         FROM tracks t
+         JOIN albums a ON t.album_id = a.id
+         WHERE a.artist_id = ? AND t.bliss_features IS NOT NULL
+         LIMIT 200",
+    )
+    .bind(artist_id)
+    .fetch_all(pool)
+    .await?;
+
+    let vectors: Vec<Vec<f64>> = rows
+        .iter()
+        .filter_map(|(json,)| serde_json::from_str(json).ok())
+        .collect();
+
+    let refs: Vec<&[f64]> = vectors.iter().map(|v| v.as_slice()).collect();
+    Ok(compute_centroid(&refs))
+}
+
+/// Mean bliss vector of a user's top 50 most-completed tracks.
+async fn compute_user_bliss_centroid(
+    pool: &SqlitePool,
+    user_id: &str,
+) -> Result<Option<Vec<f64>>> {
+    let rows = sqlx::query_as::<_, (String,)>(
+        "SELECT t.bliss_features
+         FROM tracks t
+         JOIN (
+             SELECT track_id, SUM(completed) as plays
+             FROM play_history
+             WHERE user_id = ?
+             GROUP BY track_id
+             ORDER BY plays DESC
+             LIMIT 50
+         ) ph ON t.id = ph.track_id
+         WHERE t.bliss_features IS NOT NULL",
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await?;
+
+    let vectors: Vec<Vec<f64>> = rows
+        .iter()
+        .filter_map(|(json,)| serde_json::from_str(json).ok())
+        .collect();
+
+    let refs: Vec<&[f64]> = vectors.iter().map(|v| v.as_slice()).collect();
+    Ok(compute_centroid(&refs))
 }
 
 // ─── Flow Ordering (greedy nearest-neighbor) ─────────────────────────────────
@@ -699,10 +1007,44 @@ fn order_for_flow(tracks: &mut Vec<MixTrack>) {
     // Find median BPM for the starting track
     let mut bpms: Vec<f64> = tracks.iter().filter_map(|t| t.bpm).collect();
     let median_bpm = if bpms.is_empty() {
-        120.0 // sensible default
+        120.0
     } else {
         bpms.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         bpms[bpms.len() / 2]
+    };
+
+    // Compute min/max loudness for loudness arc
+    let loudness_vals: Vec<f64> = tracks.iter().filter_map(|t| t.loudness).collect();
+    let (min_lufs, max_lufs) = if loudness_vals.is_empty() {
+        (-20.0, -10.0)
+    } else {
+        let min = loudness_vals.iter().copied().fold(f64::MAX, f64::min);
+        let max = loudness_vals.iter().copied().fold(f64::MIN, f64::max);
+        (min, max)
+    };
+    let median_lufs = if loudness_vals.is_empty() {
+        -14.0
+    } else {
+        let mut sorted = loudness_vals.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        sorted[sorted.len() / 2]
+    };
+
+    // Compute max bliss distance for normalization
+    let bliss_vecs: Vec<&Vec<f64>> = tracks.iter().filter_map(|t| t.bliss.as_ref()).collect();
+    let max_bliss_dist = if bliss_vecs.len() >= 2 {
+        let mut max_d = 0.0f64;
+        for i in 0..bliss_vecs.len().min(20) {
+            for j in (i + 1)..bliss_vecs.len().min(20) {
+                let d = bliss_euclidean_distance(bliss_vecs[i], bliss_vecs[j]);
+                if d > max_d && d < f64::MAX {
+                    max_d = d;
+                }
+            }
+        }
+        if max_d < f64::EPSILON { 1.0 } else { max_d }
+    } else {
+        1.0
     };
 
     // Find the starting track: closest to median BPM
@@ -721,14 +1063,11 @@ fn order_for_flow(tracks: &mut Vec<MixTrack>) {
     let mut ordered: Vec<MixTrack> = Vec::with_capacity(total);
     let mut remaining: Vec<MixTrack> = std::mem::take(tracks);
 
-    // Move start track to ordered
     ordered.push(remaining.swap_remove(start_idx));
 
-    // Compute min/max BPM for the energy arc target curve
     let min_bpm = bpms.first().copied().unwrap_or(100.0);
     let max_bpm = bpms.last().copied().unwrap_or(140.0);
 
-    // Greedy: pick lowest-cost next track
     while !remaining.is_empty() {
         let pos_frac = ordered.len() as f64 / total as f64;
         let prev = ordered.last().unwrap();
@@ -736,16 +1075,24 @@ fn order_for_flow(tracks: &mut Vec<MixTrack>) {
 
         // Target BPM from energy arc curve
         let target_bpm = if pos_frac < 0.4 {
-            // Ramp median → high
             let t = pos_frac / 0.4;
             median_bpm + t * (max_bpm - median_bpm)
         } else if pos_frac < 0.7 {
-            // Hold high (peak)
             max_bpm
         } else {
-            // Ramp high → low
             let t = (pos_frac - 0.7) / 0.3;
             max_bpm - t * (max_bpm - min_bpm)
+        };
+
+        // Target LUFS from loudness arc (same shape as BPM arc)
+        let target_lufs = if pos_frac < 0.4 {
+            let t = pos_frac / 0.4;
+            median_lufs + t * (max_lufs - median_lufs)
+        } else if pos_frac < 0.7 {
+            max_lufs
+        } else {
+            let t = (pos_frac - 0.7) / 0.3;
+            max_lufs - t * (max_lufs - min_lufs)
         };
 
         let mut best_idx = 0;
@@ -769,6 +1116,30 @@ fn order_for_flow(tracks: &mut Vec<MixTrack>) {
                 cost += 0.3 * (prev_lufs - cand_lufs).abs() / 10.0;
             }
 
+            // Bliss timbral distance (weight FLOW_BLISS_WEIGHT)
+            if let (Some(ref prev_bliss), Some(ref cand_bliss)) = (&prev.bliss, &candidate.bliss) {
+                let dist = bliss_euclidean_distance(prev_bliss, cand_bliss);
+                if dist < f64::MAX {
+                    cost += FLOW_BLISS_WEIGHT * (dist / max_bliss_dist);
+                }
+            }
+
+            // Mood adjacency penalty (FLOW_MOOD_PENALTY)
+            if let (Some(ref prev_mood), Some(ref cand_mood)) = (&prev.mood, &candidate.mood) {
+                if prev_mood != cand_mood {
+                    cost += FLOW_MOOD_PENALTY;
+                }
+            }
+
+            // Duration adjacency: penalize two adjacent long or two adjacent short
+            if let (Some(prev_dur), Some(cand_dur)) = (prev.duration_seconds, candidate.duration_seconds) {
+                if prev_dur > 420 && cand_dur > 420 {
+                    cost += 1.5; // two long tracks (>7min)
+                } else if prev_dur < 120 && cand_dur < 120 {
+                    cost += 1.0; // two short tracks (<2min)
+                }
+            }
+
             // Artist adjacency penalties
             if candidate.artist_id == prev.artist_id {
                 cost += 10.0;
@@ -787,9 +1158,15 @@ fn order_for_flow(tracks: &mut Vec<MixTrack>) {
                 }
             }
 
-            // Energy arc bias (weight 0.2) — reward matching the target curve
+            // Energy arc bias (weight 0.2) — BPM target curve
             if let Some(cand_bpm) = candidate.bpm {
                 cost += 0.2 * (cand_bpm - target_bpm).abs() / 20.0;
+            }
+
+            // Loudness arc bias (weight FLOW_LOUDNESS_ARC_WEIGHT) — LUFS target curve
+            if let Some(cand_lufs) = candidate.loudness {
+                let lufs_range = (max_lufs - min_lufs).max(1.0);
+                cost += FLOW_LOUDNESS_ARC_WEIGHT * (cand_lufs - target_lufs).abs() / lufs_range;
             }
 
             if cost < best_cost {
