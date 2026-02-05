@@ -12,6 +12,7 @@ use sqlx::{QueryBuilder, Row, Sqlite};
 use std::sync::Arc;
 use tokio::fs::File;
 
+use crate::error::AppError;
 use crate::AppState;
 
 #[derive(Debug, Deserialize)]
@@ -77,6 +78,10 @@ pub struct TrackSummary {
     pub disc_number: i32,
     pub duration_seconds: i32,
     pub format: String,
+    pub album_id: String,
+    pub artist_name: String,
+    pub sample_rate: Option<i32>,
+    pub bit_depth: Option<i32>,
     pub composer: Option<String>,
     pub bpm: Option<f64>,
     pub musical_key: Option<String>,
@@ -88,7 +93,7 @@ pub async fn list_albums(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<Claims>,
     Query(params): Query<ListParams>,
-) -> Json<Value> {
+) -> Result<Json<Value>, AppError> {
     let limit = params.limit.unwrap_or(50);
     let offset = params.offset.unwrap_or(0);
 
@@ -100,7 +105,7 @@ pub async fn list_albums(
     };
 
     let mut builder = QueryBuilder::<Sqlite>::new(
-        "SELECT a.id, a.title, a.artist_id, ar.name, a.year, a.genre, a.style, a.label, a.cover_art_path, a.added_at
+        "SELECT a.id, a.title, a.artist_id, ar.name, a.year, a.genre, a.style, a.label, a.cover_art_path, a.added_at, COUNT(*) OVER() as total_count
          FROM albums a JOIN artists ar ON a.artist_id = ar.id",
     );
 
@@ -243,33 +248,30 @@ pub async fn list_albums(
     builder.push(" OFFSET ");
     builder.push_bind(offset);
 
-    let result = builder.build().fetch_all(&state.db).await;
+    let rows = builder.build().fetch_all(&state.db).await?;
 
-    match result {
-        Ok(rows) => {
-            let albums: Vec<AlbumResponse> = rows
-                .iter()
-                .map(|row| {
-                    let genre_str: String = row.get(5);
-                    let style_str: String = row.get(6);
-                    AlbumResponse {
-                        id: row.get(0),
-                        title: row.get(1),
-                        artist_id: row.get(2),
-                        artist_name: row.get(3),
-                        year: row.get(4),
-                        genre: serde_json::from_str(&genre_str).unwrap_or_default(),
-                        style: serde_json::from_str(&style_str).unwrap_or_default(),
-                        label: row.get(7),
-                        cover_art_path: row.get(8),
-                        added_at: row.get(9),
-                    }
-                })
-                .collect();
-            Json(json!({ "albums": albums }))
-        }
-        Err(e) => Json(json!({ "error": e.to_string() })),
-    }
+    let total: Option<i64> = rows.first().map(|r| r.get("total_count"));
+    let albums: Vec<AlbumResponse> = rows
+        .iter()
+        .map(|row| {
+            let genre_str: String = row.get(5);
+            let style_str: String = row.get(6);
+            AlbumResponse {
+                id: row.get(0),
+                title: row.get(1),
+                artist_id: row.get(2),
+                artist_name: row.get(3),
+                year: row.get(4),
+                genre: serde_json::from_str(&genre_str).unwrap_or_default(),
+                style: serde_json::from_str(&style_str).unwrap_or_default(),
+                label: row.get(7),
+                cover_art_path: row.get(8),
+                added_at: row.get(9),
+            }
+        })
+        .collect();
+
+    Ok(Json(json!({ "albums": albums, "total": total })))
 }
 
 pub async fn get_album(
@@ -293,8 +295,14 @@ pub async fn get_album(
     };
 
     let track_rows = sqlx::query(
-        "SELECT id, title, track_number, disc_number, duration_seconds, format, composer, COALESCE(bpm_tag, bpm_analyzed) as bpm, COALESCE(musical_key, key_analyzed) as resolved_key, loudness_lufs, mood
-         FROM tracks WHERE album_id = ? ORDER BY disc_number, track_number",
+        "SELECT t.id, t.title, t.track_number, t.disc_number, t.duration_seconds, t.format,
+                t.album_id, ar.name as artist_name, t.sample_rate, t.bit_depth,
+                t.composer, COALESCE(t.bpm_tag, t.bpm_analyzed) as bpm,
+                COALESCE(t.musical_key, t.key_analyzed) as resolved_key, t.loudness_lufs, t.mood
+         FROM tracks t
+         JOIN albums a ON t.album_id = a.id
+         JOIN artists ar ON a.artist_id = ar.id
+         WHERE t.album_id = ? ORDER BY t.disc_number, t.track_number",
     )
     .bind(&id)
     .fetch_all(&state.db)
@@ -310,11 +318,15 @@ pub async fn get_album(
             disc_number: row.get(3),
             duration_seconds: row.get(4),
             format: row.get(5),
-            composer: row.get(6),
-            bpm: row.get(7),
-            musical_key: row.get(8),
-            loudness_lufs: row.get(9),
-            mood: row.get(10),
+            album_id: row.get(6),
+            artist_name: row.get(7),
+            sample_rate: row.get(8),
+            bit_depth: row.get(9),
+            composer: row.get(10),
+            bpm: row.get(11),
+            musical_key: row.get(12),
+            loudness_lufs: row.get(13),
+            mood: row.get(14),
         })
         .collect();
 
@@ -418,7 +430,99 @@ pub async fn get_cover(
     // Parse effect parameters
     let effect = params.effect.as_deref().unwrap_or("none");
     let size = params.size.unwrap_or(1024).clamp(256, 2048);
-    let with_hole = params.hole.unwrap_or(false);
+    let _with_hole = params.hole.unwrap_or(false);
+
+    // Wrapped effect: serve from cover_wrapped.jpg in album folder, skip cache system
+    if effect == "wrapped" {
+        let cover_path_buf = std::path::Path::new(&cover_path);
+        let wrapped_path = cover_path_buf
+            .parent()
+            .map(|p| p.join("cover_wrapped.jpg"))
+            .unwrap_or_default();
+
+        // Fast path: serve existing wrapped cover
+        if wrapped_path.exists() {
+            let file = match File::open(&wrapped_path).await {
+                Ok(f) => f,
+                Err(e) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({ "error": format!("file open failed: {}", e) })),
+                    )
+                        .into_response()
+                }
+            };
+            let stream = tokio_util::io::ReaderStream::new(file);
+            return Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, "image/jpeg")
+                .header(header::CACHE_CONTROL, "public, max-age=86400")
+                .body(Body::from_stream(stream))
+                .unwrap();
+        }
+
+        // Generate, save to album folder, then serve
+        let cover_path_clone = cover_path.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            riff_core::artwork::effects::generate_and_save_wrapped(
+                std::path::Path::new(&cover_path_clone),
+                play_count,
+                size,
+            )
+        })
+        .await;
+
+        match result {
+            Ok(Ok((saved_path, _image))) => {
+                let file = match File::open(&saved_path).await {
+                    Ok(f) => f,
+                    Err(e) => {
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({ "error": format!("file open failed: {}", e) })),
+                        )
+                            .into_response()
+                    }
+                };
+                let stream = tokio_util::io::ReaderStream::new(file);
+                return Response::builder()
+                    .status(StatusCode::OK)
+                    .header(header::CONTENT_TYPE, "image/jpeg")
+                    .header(header::CACHE_CONTROL, "public, max-age=86400")
+                    .body(Body::from_stream(stream))
+                    .unwrap();
+            }
+            Ok(Err(e)) => {
+                tracing::error!("Wrapped cover generation failed: {}", e);
+                // Fallback to raw cover art
+                let file = match File::open(&cover_path).await {
+                    Ok(f) => f,
+                    Err(e) => {
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({ "error": format!("file open failed: {}", e) })),
+                        )
+                            .into_response()
+                    }
+                };
+                let mime = if cover_path.ends_with(".png") { "image/png" } else { "image/jpeg" };
+                let stream = tokio_util::io::ReaderStream::new(file);
+                return Response::builder()
+                    .status(StatusCode::OK)
+                    .header(header::CONTENT_TYPE, mime)
+                    .header(header::CACHE_CONTROL, "public, max-age=86400")
+                    .body(Body::from_stream(stream))
+                    .unwrap();
+            }
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": format!("generation task panicked: {}", e) })),
+                )
+                    .into_response()
+            }
+        }
+    }
 
     // Check if we need to generate an effect
     if effect == "none" && params.size.is_none() {
@@ -450,151 +554,58 @@ pub async fn get_cover(
             .unwrap();
     }
 
-    // Build cache key
-    let cache_key = if with_hole && effect == "vinyl" {
-        format!("{}_hole", effect)
-    } else {
-        effect.to_string()
-    };
-
-    // Check cache first
-    if let Some(cached_path) = riff_core::artwork::check_cache(&state.db, &id, &cache_key, size).await {
-        let file = match File::open(&cached_path).await {
-            Ok(f) => f,
-            Err(_) => {
-                // Cache miss - file was deleted, continue to generation
-                let _ = riff_core::artwork::cache::clear_album_cache(&state.db, &id).await;
-                return generate_and_serve(&state, &id, &cover_path, effect, size, with_hole, play_count).await;
-            }
-        };
-
-        let stream = tokio_util::io::ReaderStream::new(file);
-
-        return Response::builder()
-            .status(StatusCode::OK)
-            .header(header::CONTENT_TYPE, "image/png")
-            .header(header::CACHE_CONTROL, "public, max-age=86400")
-            .body(Body::from_stream(stream))
-            .unwrap();
-    }
-
-    // Generate effect
-    generate_and_serve(&state, &id, &cover_path, effect, size, with_hole, play_count).await
-}
-
-async fn generate_and_serve(
-    state: &Arc<AppState>,
-    album_id: &str,
-    cover_path: &str,
-    effect: &str,
-    size: u32,
-    with_hole: bool,
-    play_count: u32,
-) -> Response {
-    use riff_core::artwork::generator::{generate_effect, EffectType};
-
-    // Parse effect type
-    let effect_type = match effect {
-        "vinyl" => EffectType::Vinyl { with_hole },
-        "wrapped" => EffectType::Wrapped,
-        "highlights" => EffectType::Highlights,
-        _ => EffectType::None,
-    };
-
-    // Generate effect (CPU-bound, runs in blocking pool)
-    let result = generate_effect(
-        std::path::Path::new(cover_path),
-        effect_type,
-        size,
-        play_count,
-        with_hole,
-    )
+    // Remaining effects (highlights, none with custom size): generate on the fly
+    let cover_path_owned = cover_path.clone();
+    let effect_owned = effect.to_string();
+    let result = tokio::task::spawn_blocking(move || {
+        let base = image::open(&cover_path_owned)
+            .map_err(|e| anyhow::anyhow!("Failed to open album art: {}", e))?
+            .resize_exact(size, size, image::imageops::FilterType::Lanczos3);
+        match effect_owned.as_str() {
+            "highlights" => riff_core::artwork::effects::generate_highlights_effect(&base, play_count),
+            _ => Ok(base),
+        }
+    })
     .await;
 
-    let image = match result {
-        Ok(img) => img,
-        Err(e) => {
-            tracing::error!("Effect generation failed: {}", e);
-            // Fallback to raw album art
-            let file = match File::open(cover_path).await {
-                Ok(f) => f,
-                Err(e) => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({ "error": format!("file open failed: {}", e) })),
-                    )
-                        .into_response()
-                }
-            };
-
-            let stream = tokio_util::io::ReaderStream::new(file);
-            let mime = if cover_path.ends_with(".png") {
-                "image/png"
-            } else {
-                "image/jpeg"
-            };
-
-            return Response::builder()
-                .status(StatusCode::OK)
-                .header(header::CONTENT_TYPE, mime)
-                .header(header::CACHE_CONTROL, "public, max-age=86400")
-                .body(Body::from_stream(stream))
-                .unwrap();
-        }
-    };
-
-    // Build cache key
-    let cache_key = if with_hole && effect == "vinyl" {
-        format!("{}_hole", effect)
-    } else {
-        effect.to_string()
-    };
-
-    // Store in cache
-    let cached_path = match riff_core::artwork::store_cache(&state.db, album_id, &cache_key, size, &image).await {
-        Ok(path) => path,
-        Err(e) => {
-            tracing::warn!("Failed to store cache: {}", e);
-            // Continue serving even if cache fails
+    match result {
+        Ok(Ok(image)) => {
             let mut bytes = Vec::new();
-            if let Err(e) = image.write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png) {
+            if let Err(e) = image.write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::Jpeg,
+            ) {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(json!({ "error": format!("image encoding failed: {}", e) })),
                 )
                     .into_response();
             }
-
-            return Response::builder()
+            Response::builder()
                 .status(StatusCode::OK)
-                .header(header::CONTENT_TYPE, "image/png")
+                .header(header::CONTENT_TYPE, "image/jpeg")
                 .header(header::CACHE_CONTROL, "public, max-age=86400")
                 .body(Body::from(bytes))
-                .unwrap();
+                .unwrap()
         }
-    };
-
-    // Serve from cached file
-    let file = match File::open(&cached_path).await {
-        Ok(f) => f,
-        Err(e) => {
-            return (
+        Ok(Err(e)) => {
+            tracing::error!("Effect generation failed: {}", e);
+            (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": format!("cached file open failed: {}", e) })),
+                Json(json!({ "error": format!("effect generation failed: {}", e) })),
             )
                 .into_response()
         }
-    };
-
-    let stream = tokio_util::io::ReaderStream::new(file);
-
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "image/png")
-        .header(header::CACHE_CONTROL, "public, max-age=86400")
-        .body(Body::from_stream(stream))
-        .unwrap()
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("generation task panicked: {}", e) })),
+        )
+            .into_response(),
+    }
 }
+
+/// Play count thresholds where the worn texture changes
+const WRAPPED_THRESHOLDS: &[u32] = &[1, 10, 20, 30];
 
 pub async fn increment_play_count(
     State(state): State<Arc<AppState>>,
@@ -608,13 +619,51 @@ pub async fn increment_play_count(
     match result {
         Ok(r) => {
             if r.rows_affected() == 0 {
-                Err((
+                return Err((
                     StatusCode::NOT_FOUND,
                     Json(json!({ "error": "album not found" })),
-                ))
-            } else {
-                Ok(Json(json!({ "success": true })))
+                ));
             }
+
+            // Check if play count crossed a texture threshold — regenerate wrapped cover
+            let row = sqlx::query_as::<_, (i64, Option<String>)>(
+                "SELECT play_count, cover_art_path FROM albums WHERE id = ?",
+            )
+            .bind(&id)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten();
+
+            if let Some((new_count, Some(cover_path))) = row {
+                let new_count = new_count as u32;
+                if WRAPPED_THRESHOLDS.contains(&new_count) {
+                    let cover_path_wrapped = cover_path.clone();
+                    tokio::spawn(async move {
+                        let result = tokio::task::spawn_blocking(move || {
+                            riff_core::artwork::effects::generate_and_save_wrapped(
+                                std::path::Path::new(&cover_path_wrapped),
+                                new_count,
+                                1024,
+                            )
+                        })
+                        .await;
+                        match result {
+                            Ok(Ok((path, _))) => {
+                                tracing::info!("regenerated wrapped cover at play_count={}: {}", new_count, path.display());
+                            }
+                            Ok(Err(e)) => {
+                                tracing::warn!("failed to regenerate wrapped cover: {}", e);
+                            }
+                            Err(e) => {
+                                tracing::warn!("wrapped cover generation task panicked: {}", e);
+                            }
+                        }
+                    });
+                }
+            }
+
+            Ok(Json(json!({ "success": true })))
         }
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -622,3 +671,68 @@ pub async fn increment_play_count(
         )),
     }
 }
+
+#[derive(Debug, Deserialize)]
+pub struct GenerateWrappedParams {
+    pub force: Option<bool>,
+}
+
+pub async fn generate_wrapped_covers(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<GenerateWrappedParams>,
+) -> Json<Value> {
+    let force = params.force.unwrap_or(false);
+
+    let albums = sqlx::query_as::<_, (String, String, i64)>(
+        "SELECT id, cover_art_path, play_count FROM albums WHERE cover_art_path IS NOT NULL",
+    )
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+
+    let total = albums.len();
+    let mut generated = 0u32;
+    let mut skipped = 0u32;
+    let mut errors: Vec<String> = Vec::new();
+
+    for (album_id, cover_path, play_count) in &albums {
+        let wrapped_path = std::path::Path::new(cover_path)
+            .parent()
+            .map(|p| p.join("cover_wrapped.jpg"));
+
+        let Some(wrapped_path) = wrapped_path else {
+            errors.push(format!("{}: no parent directory", album_id));
+            continue;
+        };
+
+        if wrapped_path.exists() && !force {
+            skipped += 1;
+            continue;
+        }
+
+        let cover_path = cover_path.clone();
+        let play_count = *play_count as u32;
+        let result = tokio::task::spawn_blocking(move || {
+            riff_core::artwork::effects::generate_and_save_wrapped(
+                std::path::Path::new(&cover_path),
+                play_count,
+                1024,
+            )
+        })
+        .await;
+
+        match result {
+            Ok(Ok(_)) => generated += 1,
+            Ok(Err(e)) => errors.push(format!("{}: {}", album_id, e)),
+            Err(e) => errors.push(format!("{}: task panicked: {}", album_id, e)),
+        }
+    }
+
+    Json(json!({
+        "total": total,
+        "generated": generated,
+        "skipped": skipped,
+        "errors": errors,
+    }))
+}
+

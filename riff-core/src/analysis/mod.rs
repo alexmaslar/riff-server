@@ -3,6 +3,9 @@ use bliss_audio::decoder::Decoder;
 use bliss_audio::AnalysisIndex;
 use sqlx::SqlitePool;
 use std::path::Path;
+use std::sync::Arc;
+use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 use tracing::{info, warn};
 
 pub struct AnalysisResult {
@@ -28,23 +31,15 @@ pub async fn analyze_library(pool: &SqlitePool) -> anyhow::Result<AnalysisResult
     .fetch_all(pool)
     .await?;
 
-    info!("analyzing {} tracks", rows.len());
+    let total = rows.len();
+    info!("analyzing {} tracks", total);
 
-    for (track_id, file_path, duration, file_size) in &rows {
-        // Skip very short tracks (< 5 seconds)
-        if *duration < 5 {
+    // Phase 1: Filter skips and mark analyzable tracks
+    let mut tracks_to_analyze = Vec::new();
+    for (track_id, file_path, duration, file_size) in rows {
+        if duration < 5 || file_size > 500 * 1024 * 1024 {
             sqlx::query("UPDATE tracks SET analysis_status = 'skipped' WHERE id = ?")
-                .bind(track_id)
-                .execute(pool)
-                .await?;
-            result.tracks_skipped += 1;
-            continue;
-        }
-
-        // Skip very large files (> 500MB)
-        if *file_size > 500 * 1024 * 1024 {
-            sqlx::query("UPDATE tracks SET analysis_status = 'skipped' WHERE id = ?")
-                .bind(track_id)
+                .bind(&track_id)
                 .execute(pool)
                 .await?;
             result.tracks_skipped += 1;
@@ -52,46 +47,78 @@ pub async fn analyze_library(pool: &SqlitePool) -> anyhow::Result<AnalysisResult
         }
 
         sqlx::query("UPDATE tracks SET analysis_status = 'analyzing' WHERE id = ?")
-            .bind(track_id)
+            .bind(&track_id)
             .execute(pool)
             .await?;
+        tracks_to_analyze.push((track_id, file_path));
+    }
 
+    // Phase 2: Analyze in parallel across available CPU cores
+    let concurrency = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    info!("using {} parallel workers", concurrency);
+    let semaphore = Arc::new(Semaphore::new(concurrency));
+    let mut join_set = JoinSet::new();
+
+    for (track_id, file_path) in tracks_to_analyze {
+        let permit = semaphore.clone().acquire_owned().await
+            .expect("semaphore closed unexpectedly");
         let path = file_path.clone();
-        let analysis = tokio::task::spawn_blocking(move || analyze_track(&path)).await;
+        join_set.spawn(async move {
+            let analysis = tokio::task::spawn_blocking(move || analyze_track(&path)).await;
+            drop(permit);
+            (track_id, file_path, analysis)
+        });
+    }
 
-        match analysis {
-            Ok(Ok(data)) => {
-                let features_json = serde_json::to_string(&data.bliss_features)?;
-                sqlx::query(
-                    "UPDATE tracks SET bpm_analyzed = ?, key_analyzed = ?, loudness_lufs = ?, bliss_features = ?, analysis_status = 'complete', analyzed_at = datetime('now') WHERE id = ?",
-                )
-                .bind(data.bpm)
-                .bind(&data.key)
-                .bind(data.loudness_lufs)
-                .bind(&features_json)
-                .bind(track_id)
-                .execute(pool)
-                .await?;
-                result.tracks_analyzed += 1;
-            }
-            Ok(Err(e)) => {
-                warn!("analysis failed for {}: {}", file_path, e);
-                sqlx::query("UPDATE tracks SET analysis_status = 'failed' WHERE id = ?")
-                    .bind(track_id)
-                    .execute(pool)
-                    .await?;
-                result.errors.push(format!("{}: {}", file_path, e));
-                result.tracks_failed += 1;
+    // Phase 3: Collect results and update DB
+    while let Some(join_result) = join_set.join_next().await {
+        match join_result {
+            Ok((track_id, file_path, analysis)) => {
+                match analysis {
+                    Ok(Ok(data)) => {
+                        let features_json = serde_json::to_string(&data.bliss_features)?;
+                        sqlx::query(
+                            "UPDATE tracks SET bpm_analyzed = ?, key_analyzed = ?, loudness_lufs = ?, bliss_features = ?, analysis_status = 'complete', analyzed_at = datetime('now') WHERE id = ?",
+                        )
+                        .bind(data.bpm)
+                        .bind(&data.key)
+                        .bind(data.loudness_lufs)
+                        .bind(&features_json)
+                        .bind(&track_id)
+                        .execute(pool)
+                        .await?;
+                        result.tracks_analyzed += 1;
+                    }
+                    Ok(Err(e)) => {
+                        warn!("analysis failed for {}: {}", file_path, e);
+                        sqlx::query("UPDATE tracks SET analysis_status = 'failed' WHERE id = ?")
+                            .bind(&track_id)
+                            .execute(pool)
+                            .await?;
+                        result.errors.push(format!("{}: {}", file_path, e));
+                        result.tracks_failed += 1;
+                    }
+                    Err(e) => {
+                        warn!("analysis task panicked for {}: {}", file_path, e);
+                        sqlx::query("UPDATE tracks SET analysis_status = 'failed' WHERE id = ?")
+                            .bind(&track_id)
+                            .execute(pool)
+                            .await?;
+                        result.errors.push(format!("{}: task panicked", file_path));
+                        result.tracks_failed += 1;
+                    }
+                }
             }
             Err(e) => {
-                warn!("analysis task panicked for {}: {}", file_path, e);
-                sqlx::query("UPDATE tracks SET analysis_status = 'failed' WHERE id = ?")
-                    .bind(track_id)
-                    .execute(pool)
-                    .await?;
-                result.errors.push(format!("{}: task panicked", file_path));
-                result.tracks_failed += 1;
+                warn!("analysis join error: {}", e);
             }
+        }
+
+        let done = result.tracks_analyzed + result.tracks_failed + result.tracks_skipped;
+        if done % 50 == 0 || done as usize == total {
+            info!("analysis progress: {}/{} tracks", done, total);
         }
     }
 

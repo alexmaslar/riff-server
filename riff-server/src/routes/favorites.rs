@@ -8,6 +8,7 @@ use serde_json::{json, Value};
 use sqlx::Row;
 use std::sync::Arc;
 
+use crate::error::AppError;
 use crate::AppState;
 
 #[derive(Debug, Deserialize)]
@@ -36,51 +37,38 @@ pub async fn toggle_favorite(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<Claims>,
     Json(body): Json<ToggleFavoriteBody>,
-) -> Json<Value> {
-    // Check if already favorited
-    let exists = sqlx::query_as::<_, (i64,)>(
+) -> Result<Json<Value>, AppError> {
+    let (count,) = sqlx::query_as::<_, (i64,)>(
         "SELECT COUNT(*) FROM favorites WHERE user_id = ? AND entity_type = ? AND entity_id = ?",
     )
     .bind(&claims.sub)
     .bind(&body.entity_type)
     .bind(&body.entity_id)
     .fetch_one(&state.db)
-    .await;
+    .await?;
 
-    match exists {
-        Ok((count,)) if count > 0 => {
-            // Remove favorite
-            let result = sqlx::query(
-                "DELETE FROM favorites WHERE user_id = ? AND entity_type = ? AND entity_id = ?",
-            )
-            .bind(&claims.sub)
-            .bind(&body.entity_type)
-            .bind(&body.entity_id)
-            .execute(&state.db)
-            .await;
+    if count > 0 {
+        sqlx::query(
+            "DELETE FROM favorites WHERE user_id = ? AND entity_type = ? AND entity_id = ?",
+        )
+        .bind(&claims.sub)
+        .bind(&body.entity_type)
+        .bind(&body.entity_id)
+        .execute(&state.db)
+        .await?;
 
-            match result {
-                Ok(_) => Json(json!({ "favorited": false })),
-                Err(e) => Json(json!({ "error": e.to_string() })),
-            }
-        }
-        Ok(_) => {
-            // Add favorite
-            let result = sqlx::query(
-                "INSERT INTO favorites (user_id, entity_type, entity_id) VALUES (?, ?, ?)",
-            )
-            .bind(&claims.sub)
-            .bind(&body.entity_type)
-            .bind(&body.entity_id)
-            .execute(&state.db)
-            .await;
+        Ok(Json(json!({ "favorited": false })))
+    } else {
+        sqlx::query(
+            "INSERT INTO favorites (user_id, entity_type, entity_id) VALUES (?, ?, ?)",
+        )
+        .bind(&claims.sub)
+        .bind(&body.entity_type)
+        .bind(&body.entity_id)
+        .execute(&state.db)
+        .await?;
 
-            match result {
-                Ok(_) => Json(json!({ "favorited": true })),
-                Err(e) => Json(json!({ "error": e.to_string() })),
-            }
-        }
-        Err(e) => Json(json!({ "error": e.to_string() })),
+        Ok(Json(json!({ "favorited": true })))
     }
 }
 
@@ -89,12 +77,12 @@ pub async fn list_favorites(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<Claims>,
     Query(params): Query<ListFavoritesParams>,
-) -> Json<Value> {
+) -> Result<Json<Value>, AppError> {
     let limit = params.limit.unwrap_or(50);
 
     let entity_type = match params.r#type.as_deref() {
         Some(t) => t,
-        None => return Json(json!({ "error": "type parameter is required" })),
+        None => return Err(AppError::BadRequest("type parameter is required".to_string())),
     };
 
     match entity_type {
@@ -112,37 +100,32 @@ pub async fn list_favorites(
             .bind(&claims.sub)
             .bind(limit)
             .fetch_all(&state.db)
-            .await;
+            .await?;
 
-            match rows {
-                Ok(rows) => {
-                    let albums: Vec<Value> = rows
-                        .iter()
-                        .map(|row| {
-                            let genre_str: String = row.get("genre");
-                            let style_str: String = row.get("style");
-                            let genre: Vec<String> =
-                                serde_json::from_str(&genre_str).unwrap_or_default();
-                            let style: Vec<String> =
-                                serde_json::from_str(&style_str).unwrap_or_default();
-                            json!({
-                                "id": row.get::<String, _>("id"),
-                                "title": row.get::<String, _>("title"),
-                                "artist_id": row.get::<String, _>("artist_id"),
-                                "artist_name": row.get::<String, _>("name"),
-                                "year": row.get::<Option<i32>, _>("year"),
-                                "genre": genre,
-                                "style": style,
-                                "label": row.get::<Option<String>, _>("label"),
-                                "cover_art_path": row.get::<Option<String>, _>("cover_art_path"),
-                                "added_at": row.get::<String, _>("added_at"),
-                            })
-                        })
-                        .collect();
-                    Json(json!({ "albums": albums }))
-                }
-                Err(e) => Json(json!({ "error": e.to_string() })),
-            }
+            let albums: Vec<Value> = rows
+                .iter()
+                .map(|row| {
+                    let genre_str: String = row.get("genre");
+                    let style_str: String = row.get("style");
+                    let genre: Vec<String> =
+                        serde_json::from_str(&genre_str).unwrap_or_default();
+                    let style: Vec<String> =
+                        serde_json::from_str(&style_str).unwrap_or_default();
+                    json!({
+                        "id": row.get::<String, _>("id"),
+                        "title": row.get::<String, _>("title"),
+                        "artist_id": row.get::<String, _>("artist_id"),
+                        "artist_name": row.get::<String, _>("name"),
+                        "year": row.get::<Option<i32>, _>("year"),
+                        "genre": genre,
+                        "style": style,
+                        "label": row.get::<Option<String>, _>("label"),
+                        "cover_art_path": row.get::<Option<String>, _>("cover_art_path"),
+                        "added_at": row.get::<String, _>("added_at"),
+                    })
+                })
+                .collect();
+            Ok(Json(json!({ "albums": albums })))
         }
         "artist" => {
             let rows = sqlx::query(
@@ -156,25 +139,20 @@ pub async fn list_favorites(
             .bind(&claims.sub)
             .bind(limit)
             .fetch_all(&state.db)
-            .await;
+            .await?;
 
-            match rows {
-                Ok(rows) => {
-                    let artists: Vec<Value> = rows
-                        .iter()
-                        .map(|row| {
-                            json!({
-                                "id": row.get::<String, _>("id"),
-                                "name": row.get::<String, _>("name"),
-                                "bio": row.get::<Option<String>, _>("bio"),
-                                "image_url": row.get::<Option<String>, _>("image_url"),
-                            })
-                        })
-                        .collect();
-                    Json(json!({ "artists": artists }))
-                }
-                Err(e) => Json(json!({ "error": e.to_string() })),
-            }
+            let artists: Vec<Value> = rows
+                .iter()
+                .map(|row| {
+                    json!({
+                        "id": row.get::<String, _>("id"),
+                        "name": row.get::<String, _>("name"),
+                        "bio": row.get::<Option<String>, _>("bio"),
+                        "image_url": row.get::<Option<String>, _>("image_url"),
+                    })
+                })
+                .collect();
+            Ok(Json(json!({ "artists": artists })))
         }
         "track" => {
             let rows = sqlx::query(
@@ -191,31 +169,26 @@ pub async fn list_favorites(
             .bind(&claims.sub)
             .bind(limit)
             .fetch_all(&state.db)
-            .await;
+            .await?;
 
-            match rows {
-                Ok(rows) => {
-                    let tracks: Vec<Value> = rows
-                        .iter()
-                        .map(|row| {
-                            json!({
-                                "id": row.get::<String, _>("id"),
-                                "title": row.get::<String, _>("title"),
-                                "track_number": row.get::<i32, _>("track_number"),
-                                "disc_number": row.get::<i32, _>("disc_number"),
-                                "duration_seconds": row.get::<i32, _>("duration_seconds"),
-                                "format": row.get::<String, _>("format"),
-                                "album_id": row.get::<String, _>("album_id"),
-                                "artist_name": row.get::<String, _>("artist_name"),
-                            })
-                        })
-                        .collect();
-                    Json(json!({ "tracks": tracks }))
-                }
-                Err(e) => Json(json!({ "error": e.to_string() })),
-            }
+            let tracks: Vec<Value> = rows
+                .iter()
+                .map(|row| {
+                    json!({
+                        "id": row.get::<String, _>("id"),
+                        "title": row.get::<String, _>("title"),
+                        "track_number": row.get::<i32, _>("track_number"),
+                        "disc_number": row.get::<i32, _>("disc_number"),
+                        "duration_seconds": row.get::<i32, _>("duration_seconds"),
+                        "format": row.get::<String, _>("format"),
+                        "album_id": row.get::<String, _>("album_id"),
+                        "artist_name": row.get::<String, _>("artist_name"),
+                    })
+                })
+                .collect();
+            Ok(Json(json!({ "tracks": tracks })))
         }
-        _ => Json(json!({ "error": "invalid type, must be album, artist, or track" })),
+        _ => Err(AppError::BadRequest("invalid type, must be album, artist, or track".to_string())),
     }
 }
 
@@ -224,18 +197,15 @@ pub async fn check_favorite(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<Claims>,
     Query(params): Query<CheckFavoriteParams>,
-) -> Json<Value> {
-    let exists = sqlx::query_as::<_, (i64,)>(
+) -> Result<Json<Value>, AppError> {
+    let (count,) = sqlx::query_as::<_, (i64,)>(
         "SELECT COUNT(*) FROM favorites WHERE user_id = ? AND entity_type = ? AND entity_id = ?",
     )
     .bind(&claims.sub)
     .bind(&params.entity_type)
     .bind(&params.entity_id)
     .fetch_one(&state.db)
-    .await;
+    .await?;
 
-    match exists {
-        Ok((count,)) => Json(json!({ "favorited": count > 0 })),
-        Err(e) => Json(json!({ "error": e.to_string() })),
-    }
+    Ok(Json(json!({ "favorited": count > 0 })))
 }

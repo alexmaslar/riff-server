@@ -1,5 +1,5 @@
 use axum::{extract::{Path, State}, Json};
-use riff_core::{analysis, discogs, scanner};
+use riff_core::{ai, analysis, discogs, scanner};
 use serde_json::{json, Value};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -16,10 +16,10 @@ pub async fn trigger_scan(State(state): State<Arc<AppState>>) -> Json<Value> {
         Ok(result) => {
             let enrichment_triggered = maybe_spawn_enrichment(&state);
             let analysis_triggered = if !enrichment_triggered {
-                // No Discogs configured — spawn analysis directly after scan
-                maybe_spawn_analysis(&state)
+                // No Discogs configured — spawn summarization (which chains analysis)
+                maybe_spawn_summarization(&state)
             } else {
-                false // Analysis will be chained after enrichment completes
+                false // Summarization + analysis will be chained after enrichment completes
             };
             Json(json!({
                 "status": "complete",
@@ -74,8 +74,8 @@ fn maybe_spawn_enrichment(state: &Arc<AppState>) -> bool {
         }
         enrich_state.enrichment_running.store(false, Ordering::SeqCst);
 
-        // Chain analysis after enrichment
-        maybe_spawn_analysis(&enrich_state);
+        // Chain summarization after enrichment
+        maybe_spawn_summarization(&enrich_state);
     });
 
     true
@@ -100,8 +100,25 @@ pub async fn library_stats(State(state): State<Arc<AppState>>) -> Json<Value> {
             .fetch_one(&state.db)
             .await;
 
-    match (artists, albums, tracks) {
-        (Ok((artist_count,)), Ok((album_count,)), Ok((track_count, total_size, analyzed, pending_analysis))) => {
+    let summaries: Result<(i64, i64), _> =
+        sqlx::query_as(
+            "SELECT \
+             SUM(CASE WHEN ai_summary IS NOT NULL THEN 1 ELSE 0 END), \
+             SUM(CASE WHEN ai_summary IS NULL AND metadata_status = 'matched' THEN 1 ELSE 0 END) \
+             FROM albums"
+        )
+            .fetch_one(&state.db)
+            .await;
+
+    let pending_ratings: Result<(i64,), _> =
+        sqlx::query_as(
+            "SELECT COUNT(*) FROM albums WHERE ai_summary IS NOT NULL AND ai_rating IS NULL"
+        )
+            .fetch_one(&state.db)
+            .await;
+
+    match (artists, albums, tracks, summaries, pending_ratings) {
+        (Ok((artist_count,)), Ok((album_count,)), Ok((track_count, total_size, analyzed, pending_analysis)), Ok((summarized, pending_summaries)), Ok((pending_rate,))) => {
             Json(json!({
                 "artists": artist_count,
                 "albums": album_count,
@@ -109,6 +126,9 @@ pub async fn library_stats(State(state): State<Arc<AppState>>) -> Json<Value> {
                 "totalSize": total_size,
                 "analyzed": analyzed,
                 "pendingAnalysis": pending_analysis,
+                "summarized": summarized,
+                "pendingSummaries": pending_summaries,
+                "pendingRatings": pending_rate,
             }))
         }
         _ => Json(json!({ "error": "failed to query library stats" })),
@@ -164,4 +184,118 @@ pub async fn enrich_album(
         })),
         Err(e) => Json(json!({ "error": e.to_string() })),
     }
+}
+
+pub async fn trigger_summarization(State(state): State<Arc<AppState>>) -> Json<Value> {
+    if !state.config.metadata.ai.enabled {
+        return Json(json!({ "error": "AI summarization not enabled in config" }));
+    }
+
+    if maybe_spawn_summarization(&state) {
+        Json(json!({ "status": "started" }))
+    } else {
+        Json(json!({ "status": "already_running" }))
+    }
+}
+
+pub async fn summarize_album(
+    State(state): State<Arc<AppState>>,
+    Path(album_id): Path<String>,
+) -> Json<Value> {
+    if !state.config.metadata.ai.enabled {
+        return Json(json!({ "error": "AI summarization not enabled in config" }));
+    }
+
+    match ai::summarize_album(&state.db, &state.config.metadata.ai, &album_id).await {
+        Ok(_) => Json(json!({ "status": "complete" })),
+        Err(e) => Json(json!({ "error": e.to_string() })),
+    }
+}
+
+fn maybe_spawn_summarization(state: &Arc<AppState>) -> bool {
+    if !state.config.metadata.ai.enabled {
+        return false;
+    }
+
+    if state.summarization_running.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+        tracing::debug!("summarization already running, skipping");
+        return false;
+    }
+
+    let sum_state = state.clone();
+    tokio::spawn(async move {
+        match ai::summarize_library(&sum_state.db, &sum_state.config.metadata.ai).await {
+            Ok(result) => {
+                tracing::info!(
+                    "summarization complete: {} summarized, {} errors",
+                    result.albums_summarized,
+                    result.errors.len(),
+                );
+            }
+            Err(e) => tracing::warn!("summarization failed: {}", e),
+        }
+        sum_state.summarization_running.store(false, Ordering::SeqCst);
+
+        // Chain rating after summarization, then analysis
+        maybe_spawn_rating(&sum_state);
+    });
+
+    true
+}
+
+pub async fn trigger_rating(State(state): State<Arc<AppState>>) -> Json<Value> {
+    if !state.config.metadata.ai.enabled {
+        return Json(json!({ "error": "AI not enabled in config" }));
+    }
+
+    if maybe_spawn_rating(&state) {
+        Json(json!({ "status": "started" }))
+    } else {
+        Json(json!({ "status": "already_running" }))
+    }
+}
+
+pub async fn rate_album(
+    State(state): State<Arc<AppState>>,
+    Path(album_id): Path<String>,
+) -> Json<Value> {
+    if !state.config.metadata.ai.enabled {
+        return Json(json!({ "error": "AI not enabled in config" }));
+    }
+
+    match ai::rate_album(&state.db, &state.config.metadata.ai, &album_id).await {
+        Ok(_) => Json(json!({ "status": "complete" })),
+        Err(e) => Json(json!({ "error": e.to_string() })),
+    }
+}
+
+fn maybe_spawn_rating(state: &Arc<AppState>) -> bool {
+    if !state.config.metadata.ai.enabled {
+        return false;
+    }
+
+    if state.rating_running.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+        tracing::debug!("rating already running, skipping");
+        return false;
+    }
+
+    let rate_state = state.clone();
+    tokio::spawn(async move {
+        match ai::rate_library(&rate_state.db, &rate_state.config.metadata.ai).await {
+            Ok(result) => {
+                tracing::info!(
+                    "rating complete: {} rated, {} errors",
+                    result.albums_rated,
+                    result.errors.len(),
+                );
+            }
+            Err(e) => tracing::warn!("rating failed: {}", e),
+        }
+        rate_state.rating_running.store(false, Ordering::SeqCst);
+
+        // Chain analysis after rating
+        maybe_spawn_analysis(&rate_state);
+    });
+
+    true
 }

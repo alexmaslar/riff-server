@@ -16,6 +16,8 @@ pub struct Config {
 pub struct ServerConfig {
     #[serde(default = "default_port")]
     pub port: u16,
+    #[serde(default)]
+    pub cors_origins: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -42,6 +44,30 @@ pub struct AuthConfig {
 pub struct MetadataConfig {
     #[serde(default)]
     pub discogs: DiscogsConfig,
+    #[serde(default)]
+    pub ai: AiConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AiProvider {
+    OpenAi,
+    Anthropic,
+    Ollama,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_ai_provider")]
+    pub provider: AiProvider,
+    #[serde(default)]
+    pub api_key: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub base_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -58,10 +84,27 @@ fn default_true() -> bool {
     true
 }
 
+fn default_ai_provider() -> AiProvider {
+    AiProvider::OpenAi
+}
+
+impl Default for AiConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            provider: default_ai_provider(),
+            api_key: None,
+            model: None,
+            base_url: None,
+        }
+    }
+}
+
 impl Default for MetadataConfig {
     fn default() -> Self {
         Self {
             discogs: DiscogsConfig::default(),
+            ai: AiConfig::default(),
         }
     }
 }
@@ -77,7 +120,10 @@ impl Default for DiscogsConfig {
 }
 
 fn default_server() -> ServerConfig {
-    ServerConfig { port: default_port() }
+    ServerConfig {
+        port: default_port(),
+        cors_origins: None,
+    }
 }
 
 fn default_port() -> u16 {

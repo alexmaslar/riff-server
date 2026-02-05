@@ -8,7 +8,6 @@ use super::effects;
 /// Effect type for album art
 #[derive(Debug, Clone, Copy)]
 pub enum EffectType {
-    Vinyl { with_hole: bool },
     Wrapped,
     Highlights,
     None,
@@ -17,7 +16,6 @@ pub enum EffectType {
 impl EffectType {
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
-            "vinyl" => Some(Self::Vinyl { with_hole: false }),
             "wrapped" => Some(Self::Wrapped),
             "highlights" => Some(Self::Highlights),
             "none" => Some(Self::None),
@@ -27,7 +25,6 @@ impl EffectType {
 
     pub fn to_string(&self) -> &'static str {
         match self {
-            Self::Vinyl { .. } => "vinyl",
             Self::Wrapped => "wrapped",
             Self::Highlights => "highlights",
             Self::None => "none",
@@ -42,20 +39,15 @@ pub async fn generate_effect(
     effect: EffectType,
     size: u32,
     play_count: u32,
-    with_hole: bool,
+    _with_hole: bool,
 ) -> Result<DynamicImage> {
     let source_path = source_path.to_owned();
 
     task::spawn_blocking(move || {
         match effect {
-            EffectType::Vinyl { .. } => {
-                effects::generate_vinyl_effect(&source_path, size, with_hole, play_count)
-            }
             EffectType::Wrapped => {
-                let base = image::open(&source_path)
-                    .context("Failed to open album art")?
-                    .resize_exact(size, size, image::imageops::FilterType::Lanczos3);
-                effects::generate_wrapped_effect(&base, play_count)
+                let (_path, image) = effects::generate_and_save_wrapped(&source_path, play_count, size)?;
+                Ok(image)
             }
             EffectType::Highlights => {
                 let base = image::open(&source_path)

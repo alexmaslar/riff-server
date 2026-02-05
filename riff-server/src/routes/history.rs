@@ -9,6 +9,7 @@ use sqlx::Row;
 use std::sync::Arc;
 use uuid::Uuid;
 
+use crate::error::AppError;
 use crate::AppState;
 
 #[derive(Debug, Deserialize)]
@@ -28,11 +29,11 @@ pub async fn record_play(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<Claims>,
     Json(body): Json<RecordPlayBody>,
-) -> Json<Value> {
+) -> Result<Json<Value>, AppError> {
     let id = Uuid::new_v4().to_string();
     let completed = if body.completed { 1 } else { 0 };
 
-    let result = sqlx::query(
+    sqlx::query(
         "INSERT INTO play_history (id, user_id, track_id, completed) VALUES (?, ?, ?, ?)",
     )
     .bind(&id)
@@ -40,12 +41,9 @@ pub async fn record_play(
     .bind(&body.track_id)
     .bind(completed)
     .execute(&state.db)
-    .await;
+    .await?;
 
-    match result {
-        Ok(_) => Json(json!({ "ok": true })),
-        Err(e) => Json(json!({ "error": e.to_string() })),
-    }
+    Ok(Json(json!({ "ok": true })))
 }
 
 /// GET /history/albums — Recently played albums (distinct, ordered by last played)
@@ -53,7 +51,7 @@ pub async fn recently_played_albums(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<Claims>,
     Query(params): Query<HistoryParams>,
-) -> Json<Value> {
+) -> Result<Json<Value>, AppError> {
     let limit = params.limit.unwrap_or(20);
 
     let rows = sqlx::query(
@@ -72,35 +70,31 @@ pub async fn recently_played_albums(
     .bind(&claims.sub)
     .bind(limit)
     .fetch_all(&state.db)
-    .await;
+    .await?;
 
-    match rows {
-        Ok(rows) => {
-            let albums: Vec<Value> = rows
-                .iter()
-                .map(|row| {
-                    let genre_str: String = row.get("genre");
-                    let style_str: String = row.get("style");
-                    let genre: Vec<String> = serde_json::from_str(&genre_str).unwrap_or_default();
-                    let style: Vec<String> = serde_json::from_str(&style_str).unwrap_or_default();
-                    json!({
-                        "id": row.get::<String, _>("id"),
-                        "title": row.get::<String, _>("title"),
-                        "artist_id": row.get::<String, _>("artist_id"),
-                        "artist_name": row.get::<String, _>("name"),
-                        "year": row.get::<Option<i32>, _>("year"),
-                        "genre": genre,
-                        "style": style,
-                        "label": row.get::<Option<String>, _>("label"),
-                        "cover_art_path": row.get::<Option<String>, _>("cover_art_path"),
-                        "added_at": row.get::<String, _>("added_at"),
-                    })
-                })
-                .collect();
-            Json(json!({ "albums": albums }))
-        }
-        Err(e) => Json(json!({ "error": e.to_string() })),
-    }
+    let albums: Vec<Value> = rows
+        .iter()
+        .map(|row| {
+            let genre_str: String = row.get("genre");
+            let style_str: String = row.get("style");
+            let genre: Vec<String> = serde_json::from_str(&genre_str).unwrap_or_default();
+            let style: Vec<String> = serde_json::from_str(&style_str).unwrap_or_default();
+            json!({
+                "id": row.get::<String, _>("id"),
+                "title": row.get::<String, _>("title"),
+                "artist_id": row.get::<String, _>("artist_id"),
+                "artist_name": row.get::<String, _>("name"),
+                "year": row.get::<Option<i32>, _>("year"),
+                "genre": genre,
+                "style": style,
+                "label": row.get::<Option<String>, _>("label"),
+                "cover_art_path": row.get::<Option<String>, _>("cover_art_path"),
+                "added_at": row.get::<String, _>("added_at"),
+            })
+        })
+        .collect();
+
+    Ok(Json(json!({ "albums": albums })))
 }
 
 /// GET /history/continue — Albums with incomplete plays (started but not all tracks completed)
@@ -108,10 +102,9 @@ pub async fn continue_listening(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<Claims>,
     Query(params): Query<HistoryParams>,
-) -> Json<Value> {
+) -> Result<Json<Value>, AppError> {
     let limit = params.limit.unwrap_or(20);
 
-    // Albums where user has played some tracks but not completed all tracks
     let rows = sqlx::query(
         "SELECT a.id, a.title, a.artist_id, ar.name, a.year, a.genre, a.style,
                 a.label, a.cover_art_path, a.added_at,
@@ -143,33 +136,156 @@ pub async fn continue_listening(
     .bind(&claims.sub)
     .bind(limit)
     .fetch_all(&state.db)
-    .await;
+    .await?;
 
-    match rows {
-        Ok(rows) => {
-            let albums: Vec<Value> = rows
-                .iter()
-                .map(|row| {
-                    let genre_str: String = row.get("genre");
-                    let style_str: String = row.get("style");
-                    let genre: Vec<String> = serde_json::from_str(&genre_str).unwrap_or_default();
-                    let style: Vec<String> = serde_json::from_str(&style_str).unwrap_or_default();
-                    json!({
-                        "id": row.get::<String, _>("id"),
-                        "title": row.get::<String, _>("title"),
-                        "artist_id": row.get::<String, _>("artist_id"),
-                        "artist_name": row.get::<String, _>("name"),
-                        "year": row.get::<Option<i32>, _>("year"),
-                        "genre": genre,
-                        "style": style,
-                        "label": row.get::<Option<String>, _>("label"),
-                        "cover_art_path": row.get::<Option<String>, _>("cover_art_path"),
-                        "added_at": row.get::<String, _>("added_at"),
-                    })
-                })
-                .collect();
-            Json(json!({ "albums": albums }))
-        }
-        Err(e) => Json(json!({ "error": e.to_string() })),
-    }
+    let albums: Vec<Value> = rows
+        .iter()
+        .map(|row| {
+            let genre_str: String = row.get("genre");
+            let style_str: String = row.get("style");
+            let genre: Vec<String> = serde_json::from_str(&genre_str).unwrap_or_default();
+            let style: Vec<String> = serde_json::from_str(&style_str).unwrap_or_default();
+            json!({
+                "id": row.get::<String, _>("id"),
+                "title": row.get::<String, _>("title"),
+                "artist_id": row.get::<String, _>("artist_id"),
+                "artist_name": row.get::<String, _>("name"),
+                "year": row.get::<Option<i32>, _>("year"),
+                "genre": genre,
+                "style": style,
+                "label": row.get::<Option<String>, _>("label"),
+                "cover_art_path": row.get::<Option<String>, _>("cover_art_path"),
+                "added_at": row.get::<String, _>("added_at"),
+            })
+        })
+        .collect();
+
+    Ok(Json(json!({ "albums": albums })))
+}
+
+/// GET /history/stats — Listening statistics for the authenticated user
+pub async fn listening_stats(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<Claims>,
+) -> Result<Json<Value>, AppError> {
+    // Top Artists
+    let top_artists = sqlx::query(
+        "SELECT ar.id, ar.name, COUNT(*) as plays, SUM(t.duration_seconds) as listening_seconds
+         FROM play_history ph
+         JOIN tracks t ON ph.track_id = t.id
+         JOIN albums a ON t.album_id = a.id
+         JOIN artists ar ON a.artist_id = ar.id
+         WHERE ph.user_id = ? AND ph.completed = 1
+         GROUP BY ar.id
+         ORDER BY plays DESC
+         LIMIT 5",
+    )
+    .bind(&claims.sub)
+    .fetch_all(&state.db)
+    .await?;
+
+    // Top Albums
+    let top_albums = sqlx::query(
+        "SELECT a.id, a.title, ar.name as artist_name, a.cover_art_path, COUNT(*) as plays
+         FROM play_history ph
+         JOIN tracks t ON ph.track_id = t.id
+         JOIN albums a ON t.album_id = a.id
+         JOIN artists ar ON a.artist_id = ar.id
+         WHERE ph.user_id = ? AND ph.completed = 1
+         GROUP BY a.id
+         ORDER BY plays DESC
+         LIMIT 5",
+    )
+    .bind(&claims.sub)
+    .fetch_all(&state.db)
+    .await?;
+
+    // Genre breakdown using json_each() in SQL
+    let genre_rows = sqlx::query(
+        "SELECT j.value as genre_name, SUM(t.duration_seconds) as genre_seconds
+         FROM play_history ph
+         JOIN tracks t ON ph.track_id = t.id
+         JOIN albums a ON t.album_id = a.id,
+         json_each(CASE WHEN a.genre = '[]' OR a.genre IS NULL THEN '[\"Unknown\"]' ELSE a.genre END) j
+         WHERE ph.user_id = ? AND ph.completed = 1
+         GROUP BY j.value
+         ORDER BY genre_seconds DESC",
+    )
+    .bind(&claims.sub)
+    .fetch_all(&state.db)
+    .await?;
+
+    // Totals
+    let totals = sqlx::query(
+        "SELECT COUNT(*) as total_plays, COALESCE(SUM(t.duration_seconds), 0) as total_seconds
+         FROM play_history ph
+         JOIN tracks t ON ph.track_id = t.id
+         WHERE ph.user_id = ? AND ph.completed = 1",
+    )
+    .bind(&claims.sub)
+    .fetch_one(&state.db)
+    .await?;
+
+    let artists_json: Vec<Value> = top_artists
+        .iter()
+        .map(|row| {
+            json!({
+                "id": row.get::<String, _>("id"),
+                "name": row.get::<String, _>("name"),
+                "plays": row.get::<i64, _>("plays"),
+                "listeningSeconds": row.get::<i64, _>("listening_seconds"),
+            })
+        })
+        .collect();
+
+    let albums_json: Vec<Value> = top_albums
+        .iter()
+        .map(|row| {
+            json!({
+                "id": row.get::<String, _>("id"),
+                "title": row.get::<String, _>("title"),
+                "artistName": row.get::<String, _>("artist_name"),
+                "coverArtPath": row.get::<Option<String>, _>("cover_art_path"),
+                "plays": row.get::<i64, _>("plays"),
+            })
+        })
+        .collect();
+
+    let genre_list: Vec<(String, i64)> = genre_rows
+        .iter()
+        .map(|row| {
+            let name: String = row.get("genre_name");
+            let seconds: i64 = row.get("genre_seconds");
+            (name, seconds)
+        })
+        .collect();
+
+    let total_genre_seconds: i64 = genre_list.iter().map(|(_, s)| *s).sum();
+
+    let genres_json: Vec<Value> = genre_list
+        .iter()
+        .map(|(name, seconds)| {
+            let pct = if total_genre_seconds > 0 {
+                (*seconds as f64 / total_genre_seconds as f64) * 100.0
+            } else {
+                0.0
+            };
+            json!({
+                "name": name,
+                "percentage": (pct * 10.0).round() / 10.0,
+                "listeningSeconds": seconds,
+            })
+        })
+        .collect();
+
+    let total_plays: i64 = totals.get("total_plays");
+    let total_seconds: i64 = totals.get("total_seconds");
+
+    Ok(Json(json!({
+        "totalPlays": total_plays,
+        "totalListeningSeconds": total_seconds,
+        "topArtists": artists_json,
+        "topAlbums": albums_json,
+        "genreBreakdown": genres_json,
+    })))
 }

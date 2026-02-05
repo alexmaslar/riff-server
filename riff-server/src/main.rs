@@ -5,15 +5,19 @@ mod routes;
 use anyhow::Result;
 use axum::{
     extract::State,
+    http::StatusCode,
     middleware as axum_mw,
     routing::{delete, get, post},
-    Json, Router,
+    BoxError, Json, Router,
 };
 use riff_core::{ai, analysis, auth, config::Config, db, discogs, scanner};
 use serde_json::{json, Value};
 use sqlx::SqlitePool;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
+use tower::ServiceBuilder;
+use tower::timeout::TimeoutLayer;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
@@ -27,15 +31,61 @@ pub struct AppState {
     pub rating_running: AtomicBool,
 }
 
+async fn run_background_pipeline(state: Arc<AppState>) {
+    // Step 1: Enrichment (if Discogs configured)
+    if state.config.metadata.discogs.api_token.is_some()
+        && state.config.metadata.discogs.auto_enrich
+    {
+        run_stage(&state.enrichment_running, "enrichment", async {
+            discogs::enrich_library(&state.db, &state.config.metadata.discogs).await
+        })
+        .await;
+    }
+
+    // Step 2: Summarization + Rating (if AI configured)
+    if state.config.metadata.ai.enabled {
+        run_stage(&state.summarization_running, "summarization", async {
+            ai::summarize_library(&state.db, &state.config.metadata.ai).await
+        })
+        .await;
+
+        run_stage(&state.rating_running, "rating", async {
+            ai::rate_library(&state.db, &state.config.metadata.ai).await
+        })
+        .await;
+    }
+
+    // Step 3: Analysis (always)
+    run_stage(&state.analysis_running, "analysis", async {
+        analysis::analyze_library(&state.db).await
+    })
+    .await;
+}
+
+async fn run_stage<F, R>(flag: &AtomicBool, name: &str, f: F)
+where
+    F: std::future::Future<Output = anyhow::Result<R>>,
+{
+    if flag
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+    {
+        match f.await {
+            Ok(_) => tracing::info!("{name} complete"),
+            Err(e) => tracing::warn!("{name} failed: {e}"),
+        }
+        flag.store(false, Ordering::SeqCst);
+    }
+}
+
 async fn pregenerate_album_art(db: &SqlitePool) {
-    use riff_core::artwork::generator::{generate_effect, EffectType};
     use std::path::Path;
 
     tracing::info!("pre-generating album art effects");
 
     // Get albums with cover art
-    let albums = sqlx::query_as::<_, (String, String, i64)>(
-        "SELECT id, cover_art_path, play_count FROM albums
+    let albums = sqlx::query_as::<_, (String, String, String, i64)>(
+        "SELECT id, title, cover_art_path, play_count FROM albums
          WHERE cover_art_path IS NOT NULL"
     )
     .fetch_all(db)
@@ -47,34 +97,38 @@ async fn pregenerate_album_art(db: &SqlitePool) {
     let mut skipped = 0;
     let mut failed = 0;
 
-    for (album_id, cover_path, play_count) in albums {
-        // Check if vinyl effect already cached
-        if riff_core::artwork::check_cache(db, &album_id, "vinyl_hole", 512).await.is_none() {
-            match generate_effect(
-                Path::new(&cover_path),
-                EffectType::Vinyl { with_hole: true },
-                512,
-                play_count as u32,
-                true,
-            )
-            .await
-            {
-                Ok(img) => {
-                    match riff_core::artwork::store_cache(db, &album_id, "vinyl_hole", 512, &img).await {
-                        Ok(_) => generated += 1,
-                        Err(e) => {
-                            tracing::warn!("failed to cache vinyl for {}: {}", album_id, e);
-                            failed += 1;
-                        }
+    for (album_id, title, cover_path, play_count) in &albums {
+        // Wrapped: file-based, saved as cover_wrapped.jpg in album folder
+        let wrapped_path = Path::new(cover_path).parent().map(|p| p.join("cover_wrapped.jpg"));
+        if let Some(ref wp) = wrapped_path {
+            if wp.exists() {
+                tracing::debug!("skipping wrapped for \"{}\" — already exists", title);
+                skipped += 1;
+            } else {
+                let cover_path_wrapped = cover_path.clone();
+                let pc = *play_count as u32;
+                tracing::info!("[{}/{}] generating wrapped for \"{}\"", generated + skipped + failed + 1, total * 2, title);
+                let result = tokio::task::spawn_blocking(move || {
+                    riff_core::artwork::effects::generate_and_save_wrapped(
+                        Path::new(&cover_path_wrapped),
+                        pc,
+                        1024,
+                    )
+                })
+                .await;
+
+                match result {
+                    Ok(Ok(_)) => generated += 1,
+                    Ok(Err(e)) => {
+                        tracing::warn!("failed to generate wrapped for {}: {}", album_id, e);
+                        failed += 1;
+                    }
+                    Err(e) => {
+                        tracing::warn!("wrapped generation panicked for {}: {}", album_id, e);
+                        failed += 1;
                     }
                 }
-                Err(e) => {
-                    tracing::warn!("failed to generate vinyl for {}: {}", album_id, e);
-                    failed += 1;
-                }
             }
-        } else {
-            skipped += 1;
         }
     }
 
@@ -83,7 +137,7 @@ async fn pregenerate_album_art(db: &SqlitePool) {
         generated,
         skipped,
         failed,
-        total
+        total * 2
     );
 }
 
@@ -110,6 +164,11 @@ async fn main() -> Result<()> {
 
     let pool = db::init_pool().await?;
     tracing::info!("database initialized");
+
+    // Detect library path changes and wipe stale data
+    if let Some(library_path) = &config.library.path {
+        db::check_library_path(&pool, library_path).await?;
+    }
 
     // Bootstrap admin user on first run
     auth::bootstrap_admin(&pool, &config).await?;
@@ -139,137 +198,34 @@ async fn main() -> Result<()> {
         rating_running: AtomicBool::new(false),
     });
 
-    // Auto-enrich from Discogs in background, then chain analysis
-    if config.metadata.discogs.api_token.is_some() && config.metadata.discogs.auto_enrich {
-        if state.enrichment_running.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
-            let enrich_state = state.clone();
-            tokio::spawn(async move {
-                match discogs::enrich_library(&enrich_state.db, &enrich_state.config.metadata.discogs).await {
-                    Ok(result) => {
-                        tracing::info!(
-                            "enrichment complete: {} albums, {} artists, {} covers",
-                            result.albums_enriched,
-                            result.artists_enriched,
-                            result.covers_downloaded,
-                        );
-                    }
-                    Err(e) => tracing::warn!("background enrichment failed: {}", e),
-                }
-                enrich_state.enrichment_running.store(false, Ordering::SeqCst);
-
-                // Chain summarization after enrichment
-                if enrich_state.config.metadata.ai.enabled {
-                    if enrich_state.summarization_running.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
-                        match ai::summarize_library(&enrich_state.db, &enrich_state.config.metadata.ai).await {
-                            Ok(result) => {
-                                tracing::info!(
-                                    "summarization complete: {} summarized, {} errors",
-                                    result.albums_summarized,
-                                    result.errors.len(),
-                                );
-                            }
-                            Err(e) => tracing::warn!("background summarization failed: {}", e),
-                        }
-                        enrich_state.summarization_running.store(false, Ordering::SeqCst);
-                    }
-
-                    // Chain rating after summarization
-                    if enrich_state.rating_running.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
-                        match ai::rate_library(&enrich_state.db, &enrich_state.config.metadata.ai).await {
-                            Ok(result) => {
-                                tracing::info!(
-                                    "rating complete: {} rated, {} errors",
-                                    result.albums_rated,
-                                    result.errors.len(),
-                                );
-                            }
-                            Err(e) => tracing::warn!("background rating failed: {}", e),
-                        }
-                        enrich_state.rating_running.store(false, Ordering::SeqCst);
-                    }
-                }
-
-                // Chain analysis after rating
-                if enrich_state.analysis_running.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
-                    match analysis::analyze_library(&enrich_state.db).await {
-                        Ok(result) => {
-                            tracing::info!(
-                                "analysis complete: {} analyzed, {} failed, {} skipped",
-                                result.tracks_analyzed,
-                                result.tracks_failed,
-                                result.tracks_skipped,
-                            );
-                        }
-                        Err(e) => tracing::warn!("background analysis failed: {}", e),
-                    }
-                    enrich_state.analysis_running.store(false, Ordering::SeqCst);
-                }
-
-                // Pre-generate album art effects
-                pregenerate_album_art(&enrich_state.db).await;
-            });
-        }
-    } else {
-        // No Discogs configured — run summarization first, then analysis
-        let startup_state = state.clone();
+    // Pre-generate album art effects first (for albums that already have covers)
+    {
+        let art_state = state.clone();
         tokio::spawn(async move {
-            // Summarization first (user-visible)
-            if startup_state.config.metadata.ai.enabled {
-                if startup_state.summarization_running.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
-                    match ai::summarize_library(&startup_state.db, &startup_state.config.metadata.ai).await {
-                        Ok(result) => {
-                            tracing::info!(
-                                "summarization complete: {} summarized, {} errors",
-                                result.albums_summarized,
-                                result.errors.len(),
-                            );
-                        }
-                        Err(e) => tracing::warn!("background summarization failed: {}", e),
-                    }
-                    startup_state.summarization_running.store(false, Ordering::SeqCst);
-                }
-
-                // Then rating
-                if startup_state.rating_running.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
-                    match ai::rate_library(&startup_state.db, &startup_state.config.metadata.ai).await {
-                        Ok(result) => {
-                            tracing::info!(
-                                "rating complete: {} rated, {} errors",
-                                result.albums_rated,
-                                result.errors.len(),
-                            );
-                        }
-                        Err(e) => tracing::warn!("background rating failed: {}", e),
-                    }
-                    startup_state.rating_running.store(false, Ordering::SeqCst);
-                }
-            }
-
-            // Then analysis (background-only)
-            if startup_state.analysis_running.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
-                match analysis::analyze_library(&startup_state.db).await {
-                    Ok(result) => {
-                        tracing::info!(
-                            "analysis complete: {} analyzed, {} failed, {} skipped",
-                            result.tracks_analyzed,
-                            result.tracks_failed,
-                            result.tracks_skipped,
-                        );
-                    }
-                    Err(e) => tracing::warn!("background analysis failed: {}", e),
-                }
-                startup_state.analysis_running.store(false, Ordering::SeqCst);
-            }
-
-            // Pre-generate album art effects
-            pregenerate_album_art(&startup_state.db).await;
+            pregenerate_album_art(&art_state.db).await;
         });
     }
 
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
+    // Background pipeline: enrich → summarize → rate → analyze
+    {
+        let pipeline_state = state.clone();
+        tokio::spawn(async move {
+            run_background_pipeline(pipeline_state).await;
+        });
+    }
+
+    let cors = if let Some(ref origins) = config.server.cors_origins {
+        let allowed: Vec<_> = origins
+            .iter()
+            .filter_map(|o| o.parse().ok())
+            .collect();
+        CorsLayer::new()
+            .allow_origin(allowed)
+            .allow_methods(Any)
+            .allow_headers(Any)
+    } else {
+        CorsLayer::very_permissive()
+    };
 
     // Public routes (no auth required)
     let public = Router::new()
@@ -295,6 +251,7 @@ async fn main() -> Result<()> {
         .route("/history", post(routes::history::record_play))
         .route("/history/albums", get(routes::history::recently_played_albums))
         .route("/history/continue", get(routes::history::continue_listening))
+        .route("/history/stats", get(routes::history::listening_stats))
         // Favorites
         .route("/favorites", post(routes::favorites::toggle_favorite).get(routes::favorites::list_favorites))
         .route("/favorites/check", get(routes::favorites::check_favorite))
@@ -314,6 +271,7 @@ async fn main() -> Result<()> {
         .route("/library/rate", post(routes::library::trigger_rating))
         .route("/library/rate/{album_id}", post(routes::library::rate_album))
         .route("/library/stats", get(routes::library::library_stats))
+        .route("/admin/generate-wrapped-covers", post(routes::albums::generate_wrapped_covers))
         .route("/users", get(routes::users::list_users))
         .route("/users", post(routes::users::create_user))
         .route("/users/{id}", delete(routes::users::delete_user))
@@ -327,6 +285,13 @@ async fn main() -> Result<()> {
         .merge(public)
         .merge(protected)
         .merge(admin)
+        .layer(
+            ServiceBuilder::new()
+                .layer(axum::error_handling::HandleErrorLayer::new(|_: BoxError| async {
+                    StatusCode::REQUEST_TIMEOUT
+                }))
+                .layer(TimeoutLayer::new(Duration::from_secs(30)))
+        )
         .layer(TraceLayer::new_for_http())
         .layer(cors)
         .with_state(state);
