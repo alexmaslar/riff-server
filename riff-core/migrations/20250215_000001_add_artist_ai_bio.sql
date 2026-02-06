@@ -1,0 +1,1 @@
+ALTER TABLE artists ADD COLUMN ai_bio TEXT;

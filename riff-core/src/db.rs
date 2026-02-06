@@ -68,7 +68,6 @@ pub async fn check_library_path(pool: &SqlitePool, library_path: &str) -> anyhow
 /// Delete all library content, preserving users and settings.
 async fn wipe_library_data(pool: &SqlitePool) -> anyhow::Result<()> {
     // Order matters: delete children before parents
-    sqlx::query("DELETE FROM album_art_cache").execute(pool).await?;
     sqlx::query("DELETE FROM playlist_tracks").execute(pool).await?;
     sqlx::query("DELETE FROM play_history").execute(pool).await?;
     sqlx::query("DELETE FROM favorites").execute(pool).await?;

@@ -161,6 +161,27 @@ pub fn build_recommend_prompt(albums: &[AlbumSummaryCompact]) -> String {
     parts.join("\n")
 }
 
+pub fn build_recommend_prompt_incremental(albums: &[AlbumSummaryCompact], target_ids: &[&str]) -> String {
+    let mut parts = Vec::new();
+    parts.push("Here is a personal music library. For the albums listed in <generate_for>, identify the most similar albums within this library.\n".to_string());
+    parts.push("<library>".to_string());
+
+    for a in albums {
+        let year_str = a.year.map(|y| y.to_string()).unwrap_or_default();
+        parts.push(format!(
+            "<album id=\"{}\"><title>{}</title><artist>{}</artist><year>{}</year><genre>{}</genre><style>{}</style><label>{}</label></album>",
+            a.id, a.title, a.artist, year_str, a.genre, a.style, a.label
+        ));
+    }
+
+    parts.push("</library>".to_string());
+    parts.push(String::new());
+    parts.push(format!("<generate_for>{}</generate_for>", target_ids.join(", ")));
+    parts.push(String::new());
+    parts.push("Return the recommendations as JSON for only the albums in <generate_for>.".to_string());
+    parts.join("\n")
+}
+
 pub const ARTIST_BIO_SYSTEM_PROMPT: &str = "\
 <identity>
 You are a knowledgeable music historian and critic writing artist biographies for an audiophile music library app.
@@ -289,6 +310,34 @@ pub fn build_artist_recommend_prompt(artists: &[ArtistSummaryCompact]) -> String
     parts.push("</library>".to_string());
     parts.push(String::new());
     parts.push("Return the recommendations as JSON.".to_string());
+    parts.join("\n")
+}
+
+pub fn build_artist_recommend_prompt_incremental(artists: &[ArtistSummaryCompact], target_ids: &[&str]) -> String {
+    let mut parts = Vec::new();
+    parts.push("Here is a personal music library. For the artists listed in <generate_for>, identify the most similar artists within this library.\n".to_string());
+    parts.push("<library>".to_string());
+
+    for a in artists {
+        let albums_str: String = a.albums.iter().map(|(title, year)| {
+            if let Some(y) = year {
+                format!("{} ({})", title, y)
+            } else {
+                title.clone()
+            }
+        }).collect::<Vec<_>>().join(", ");
+
+        parts.push(format!(
+            "<artist id=\"{}\"><name>{}</name><genres>{}</genres><styles>{}</styles><albums>{}</albums></artist>",
+            a.id, a.name, a.genres, a.styles, albums_str
+        ));
+    }
+
+    parts.push("</library>".to_string());
+    parts.push(String::new());
+    parts.push(format!("<generate_for>{}</generate_for>", target_ids.join(", ")));
+    parts.push(String::new());
+    parts.push("Return the recommendations as JSON for only the artists in <generate_for>.".to_string());
     parts.join("\n")
 }
 

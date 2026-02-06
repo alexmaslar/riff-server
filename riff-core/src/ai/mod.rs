@@ -7,7 +7,7 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::config::AiConfig;
-use prompt::{AlbumContext, AlbumSummaryCompact, ArtistSummaryCompact, CreditInfo, TrackInfo, SYSTEM_PROMPT, RATING_SYSTEM_PROMPT, RECOMMEND_SYSTEM_PROMPT, ARTIST_RECOMMEND_SYSTEM_PROMPT, ARTIST_BIO_SYSTEM_PROMPT, build_album_prompt, build_rating_prompt, build_recommend_prompt, build_artist_recommend_prompt, build_artist_bio_prompt};
+use prompt::{AlbumContext, AlbumSummaryCompact, ArtistSummaryCompact, CreditInfo, TrackInfo, SYSTEM_PROMPT, RATING_SYSTEM_PROMPT, RECOMMEND_SYSTEM_PROMPT, ARTIST_RECOMMEND_SYSTEM_PROMPT, ARTIST_BIO_SYSTEM_PROMPT, build_album_prompt, build_rating_prompt, build_recommend_prompt, build_recommend_prompt_incremental, build_artist_recommend_prompt, build_artist_recommend_prompt_incremental, build_artist_bio_prompt};
 use provider::{GenerateOptions, create_provider};
 
 pub struct SummarizationResult {
@@ -556,7 +556,6 @@ pub async fn recommend_library(
     pool: &SqlitePool,
     config: &AiConfig,
 ) -> anyhow::Result<RecommendResult> {
-    // Query all albums
     let albums: Vec<(String, String, String, Option<i32>, String, String, Option<String>)> =
         sqlx::query_as(
             "SELECT a.id, a.title, ar.name, a.year, a.genre, a.style, a.label \
@@ -569,19 +568,7 @@ pub async fn recommend_library(
         return Ok(RecommendResult { albums_processed: 0, recommendations_generated: 0 });
     }
 
-    // Check staleness: if all albums already have recommendations, skip
-    let (rec_album_count,): (i64,) = sqlx::query_as(
-        "SELECT COUNT(DISTINCT album_id) FROM album_recommendations"
-    )
-    .fetch_one(pool)
-    .await?;
-
-    if rec_album_count as usize >= albums.len() {
-        info!("recommendations up to date ({} albums covered), skipping", rec_album_count);
-        return Ok(RecommendResult { albums_processed: 0, recommendations_generated: 0 });
-    }
-
-    recommend_library_inner(pool, config, &albums).await
+    recommend_library_inner(pool, config, &albums, false).await
 }
 
 pub async fn recommend_library_force(
@@ -600,17 +587,17 @@ pub async fn recommend_library_force(
         return Ok(RecommendResult { albums_processed: 0, recommendations_generated: 0 });
     }
 
-    recommend_library_inner(pool, config, &albums).await
+    recommend_library_inner(pool, config, &albums, true).await
 }
 
 async fn recommend_library_inner(
     pool: &SqlitePool,
     config: &AiConfig,
     albums: &[(String, String, String, Option<i32>, String, String, Option<String>)],
+    force_full: bool,
 ) -> anyhow::Result<RecommendResult> {
     let provider = create_provider(config)?;
 
-    // Build compact album list for the prompt
     let album_ids: std::collections::HashSet<&str> = albums.iter().map(|(id, ..)| id.as_str()).collect();
 
     let summaries: Vec<AlbumSummaryCompact> = albums.iter().map(|(id, title, artist, year, genre_json, style_json, label)| {
@@ -627,8 +614,28 @@ async fn recommend_library_inner(
         }
     }).collect();
 
-    info!("generating recommendations for {} albums", summaries.len());
-    let user_prompt = build_recommend_prompt(&summaries);
+    // Determine which albums need recommendations
+    let user_prompt = if force_full {
+        info!("generating recommendations for all {} albums (force full)", summaries.len());
+        build_recommend_prompt(&summaries)
+    } else {
+        let covered_rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT DISTINCT album_id FROM album_recommendations"
+        )
+        .fetch_all(pool)
+        .await?;
+
+        let covered: std::collections::HashSet<&str> = covered_rows.iter().map(|(id,)| id.as_str()).collect();
+        let target_ids: Vec<&str> = album_ids.iter().copied().filter(|id| !covered.contains(id)).collect();
+
+        if target_ids.is_empty() {
+            info!("album recommendations up to date ({} albums covered), skipping", covered.len());
+            return Ok(RecommendResult { albums_processed: 0, recommendations_generated: 0 });
+        }
+
+        info!("generating recommendations for {} of {} albums (incremental)", target_ids.len(), summaries.len());
+        build_recommend_prompt_incremental(&summaries, &target_ids)
+    };
 
     let opts = GenerateOptions {
         max_tokens: 8192,
@@ -649,7 +656,6 @@ async fn recommend_library_inner(
                 &json_str[..json_str.len().min(500)]
             );
 
-            // Retry once with an assertive follow-up
             let retry_prompt = "Your previous response was not valid JSON. Respond with ONLY the JSON object, no code fences or explanations.";
             let retry_response = provider.generate(RECOMMEND_SYSTEM_PROMPT, retry_prompt, &opts).await?;
             let retry_json = strip_code_fences(&retry_response);
@@ -663,10 +669,11 @@ async fn recommend_library_inner(
         }
     };
 
-    // Clear existing recommendations
-    sqlx::query("DELETE FROM album_recommendations")
-        .execute(pool)
-        .await?;
+    if force_full {
+        sqlx::query("DELETE FROM album_recommendations")
+            .execute(pool)
+            .await?;
+    }
 
     let mut total_recs: u32 = 0;
     let mut albums_with_recs: u32 = 0;
@@ -684,7 +691,7 @@ async fn recommend_library_inner(
                 continue;
             }
             if entry.album_id == rec.album_id {
-                continue; // skip self-references
+                continue;
             }
 
             let id = Uuid::new_v4().to_string();
@@ -761,19 +768,7 @@ pub async fn recommend_artists(
         return Ok(RecommendResult { albums_processed: 0, recommendations_generated: 0 });
     }
 
-    // Check staleness
-    let (rec_artist_count,): (i64,) = sqlx::query_as(
-        "SELECT COUNT(DISTINCT artist_id) FROM artist_recommendations"
-    )
-    .fetch_one(pool)
-    .await?;
-
-    if rec_artist_count as usize >= artists.len() {
-        info!("artist recommendations up to date ({} artists covered), skipping", rec_artist_count);
-        return Ok(RecommendResult { albums_processed: 0, recommendations_generated: 0 });
-    }
-
-    recommend_artists_inner(pool, config, &artists).await
+    recommend_artists_inner(pool, config, &artists, false).await
 }
 
 pub async fn recommend_artists_force(
@@ -790,13 +785,14 @@ pub async fn recommend_artists_force(
         return Ok(RecommendResult { albums_processed: 0, recommendations_generated: 0 });
     }
 
-    recommend_artists_inner(pool, config, &artists).await
+    recommend_artists_inner(pool, config, &artists, true).await
 }
 
 async fn recommend_artists_inner(
     pool: &SqlitePool,
     config: &AiConfig,
     artists: &[(String, String)],
+    force_full: bool,
 ) -> anyhow::Result<RecommendResult> {
     let provider = create_provider(config)?;
 
@@ -852,8 +848,28 @@ async fn recommend_artists_inner(
         });
     }
 
-    info!("generating recommendations for {} artists", summaries.len());
-    let user_prompt = build_artist_recommend_prompt(&summaries);
+    // Determine which artists need recommendations
+    let user_prompt = if force_full {
+        info!("generating recommendations for all {} artists (force full)", summaries.len());
+        build_artist_recommend_prompt(&summaries)
+    } else {
+        let covered_rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT DISTINCT artist_id FROM artist_recommendations"
+        )
+        .fetch_all(pool)
+        .await?;
+
+        let covered: std::collections::HashSet<&str> = covered_rows.iter().map(|(id,)| id.as_str()).collect();
+        let target_ids: Vec<&str> = artist_ids.iter().copied().filter(|id| !covered.contains(id)).collect();
+
+        if target_ids.is_empty() {
+            info!("artist recommendations up to date ({} artists covered), skipping", covered.len());
+            return Ok(RecommendResult { albums_processed: 0, recommendations_generated: 0 });
+        }
+
+        info!("generating recommendations for {} of {} artists (incremental)", target_ids.len(), summaries.len());
+        build_artist_recommend_prompt_incremental(&summaries, &target_ids)
+    };
 
     let opts = GenerateOptions {
         max_tokens: 8192,
@@ -887,10 +903,11 @@ async fn recommend_artists_inner(
         }
     };
 
-    // Clear existing artist recommendations
-    sqlx::query("DELETE FROM artist_recommendations")
-        .execute(pool)
-        .await?;
+    if force_full {
+        sqlx::query("DELETE FROM artist_recommendations")
+            .execute(pool)
+            .await?;
+    }
 
     let mut total_recs: u32 = 0;
     let mut artists_with_recs: u32 = 0;

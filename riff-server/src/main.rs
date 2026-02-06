@@ -16,6 +16,7 @@ use sqlx::SqlitePool;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::RwLock;
 use tower::ServiceBuilder;
 use tower::timeout::TimeoutLayer;
 use tower_http::cors::{Any, CorsLayer};
@@ -24,7 +25,7 @@ use tracing_subscriber::EnvFilter;
 
 pub struct AppState {
     pub db: SqlitePool,
-    pub config: Config,
+    pub config: RwLock<Config>,
     pub enrichment_running: AtomicBool,
     pub analysis_running: AtomicBool,
     pub summarization_running: AtomicBool,
@@ -36,46 +37,79 @@ pub struct AppState {
 
 async fn run_background_pipeline(state: Arc<AppState>) {
     // Step 1: Enrichment (if Discogs configured)
-    if state.config.metadata.discogs.api_token.is_some()
-        && state.config.metadata.discogs.auto_enrich
     {
-        run_stage(&state.enrichment_running, "enrichment", async {
-            discogs::enrich_library(&state.db, &state.config.metadata.discogs).await
-        })
-        .await;
+        let config = state.config.read().await;
+        if config.metadata.discogs.api_token.is_some() && config.metadata.discogs.auto_enrich {
+            let discogs_config = config.metadata.discogs.clone();
+            let db = state.db.clone();
+            drop(config);
+            run_stage(&state.enrichment_running, "enrichment", async move {
+                discogs::enrich_library(&db, &discogs_config).await
+            })
+            .await;
+        }
     }
 
-    // Step 2: Summarization + Rating (if AI configured)
-    if state.config.metadata.ai.enabled {
-        run_stage(&state.summarization_running, "summarization", async {
-            ai::summarize_library(&state.db, &state.config.metadata.ai).await
-        })
-        .await;
+    // Step 2: AI tasks (if AI configured, gated per-task)
+    {
+        let config = state.config.read().await;
+        if config.metadata.ai.enabled {
+            let ai_config = config.metadata.ai.clone();
+            drop(config);
 
-        run_stage(&state.rating_running, "rating", async {
-            ai::rate_library(&state.db, &state.config.metadata.ai).await
-        })
-        .await;
+            let db = state.db.clone();
 
-        run_stage(&state.recommendation_running, "recommendations", async {
-            ai::recommend_library(&state.db, &state.config.metadata.ai).await
-        })
-        .await;
+            if ai_config.album_summaries {
+                run_stage(&state.summarization_running, "summarization", {
+                    let ai_config = ai_config.clone();
+                    let db = db.clone();
+                    async move { ai::summarize_library(&db, &ai_config).await }
+                })
+                .await;
+            }
 
-        run_stage(&state.artist_recommendation_running, "artist recommendations", async {
-            ai::recommend_artists(&state.db, &state.config.metadata.ai).await
-        })
-        .await;
+            if ai_config.album_ratings {
+                run_stage(&state.rating_running, "rating", {
+                    let ai_config = ai_config.clone();
+                    let db = db.clone();
+                    async move { ai::rate_library(&db, &ai_config).await }
+                })
+                .await;
+            }
 
-        run_stage(&state.artist_bio_running, "artist bios", async {
-            ai::bio_artists(&state.db, &state.config.metadata.ai).await
-        })
-        .await;
+            if ai_config.album_recommendations {
+                run_stage(&state.recommendation_running, "recommendations", {
+                    let ai_config = ai_config.clone();
+                    let db = db.clone();
+                    async move { ai::recommend_library(&db, &ai_config).await }
+                })
+                .await;
+            }
+
+            if ai_config.artist_recommendations {
+                run_stage(&state.artist_recommendation_running, "artist recommendations", {
+                    let ai_config = ai_config.clone();
+                    let db = db.clone();
+                    async move { ai::recommend_artists(&db, &ai_config).await }
+                })
+                .await;
+            }
+
+            if ai_config.artist_bios {
+                run_stage(&state.artist_bio_running, "artist bios", {
+                    let ai_config = ai_config.clone();
+                    let db = db.clone();
+                    async move { ai::bio_artists(&db, &ai_config).await }
+                })
+                .await;
+            }
+        }
     }
 
     // Step 3: Analysis (always)
-    run_stage(&state.analysis_running, "analysis", async {
-        analysis::analyze_library(&state.db).await
+    run_stage(&state.analysis_running, "analysis", {
+        let db = state.db.clone();
+        async move { analysis::analyze_library(&db).await }
     })
     .await;
 
@@ -152,7 +186,7 @@ async fn main() -> Result<()> {
 
     let state = Arc::new(AppState {
         db: pool,
-        config: config.clone(),
+        config: RwLock::new(config.clone()),
         enrichment_running: AtomicBool::new(false),
         analysis_running: AtomicBool::new(false),
         summarization_running: AtomicBool::new(false),
@@ -215,6 +249,8 @@ async fn main() -> Result<()> {
         // Featured
         .route("/featured-album", get(routes::featured::get_featured_album))
         .route("/featured-artist", get(routes::featured::get_featured_artist))
+        .route("/featured-albums", get(routes::featured::get_featured_albums))
+        .route("/featured-artists", get(routes::featured::get_featured_artists))
         // Daily Mixes
         .route("/mixes/daily", get(routes::daily_mixes::list_daily_mixes))
         .route("/mixes/daily/{id}", get(routes::daily_mixes::get_daily_mix))
@@ -238,6 +274,8 @@ async fn main() -> Result<()> {
         .route("/library/artist-recommendations", post(routes::library::trigger_artist_recommendations))
         .route("/library/artist-bios", post(routes::library::trigger_artist_bios))
         .route("/library/stats", get(routes::library::library_stats))
+        .route("/library/ai/clear", post(routes::library::clear_ai_data))
+        .route("/config", get(routes::config::get_config).put(routes::config::update_config))
         .route("/users", get(routes::users::list_users))
         .route("/users", post(routes::users::create_user))
         .route("/users/{id}", delete(routes::users::delete_user))

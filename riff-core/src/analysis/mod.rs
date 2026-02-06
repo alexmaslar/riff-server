@@ -25,6 +25,16 @@ pub async fn analyze_library(pool: &SqlitePool) -> anyhow::Result<AnalysisResult
         errors: Vec::new(),
     };
 
+    // Reset any tracks stuck in 'analyzing' from a previous interrupted run
+    let reset = sqlx::query(
+        "UPDATE tracks SET analysis_status = 'pending' WHERE analysis_status = 'analyzing'",
+    )
+    .execute(pool)
+    .await?;
+    if reset.rows_affected() > 0 {
+        info!("reset {} tracks from 'analyzing' back to 'pending'", reset.rows_affected());
+    }
+
     let rows: Vec<(String, String, i32, i64)> = sqlx::query_as(
         "SELECT id, file_path, duration_seconds, file_size_bytes FROM tracks WHERE analysis_status = 'pending'",
     )

@@ -68,6 +68,16 @@ pub struct AiConfig {
     pub model: Option<String>,
     #[serde(default)]
     pub base_url: Option<String>,
+    #[serde(default = "default_true")]
+    pub album_summaries: bool,
+    #[serde(default = "default_true")]
+    pub album_ratings: bool,
+    #[serde(default = "default_true")]
+    pub album_recommendations: bool,
+    #[serde(default = "default_true")]
+    pub artist_bios: bool,
+    #[serde(default = "default_true")]
+    pub artist_recommendations: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -96,6 +106,11 @@ impl Default for AiConfig {
             api_key: None,
             model: None,
             base_url: None,
+            album_summaries: true,
+            album_ratings: true,
+            album_recommendations: true,
+            artist_bios: true,
+            artist_recommendations: true,
         }
     }
 }
@@ -193,5 +208,16 @@ impl Config {
         } else {
             Ok(Config::default())
         }
+    }
+
+    pub fn save(&self) -> anyhow::Result<()> {
+        let config_dir = dirs::config_dir()
+            .ok_or_else(|| anyhow::anyhow!("could not determine config directory"))?
+            .join("riff");
+
+        std::fs::create_dir_all(&config_dir)?;
+        let yaml = serde_yaml_ng::to_string(self)?;
+        std::fs::write(config_dir.join("config.yaml"), yaml)?;
+        Ok(())
     }
 }

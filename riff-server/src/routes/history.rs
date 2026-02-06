@@ -6,6 +6,7 @@ use riff_core::auth::Claims;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::Row;
+use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -164,64 +165,71 @@ pub async fn continue_listening(
 }
 
 /// GET /history/stats — Listening statistics for the authenticated user
+/// Query params: ?period=week (default: all)
 pub async fn listening_stats(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<Claims>,
+    Query(params): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, AppError> {
+    let date_filter = match params.get("period").map(|s| s.as_str()) {
+        Some("week") => " AND ph.played_at >= datetime('now', '-7 days')",
+        _ => "",
+    };
+
     // Top Artists
-    let top_artists = sqlx::query(
-        "SELECT ar.id, ar.name, COUNT(*) as plays, SUM(t.duration_seconds) as listening_seconds
+    let top_artists = sqlx::query(&format!(
+        "SELECT ar.id, ar.name, ar.image_url, COUNT(*) as plays, SUM(t.duration_seconds) as listening_seconds
          FROM play_history ph
          JOIN tracks t ON ph.track_id = t.id
          JOIN albums a ON t.album_id = a.id
          JOIN artists ar ON a.artist_id = ar.id
-         WHERE ph.user_id = ? AND ph.completed = 1
+         WHERE ph.user_id = ? AND ph.completed = 1{date_filter}
          GROUP BY ar.id
          ORDER BY plays DESC
          LIMIT 5",
-    )
+    ))
     .bind(&claims.sub)
     .fetch_all(&state.db)
     .await?;
 
     // Top Albums
-    let top_albums = sqlx::query(
+    let top_albums = sqlx::query(&format!(
         "SELECT a.id, a.title, ar.name as artist_name, a.cover_art_path, COUNT(*) as plays
          FROM play_history ph
          JOIN tracks t ON ph.track_id = t.id
          JOIN albums a ON t.album_id = a.id
          JOIN artists ar ON a.artist_id = ar.id
-         WHERE ph.user_id = ? AND ph.completed = 1
+         WHERE ph.user_id = ? AND ph.completed = 1{date_filter}
          GROUP BY a.id
          ORDER BY plays DESC
          LIMIT 5",
-    )
+    ))
     .bind(&claims.sub)
     .fetch_all(&state.db)
     .await?;
 
     // Genre breakdown using json_each() in SQL
-    let genre_rows = sqlx::query(
+    let genre_rows = sqlx::query(&format!(
         "SELECT j.value as genre_name, SUM(t.duration_seconds) as genre_seconds
          FROM play_history ph
          JOIN tracks t ON ph.track_id = t.id
          JOIN albums a ON t.album_id = a.id,
          json_each(CASE WHEN a.genre = '[]' OR a.genre IS NULL THEN '[\"Unknown\"]' ELSE a.genre END) j
-         WHERE ph.user_id = ? AND ph.completed = 1
+         WHERE ph.user_id = ? AND ph.completed = 1{date_filter}
          GROUP BY j.value
          ORDER BY genre_seconds DESC",
-    )
+    ))
     .bind(&claims.sub)
     .fetch_all(&state.db)
     .await?;
 
     // Totals
-    let totals = sqlx::query(
+    let totals = sqlx::query(&format!(
         "SELECT COUNT(*) as total_plays, COALESCE(SUM(t.duration_seconds), 0) as total_seconds
          FROM play_history ph
          JOIN tracks t ON ph.track_id = t.id
-         WHERE ph.user_id = ? AND ph.completed = 1",
-    )
+         WHERE ph.user_id = ? AND ph.completed = 1{date_filter}",
+    ))
     .bind(&claims.sub)
     .fetch_one(&state.db)
     .await?;
@@ -232,6 +240,7 @@ pub async fn listening_stats(
             json!({
                 "id": row.get::<String, _>("id"),
                 "name": row.get::<String, _>("name"),
+                "imageUrl": row.get::<Option<String>, _>("image_url"),
                 "plays": row.get::<i64, _>("plays"),
                 "listeningSeconds": row.get::<i64, _>("listening_seconds"),
             })

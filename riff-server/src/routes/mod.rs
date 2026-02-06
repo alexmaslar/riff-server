@@ -1,7 +1,10 @@
 pub mod albums;
 pub mod artists;
 pub mod auth;
+pub mod config;
+pub mod daily_mixes;
 pub mod favorites;
+pub mod featured;
 pub mod history;
 pub mod library;
 pub mod playlists;

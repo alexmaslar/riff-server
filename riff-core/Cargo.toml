@@ -2,7 +2,7 @@
 name = "riff-core"
 version = "0.1.0"
 edition = "2021"
-include = ["assets/**/*", "src/**/*", "migrations/**/*"]
+include = ["src/**/*", "migrations/**/*"]
 
 [dependencies]
 tokio = { workspace = true }
@@ -30,4 +30,3 @@ ebur128 = "0.1"
 stratum-dsp = "1.0"
 async-trait = "0.1"
 image = { version = "0.25", features = ["png", "jpeg"] }
-imageproc = "0.25"

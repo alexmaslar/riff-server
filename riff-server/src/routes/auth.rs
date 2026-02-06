@@ -41,7 +41,7 @@ pub async fn login(
         Err(e) => return Json(json!({ "error": e.to_string() })),
     };
 
-    match auth::create_token(&user_id, &username, &role, &state.config.auth.jwt_secret) {
+    match auth::create_token(&user_id, &username, &role, &state.config.read().await.auth.jwt_secret) {
         Ok(token) => Json(json!({
             "token": token,
             "user": {
@@ -63,7 +63,9 @@ pub async fn refresh(
         None => return Json(json!({ "error": "missing authorization header" })),
     };
 
-    let claims = match auth::validate_token(token, &state.config.auth.jwt_secret) {
+    let jwt_secret = state.config.read().await.auth.jwt_secret.clone();
+
+    let claims = match auth::validate_token(token, &jwt_secret) {
         Ok(c) => c,
         Err(e) => return Json(json!({ "error": format!("invalid token: {}", e) })),
     };
@@ -73,7 +75,7 @@ pub async fn refresh(
         Err(e) => return Json(json!({ "error": e.to_string() })),
     };
 
-    match auth::create_token(&user_id, &claims.username, &claims.role, &state.config.auth.jwt_secret) {
+    match auth::create_token(&user_id, &claims.username, &claims.role, &jwt_secret) {
         Ok(new_token) => Json(json!({ "token": new_token })),
         Err(e) => Json(json!({ "error": e.to_string() })),
     }

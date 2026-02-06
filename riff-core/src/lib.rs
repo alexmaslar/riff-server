@@ -1,9 +1,11 @@
 pub mod ai;
 pub mod analysis;
-pub mod artwork;
 pub mod auth;
 pub mod config;
+pub mod daily_mixes;
 pub mod db;
+pub mod featured;
 pub mod discogs;
+pub mod mix_collage;
 pub mod models;
 pub mod scanner;

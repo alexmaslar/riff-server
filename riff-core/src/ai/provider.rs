@@ -8,9 +8,27 @@ use crate::config::{AiConfig, AiProvider};
 
 type Limiter = RateLimiter<NotKeyed, InMemoryState, DefaultClock>;
 
+pub struct GenerateOptions {
+    pub max_tokens: u32,
+    pub temperature: Option<f64>,
+    pub web_search: bool,
+    pub json_output: bool,
+}
+
+impl Default for GenerateOptions {
+    fn default() -> Self {
+        Self {
+            max_tokens: 4096,
+            temperature: None,
+            web_search: false,
+            json_output: false,
+        }
+    }
+}
+
 #[async_trait::async_trait]
 pub trait AiProviderTrait: Send + Sync {
-    async fn generate(&self, system: &str, user: &str) -> anyhow::Result<String>;
+    async fn generate(&self, system: &str, user: &str, opts: &GenerateOptions) -> anyhow::Result<String>;
 }
 
 pub fn create_provider(config: &AiConfig) -> anyhow::Result<Box<dyn AiProviderTrait>> {
@@ -94,15 +112,27 @@ struct OpenAiContent {
 
 #[async_trait::async_trait]
 impl AiProviderTrait for OpenAiProvider {
-    async fn generate(&self, system: &str, user: &str) -> anyhow::Result<String> {
+    async fn generate(&self, system: &str, user: &str, opts: &GenerateOptions) -> anyhow::Result<String> {
         self.limiter.until_ready().await;
 
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "model": self.model,
             "instructions": system,
             "input": user,
-            "tools": [{ "type": "web_search" }],
+            "max_output_tokens": opts.max_tokens,
         });
+
+        if opts.web_search {
+            body["tools"] = serde_json::json!([{ "type": "web_search" }]);
+        }
+
+        if let Some(temp) = opts.temperature {
+            body["temperature"] = serde_json::json!(temp);
+        }
+
+        if opts.json_output {
+            body["text"] = serde_json::json!({ "format": { "type": "json_object" } });
+        }
 
         let resp = self.http
             .post(format!("{}/responses", self.base_url))
@@ -153,17 +183,28 @@ struct AnthropicContent {
 
 #[async_trait::async_trait]
 impl AiProviderTrait for AnthropicProvider {
-    async fn generate(&self, system: &str, user: &str) -> anyhow::Result<String> {
+    async fn generate(&self, system: &str, user: &str, opts: &GenerateOptions) -> anyhow::Result<String> {
         self.limiter.until_ready().await;
 
-        let body = serde_json::json!({
+        let mut messages = vec![
+            serde_json::json!({ "role": "user", "content": user }),
+        ];
+
+        // Prefill assistant response with "{" to force JSON output
+        if opts.json_output {
+            messages.push(serde_json::json!({ "role": "assistant", "content": "{" }));
+        }
+
+        let mut body = serde_json::json!({
             "model": self.model,
-            "max_tokens": 1024,
+            "max_tokens": opts.max_tokens,
             "system": system,
-            "messages": [
-                { "role": "user", "content": user },
-            ],
+            "messages": messages,
         });
+
+        if let Some(temp) = opts.temperature {
+            body["temperature"] = serde_json::json!(temp);
+        }
 
         let resp = self.http
             .post(format!("{}/messages", self.base_url))
@@ -181,9 +222,16 @@ impl AiProviderTrait for AnthropicProvider {
         }
 
         let data: AnthropicResponse = resp.json().await?;
-        data.content.into_iter().next()
+        let text = data.content.into_iter().next()
             .map(|c| c.text)
-            .ok_or_else(|| anyhow::anyhow!("empty response from Anthropic"))
+            .ok_or_else(|| anyhow::anyhow!("empty response from Anthropic"))?;
+
+        // When using JSON prefilling, prepend the "{" we used as prefill
+        if opts.json_output {
+            Ok(format!("{{{}", text))
+        } else {
+            Ok(text)
+        }
     }
 }
 
@@ -208,10 +256,10 @@ struct OllamaMessage {
 
 #[async_trait::async_trait]
 impl AiProviderTrait for OllamaProvider {
-    async fn generate(&self, system: &str, user: &str) -> anyhow::Result<String> {
+    async fn generate(&self, system: &str, user: &str, opts: &GenerateOptions) -> anyhow::Result<String> {
         self.limiter.until_ready().await;
 
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "model": self.model,
             "stream": false,
             "messages": [
@@ -219,6 +267,14 @@ impl AiProviderTrait for OllamaProvider {
                 { "role": "user", "content": user },
             ],
         });
+
+        if opts.json_output {
+            body["format"] = serde_json::json!("json");
+        }
+
+        if let Some(temp) = opts.temperature {
+            body["options"] = serde_json::json!({ "temperature": temp });
+        }
 
         let resp = self.http
             .post(format!("{}/api/chat", self.base_url))

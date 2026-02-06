@@ -1244,15 +1244,6 @@ fn camelot_distance(key_a: &str, key_b: &str) -> f64 {
 // ─── Cover Generation ────────────────────────────────────────────────────────
 
 async fn generate_mix_cover(pool: &SqlitePool, mix_id: &str) -> Result<Option<PathBuf>> {
-    // Get the mix type for signature color tinting
-    let mix_type: String = sqlx::query_as::<_, (String,)>(
-        "SELECT mix_type FROM daily_mixes WHERE id = ?",
-    )
-    .bind(mix_id)
-    .fetch_one(pool)
-    .await?
-    .0;
-
     // Get distinct album cover paths from the mix's tracks (up to 4)
     let rows = sqlx::query_as::<_, (String,)>(
         "SELECT DISTINCT a.cover_art_path
@@ -1273,15 +1264,15 @@ async fn generate_mix_cover(pool: &SqlitePool, mix_id: &str) -> Result<Option<Pa
 
     let cover_paths: Vec<PathBuf> = rows.iter().map(|(p,)| PathBuf::from(p)).collect();
 
-    let mix_id_owned = mix_id.to_string();
     let result = tokio::task::spawn_blocking(move || {
         let path_refs: Vec<&Path> = cover_paths.iter().map(|p| p.as_path()).collect();
-        crate::artwork::generate_mix_mosaic(&path_refs, &mix_type)
+        crate::mix_collage::generate_mix_collage(&path_refs)
     })
     .await??;
+    let mix_id_owned = mix_id.to_string();
 
     // Save as JPEG to cache dir
-    let cache_dir = crate::artwork::cache::get_cache_dir()?;
+    let cache_dir = crate::mix_collage::get_cache_dir()?;
     let filename = format!("mix_{}.jpg", mix_id_owned);
     let file_path = cache_dir.join(&filename);
 
@@ -1297,7 +1288,7 @@ async fn generate_mix_cover(pool: &SqlitePool, mix_id: &str) -> Result<Option<Pa
         .execute(pool)
         .await?;
 
-    info!("generated mosaic cover for mix {mix_id_owned}");
+    info!("generated collage cover for mix {mix_id_owned}");
     Ok(Some(file_path))
 }
 
