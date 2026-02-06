@@ -293,8 +293,151 @@ fn maybe_spawn_rating(state: &Arc<AppState>) -> bool {
         }
         rate_state.rating_running.store(false, Ordering::SeqCst);
 
-        // Chain analysis after rating
-        maybe_spawn_analysis(&rate_state);
+        // Chain recommendations after rating, then analysis
+        maybe_spawn_recommendations(&rate_state);
+    });
+
+    true
+}
+
+pub async fn trigger_recommendations(State(state): State<Arc<AppState>>) -> Json<Value> {
+    if !state.config.metadata.ai.enabled {
+        return Json(json!({ "error": "AI not enabled in config" }));
+    }
+
+    if state.recommendation_running.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+        return Json(json!({ "status": "already_running" }));
+    }
+
+    let rec_state = state.clone();
+    tokio::spawn(async move {
+        match ai::recommend_library_force(&rec_state.db, &rec_state.config.metadata.ai).await {
+            Ok(result) => {
+                tracing::info!(
+                    "recommendations complete: {} albums, {} recommendations",
+                    result.albums_processed,
+                    result.recommendations_generated,
+                );
+            }
+            Err(e) => tracing::warn!("recommendations failed: {}", e),
+        }
+        rec_state.recommendation_running.store(false, Ordering::SeqCst);
+    });
+
+    Json(json!({ "status": "started" }))
+}
+
+pub async fn trigger_artist_recommendations(State(state): State<Arc<AppState>>) -> Json<Value> {
+    if !state.config.metadata.ai.enabled {
+        return Json(json!({ "error": "AI not enabled in config" }));
+    }
+
+    if state.artist_recommendation_running.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+        return Json(json!({ "status": "already_running" }));
+    }
+
+    let rec_state = state.clone();
+    tokio::spawn(async move {
+        match ai::recommend_artists_force(&rec_state.db, &rec_state.config.metadata.ai).await {
+            Ok(result) => {
+                tracing::info!(
+                    "artist recommendations complete: {} artists, {} recommendations",
+                    result.albums_processed,
+                    result.recommendations_generated,
+                );
+            }
+            Err(e) => tracing::warn!("artist recommendations failed: {}", e),
+        }
+        rec_state.artist_recommendation_running.store(false, Ordering::SeqCst);
+    });
+
+    Json(json!({ "status": "started" }))
+}
+
+pub async fn trigger_artist_bios(State(state): State<Arc<AppState>>) -> Json<Value> {
+    if !state.config.metadata.ai.enabled {
+        return Json(json!({ "error": "AI not enabled in config" }));
+    }
+
+    if state.artist_bio_running.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+        return Json(json!({ "status": "already_running" }));
+    }
+
+    let bio_state = state.clone();
+    tokio::spawn(async move {
+        match ai::bio_artists(&bio_state.db, &bio_state.config.metadata.ai).await {
+            Ok(result) => {
+                tracing::info!(
+                    "artist bios complete: {} processed, {} errors",
+                    result.artists_processed,
+                    result.errors.len(),
+                );
+            }
+            Err(e) => tracing::warn!("artist bios failed: {}", e),
+        }
+        bio_state.artist_bio_running.store(false, Ordering::SeqCst);
+    });
+
+    Json(json!({ "status": "started" }))
+}
+
+fn maybe_spawn_recommendations(state: &Arc<AppState>) -> bool {
+    if !state.config.metadata.ai.enabled {
+        return false;
+    }
+
+    if state.recommendation_running.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+        tracing::debug!("recommendations already running, skipping");
+        return false;
+    }
+
+    let rec_state = state.clone();
+    tokio::spawn(async move {
+        match ai::recommend_library(&rec_state.db, &rec_state.config.metadata.ai).await {
+            Ok(result) => {
+                tracing::info!(
+                    "recommendations complete: {} albums, {} recommendations",
+                    result.albums_processed,
+                    result.recommendations_generated,
+                );
+            }
+            Err(e) => tracing::warn!("recommendations failed: {}", e),
+        }
+        rec_state.recommendation_running.store(false, Ordering::SeqCst);
+
+        // Chain artist recommendations after album recommendations
+        maybe_spawn_artist_recommendations(&rec_state);
+    });
+
+    true
+}
+
+fn maybe_spawn_artist_recommendations(state: &Arc<AppState>) -> bool {
+    if !state.config.metadata.ai.enabled {
+        return false;
+    }
+
+    if state.artist_recommendation_running.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+        tracing::debug!("artist recommendations already running, skipping");
+        return false;
+    }
+
+    let rec_state = state.clone();
+    tokio::spawn(async move {
+        match ai::recommend_artists(&rec_state.db, &rec_state.config.metadata.ai).await {
+            Ok(result) => {
+                tracing::info!(
+                    "artist recommendations complete: {} artists, {} recommendations",
+                    result.albums_processed,
+                    result.recommendations_generated,
+                );
+            }
+            Err(e) => tracing::warn!("artist recommendations failed: {}", e),
+        }
+        rec_state.artist_recommendation_running.store(false, Ordering::SeqCst);
+
+        // Chain analysis after artist recommendations
+        maybe_spawn_analysis(&rec_state);
     });
 
     true

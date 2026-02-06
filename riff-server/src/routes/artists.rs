@@ -5,6 +5,7 @@ use axum::{
 use riff_core::auth::Claims;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sqlx::SqlitePool;
 use std::sync::Arc;
 
 use crate::error::AppError;
@@ -26,6 +27,14 @@ pub struct ArtistResponse {
 }
 
 #[derive(Debug, Serialize)]
+pub struct SimilarArtist {
+    pub id: String,
+    pub name: String,
+    pub image_url: Option<String>,
+    pub reason: String,
+}
+
+#[derive(Debug, Serialize)]
 pub struct ArtistDetailResponse {
     pub id: String,
     pub name: String,
@@ -33,6 +42,7 @@ pub struct ArtistDetailResponse {
     pub image_url: Option<String>,
     pub albums: Vec<AlbumSummary>,
     pub is_favorited: bool,
+    pub similar_artists: Vec<SimilarArtist>,
 }
 
 #[derive(Debug, Serialize)]
@@ -53,7 +63,7 @@ pub async fn list_artists(
     let rows = if let Some(ref search) = params.search {
         let pattern = format!("%{}%", search);
         sqlx::query_as::<_, (String, String, Option<String>, Option<String>, i64)>(
-            "SELECT id, name, bio, image_url, COUNT(*) OVER() as total_count FROM artists WHERE name LIKE ? ORDER BY name LIMIT ? OFFSET ?",
+            "SELECT id, name, COALESCE(ai_bio, bio) as bio, image_url, COUNT(*) OVER() as total_count FROM artists WHERE name LIKE ? ORDER BY name LIMIT ? OFFSET ?",
         )
         .bind(&pattern)
         .bind(limit)
@@ -62,7 +72,7 @@ pub async fn list_artists(
         .await
     } else {
         sqlx::query_as::<_, (String, String, Option<String>, Option<String>, i64)>(
-            "SELECT id, name, bio, image_url, COUNT(*) OVER() as total_count FROM artists ORDER BY name LIMIT ? OFFSET ?",
+            "SELECT id, name, COALESCE(ai_bio, bio) as bio, image_url, COUNT(*) OVER() as total_count FROM artists ORDER BY name LIMIT ? OFFSET ?",
         )
         .bind(limit)
         .bind(offset)
@@ -90,19 +100,28 @@ pub async fn get_artist(
     Extension(claims): Extension<Claims>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, AppError> {
+    let detail = build_artist_detail(&state.db, &id, &claims.sub).await?;
+    Ok(Json(json!(detail)))
+}
+
+pub async fn build_artist_detail(
+    db: &SqlitePool,
+    artist_id: &str,
+    user_id: &str,
+) -> Result<ArtistDetailResponse, AppError> {
     let artist = sqlx::query_as::<_, (String, String, Option<String>, Option<String>)>(
-        "SELECT id, name, bio, image_url FROM artists WHERE id = ?",
+        "SELECT id, name, COALESCE(ai_bio, bio) as bio, image_url FROM artists WHERE id = ?",
     )
-    .bind(&id)
-    .fetch_optional(&state.db)
+    .bind(artist_id)
+    .fetch_optional(db)
     .await?
     .ok_or_else(|| AppError::NotFound("artist not found".to_string()))?;
 
     let albums = sqlx::query_as::<_, (String, String, Option<i32>, Option<String>)>(
         "SELECT id, title, year, cover_art_path FROM albums WHERE artist_id = ? ORDER BY year, title",
     )
-    .bind(&id)
-    .fetch_all(&state.db)
+    .bind(artist_id)
+    .fetch_all(db)
     .await
     .unwrap_or_default();
 
@@ -119,19 +138,42 @@ pub async fn get_artist(
     let is_favorited = sqlx::query_as::<_, (i64,)>(
         "SELECT COUNT(*) FROM favorites WHERE user_id = ? AND entity_type = 'artist' AND entity_id = ?",
     )
-    .bind(&claims.sub)
-    .bind(&id)
-    .fetch_one(&state.db)
+    .bind(user_id)
+    .bind(artist_id)
+    .fetch_one(db)
     .await
     .map(|(count,)| count > 0)
     .unwrap_or(false);
 
-    Ok(Json(json!(ArtistDetailResponse {
+    let similar_rows = sqlx::query_as::<_, (String, String, Option<String>, String)>(
+        "SELECT a.id, a.name, a.image_url, r.reason \
+         FROM artist_recommendations r \
+         JOIN artists a ON r.recommended_artist_id = a.id \
+         WHERE r.artist_id = ? \
+         ORDER BY r.sort_order"
+    )
+    .bind(artist_id)
+    .fetch_all(db)
+    .await
+    .unwrap_or_default();
+
+    let similar_artists: Vec<SimilarArtist> = similar_rows
+        .into_iter()
+        .map(|(id, name, image_url, reason)| SimilarArtist {
+            id,
+            name,
+            image_url,
+            reason,
+        })
+        .collect();
+
+    Ok(ArtistDetailResponse {
         id: artist.0,
         name: artist.1,
         bio: artist.2,
         image_url: artist.3,
         albums: album_summaries,
         is_favorited,
-    })))
+        similar_artists,
+    })
 }

@@ -10,7 +10,7 @@ use axum::{
     routing::{delete, get, post},
     BoxError, Json, Router,
 };
-use riff_core::{ai, analysis, auth, config::Config, db, discogs, scanner};
+use riff_core::{ai, analysis, auth, config::Config, daily_mixes, db, discogs, scanner};
 use serde_json::{json, Value};
 use sqlx::SqlitePool;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -29,6 +29,9 @@ pub struct AppState {
     pub analysis_running: AtomicBool,
     pub summarization_running: AtomicBool,
     pub rating_running: AtomicBool,
+    pub recommendation_running: AtomicBool,
+    pub artist_bio_running: AtomicBool,
+    pub artist_recommendation_running: AtomicBool,
 }
 
 async fn run_background_pipeline(state: Arc<AppState>) {
@@ -53,6 +56,21 @@ async fn run_background_pipeline(state: Arc<AppState>) {
             ai::rate_library(&state.db, &state.config.metadata.ai).await
         })
         .await;
+
+        run_stage(&state.recommendation_running, "recommendations", async {
+            ai::recommend_library(&state.db, &state.config.metadata.ai).await
+        })
+        .await;
+
+        run_stage(&state.artist_recommendation_running, "artist recommendations", async {
+            ai::recommend_artists(&state.db, &state.config.metadata.ai).await
+        })
+        .await;
+
+        run_stage(&state.artist_bio_running, "artist bios", async {
+            ai::bio_artists(&state.db, &state.config.metadata.ai).await
+        })
+        .await;
     }
 
     // Step 3: Analysis (always)
@@ -60,6 +78,12 @@ async fn run_background_pipeline(state: Arc<AppState>) {
         analysis::analyze_library(&state.db).await
     })
     .await;
+
+    // Step 4: Daily mixes (always, after analysis so ratings/BPM are available)
+    match daily_mixes::generate_all_daily_mixes(&state.db).await {
+        Ok(_) => tracing::info!("daily mixes complete"),
+        Err(e) => tracing::warn!("daily mixes failed: {e}"),
+    }
 }
 
 async fn run_stage<F, R>(flag: &AtomicBool, name: &str, f: F)
@@ -76,69 +100,6 @@ where
         }
         flag.store(false, Ordering::SeqCst);
     }
-}
-
-async fn pregenerate_album_art(db: &SqlitePool) {
-    use std::path::Path;
-
-    tracing::info!("pre-generating album art effects");
-
-    // Get albums with cover art
-    let albums = sqlx::query_as::<_, (String, String, String, i64)>(
-        "SELECT id, title, cover_art_path, play_count FROM albums
-         WHERE cover_art_path IS NOT NULL"
-    )
-    .fetch_all(db)
-    .await
-    .unwrap_or_default();
-
-    let total = albums.len();
-    let mut generated = 0;
-    let mut skipped = 0;
-    let mut failed = 0;
-
-    for (album_id, title, cover_path, play_count) in &albums {
-        // Wrapped: file-based, saved as cover_wrapped.jpg in album folder
-        let wrapped_path = Path::new(cover_path).parent().map(|p| p.join("cover_wrapped.jpg"));
-        if let Some(ref wp) = wrapped_path {
-            if wp.exists() {
-                tracing::debug!("skipping wrapped for \"{}\" — already exists", title);
-                skipped += 1;
-            } else {
-                let cover_path_wrapped = cover_path.clone();
-                let pc = *play_count as u32;
-                tracing::info!("[{}/{}] generating wrapped for \"{}\"", generated + skipped + failed + 1, total * 2, title);
-                let result = tokio::task::spawn_blocking(move || {
-                    riff_core::artwork::effects::generate_and_save_wrapped(
-                        Path::new(&cover_path_wrapped),
-                        pc,
-                        1024,
-                    )
-                })
-                .await;
-
-                match result {
-                    Ok(Ok(_)) => generated += 1,
-                    Ok(Err(e)) => {
-                        tracing::warn!("failed to generate wrapped for {}: {}", album_id, e);
-                        failed += 1;
-                    }
-                    Err(e) => {
-                        tracing::warn!("wrapped generation panicked for {}: {}", album_id, e);
-                        failed += 1;
-                    }
-                }
-            }
-        }
-    }
-
-    tracing::info!(
-        "album art pre-generation complete: {} generated, {} skipped, {} failed (total: {})",
-        generated,
-        skipped,
-        failed,
-        total * 2
-    );
 }
 
 #[tokio::main]
@@ -196,15 +157,10 @@ async fn main() -> Result<()> {
         analysis_running: AtomicBool::new(false),
         summarization_running: AtomicBool::new(false),
         rating_running: AtomicBool::new(false),
+        recommendation_running: AtomicBool::new(false),
+        artist_bio_running: AtomicBool::new(false),
+        artist_recommendation_running: AtomicBool::new(false),
     });
-
-    // Pre-generate album art effects first (for albums that already have covers)
-    {
-        let art_state = state.clone();
-        tokio::spawn(async move {
-            pregenerate_album_art(&art_state.db).await;
-        });
-    }
 
     // Background pipeline: enrich → summarize → rate → analyze
     {
@@ -232,7 +188,8 @@ async fn main() -> Result<()> {
         .route("/health", get(health))
         .route("/auth/login", post(routes::auth::login))
         .route("/auth/refresh", post(routes::auth::refresh))
-        .route("/albums/{id}/cover", get(routes::albums::get_cover));
+        .route("/albums/{id}/cover", get(routes::albums::get_cover))
+        .route("/mixes/daily/{id}/cover", get(routes::daily_mixes::get_mix_cover));
 
     // Protected routes (require valid JWT)
     let protected = Router::new()
@@ -255,6 +212,13 @@ async fn main() -> Result<()> {
         // Favorites
         .route("/favorites", post(routes::favorites::toggle_favorite).get(routes::favorites::list_favorites))
         .route("/favorites/check", get(routes::favorites::check_favorite))
+        // Featured
+        .route("/featured-album", get(routes::featured::get_featured_album))
+        .route("/featured-artist", get(routes::featured::get_featured_artist))
+        // Daily Mixes
+        .route("/mixes/daily", get(routes::daily_mixes::list_daily_mixes))
+        .route("/mixes/daily/{id}", get(routes::daily_mixes::get_daily_mix))
+        .route("/mixes/daily/{id}/save", post(routes::daily_mixes::save_mix_as_playlist))
         .route_layer(axum_mw::from_fn_with_state(
             state.clone(),
             middleware::require_auth,
@@ -270,8 +234,10 @@ async fn main() -> Result<()> {
         .route("/library/summarize/{album_id}", post(routes::library::summarize_album))
         .route("/library/rate", post(routes::library::trigger_rating))
         .route("/library/rate/{album_id}", post(routes::library::rate_album))
+        .route("/library/recommend", post(routes::library::trigger_recommendations))
+        .route("/library/artist-recommendations", post(routes::library::trigger_artist_recommendations))
+        .route("/library/artist-bios", post(routes::library::trigger_artist_bios))
         .route("/library/stats", get(routes::library::library_stats))
-        .route("/admin/generate-wrapped-covers", post(routes::albums::generate_wrapped_covers))
         .route("/users", get(routes::users::list_users))
         .route("/users", post(routes::users::create_user))
         .route("/users/{id}", delete(routes::users::delete_user))
