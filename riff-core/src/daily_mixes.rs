@@ -29,16 +29,16 @@ const FLOW_BLISS_WEIGHT: f64 = 0.8;
 const FLOW_MOOD_PENALTY: f64 = 0.3;
 const FLOW_LOUDNESS_ARC_WEIGHT: f64 = 0.15;
 
-struct MixTrack {
-    id: String,
-    artist_id: String,
-    album_id: String,
-    bpm: Option<f64>,
-    key: Option<String>,
-    loudness: Option<f64>,
-    bliss: Option<Vec<f64>>,
-    duration_seconds: Option<i32>,
-    mood: Option<String>,
+pub struct MixTrack {
+    pub id: String,
+    pub artist_id: String,
+    pub album_id: String,
+    pub bpm: Option<f64>,
+    pub key: Option<String>,
+    pub loudness: Option<f64>,
+    pub bliss: Option<Vec<f64>>,
+    pub duration_seconds: Option<i32>,
+    pub mood: Option<String>,
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────

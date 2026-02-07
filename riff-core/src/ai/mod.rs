@@ -1,5 +1,5 @@
-mod prompt;
-mod provider;
+pub mod prompt;
+pub mod provider;
 
 use serde::Deserialize;
 use sqlx::SqlitePool;

@@ -267,6 +267,11 @@ async fn main() -> Result<()> {
         .route("/playlists/{id}", get(routes::playlists::get_playlist).delete(routes::playlists::delete_playlist))
         .route("/playlists/{id}/tracks", post(routes::playlists::add_track).put(routes::playlists::reorder_tracks))
         .route("/playlists/{id}/tracks/{track_id}", delete(routes::playlists::remove_track))
+        // Smart Playlists (AI)
+        .route("/playlists/ai/suggestions", get(routes::smart_playlist::get_suggestions))
+        .route("/playlists/ai/generate", post(routes::smart_playlist::generate))
+        .route("/playlists/ai/refine", post(routes::smart_playlist::refine))
+        .route("/playlists/ai/save", post(routes::smart_playlist::save))
         // History
         .route("/history", post(routes::history::record_play))
         .route("/history/albums", get(routes::history::recently_played_albums))
