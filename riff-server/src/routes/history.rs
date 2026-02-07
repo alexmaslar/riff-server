@@ -57,7 +57,7 @@ pub async fn recently_played_albums(
 
     let rows = sqlx::query(
         "SELECT a.id, a.title, a.artist_id, ar.name, a.year, a.genre, a.style,
-                a.label, a.cover_art_path, a.added_at,
+                a.label, a.cover_art_path, a.added_at, a.play_count,
                 MAX(ph.played_at) as last_played
          FROM play_history ph
          JOIN tracks t ON ph.track_id = t.id
@@ -91,6 +91,7 @@ pub async fn recently_played_albums(
                 "label": row.get::<Option<String>, _>("label"),
                 "cover_art_path": row.get::<Option<String>, _>("cover_art_path"),
                 "added_at": row.get::<String, _>("added_at"),
+                "play_count": row.get::<i64, _>("play_count"),
             })
         })
         .collect();
@@ -108,7 +109,7 @@ pub async fn continue_listening(
 
     let rows = sqlx::query(
         "SELECT a.id, a.title, a.artist_id, ar.name, a.year, a.genre, a.style,
-                a.label, a.cover_art_path, a.added_at,
+                a.label, a.cover_art_path, a.added_at, a.play_count,
                 MAX(ph.played_at) as last_played
          FROM play_history ph
          JOIN tracks t ON ph.track_id = t.id
@@ -157,6 +158,7 @@ pub async fn continue_listening(
                 "label": row.get::<Option<String>, _>("label"),
                 "cover_art_path": row.get::<Option<String>, _>("cover_art_path"),
                 "added_at": row.get::<String, _>("added_at"),
+                "play_count": row.get::<i64, _>("play_count"),
             })
         })
         .collect();

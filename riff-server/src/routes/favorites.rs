@@ -89,7 +89,7 @@ pub async fn list_favorites(
         "album" => {
             let rows = sqlx::query(
                 "SELECT a.id, a.title, a.artist_id, ar.name, a.year, a.genre, a.style,
-                        a.label, a.cover_art_path, a.added_at
+                        a.label, a.cover_art_path, a.added_at, a.play_count
                  FROM favorites f
                  JOIN albums a ON f.entity_id = a.id
                  JOIN artists ar ON a.artist_id = ar.id
@@ -122,6 +122,7 @@ pub async fn list_favorites(
                         "label": row.get::<Option<String>, _>("label"),
                         "cover_art_path": row.get::<Option<String>, _>("cover_art_path"),
                         "added_at": row.get::<String, _>("added_at"),
+                        "play_count": row.get::<i64, _>("play_count"),
                     })
                 })
                 .collect();
