@@ -1,6 +1,8 @@
 pub mod error;
+mod discovery;
 mod middleware;
 mod routes;
+mod tunnel;
 
 use anyhow::Result;
 use axum::{
@@ -19,6 +21,7 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 use tower::ServiceBuilder;
 use tower::timeout::TimeoutLayer;
+use tower_http::compression::CompressionLayer;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
@@ -33,6 +36,7 @@ pub struct AppState {
     pub recommendation_running: AtomicBool,
     pub artist_bio_running: AtomicBool,
     pub artist_recommendation_running: AtomicBool,
+    pub tunnel_manager: tunnel::TunnelManager,
 }
 
 async fn run_background_pipeline(state: Arc<AppState>) {
@@ -194,6 +198,7 @@ async fn main() -> Result<()> {
         recommendation_running: AtomicBool::new(false),
         artist_bio_running: AtomicBool::new(false),
         artist_recommendation_running: AtomicBool::new(false),
+        tunnel_manager: tunnel::TunnelManager::new(),
     });
 
     // Background pipeline: enrich → summarize → rate → analyze
@@ -201,6 +206,29 @@ async fn main() -> Result<()> {
         let pipeline_state = state.clone();
         tokio::spawn(async move {
             run_background_pipeline(pipeline_state).await;
+        });
+    }
+
+    // Start mDNS/Bonjour service advertisement
+    let _mdns = match discovery::start_discovery(config.server.port) {
+        Ok(mdns) => Some(mdns),
+        Err(e) => {
+            tracing::warn!("mDNS advertisement failed: {e}");
+            None
+        }
+    };
+
+    // Start tunnel if remote access is enabled
+    if config.remote_access.enabled {
+        let tunnel_state = state.clone();
+        tokio::spawn(async move {
+            if let Err(e) = tunnel_state
+                .tunnel_manager
+                .start(tunnel_state.config.read().await.server.port)
+                .await
+            {
+                tracing::warn!("failed to start tunnel: {e}");
+            }
         });
     }
 
@@ -227,6 +255,7 @@ async fn main() -> Result<()> {
 
     // Protected routes (require valid JWT)
     let protected = Router::new()
+        .route("/remote-access/status", get(routes::remote_access::get_status))
         .route("/artists", get(routes::artists::list_artists))
         .route("/artists/{id}", get(routes::artists::get_artist))
         .route("/albums", get(routes::albums::list_albums))
@@ -262,6 +291,8 @@ async fn main() -> Result<()> {
 
     // Admin routes (require auth + admin role)
     let admin = Router::new()
+        .route("/remote-access/enable", post(routes::remote_access::enable))
+        .route("/remote-access/disable", post(routes::remote_access::disable))
         .route("/library/scan", post(routes::library::trigger_scan))
         .route("/library/enrich", post(routes::library::trigger_enrichment))
         .route("/library/enrich/{album_id}", post(routes::library::enrich_album))
@@ -297,15 +328,24 @@ async fn main() -> Result<()> {
                 .layer(TimeoutLayer::new(Duration::from_secs(30)))
         )
         .layer(TraceLayer::new_for_http())
+        .layer(CompressionLayer::new().gzip(true))
         .layer(cors)
-        .with_state(state);
+        .with_state(state.clone());
 
     let addr = format!("0.0.0.0:{}", config.server.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("listening on {}", addr);
 
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal(state.clone()))
+        .await?;
     Ok(())
+}
+
+async fn shutdown_signal(state: Arc<AppState>) {
+    let _ = tokio::signal::ctrl_c().await;
+    tracing::info!("shutting down...");
+    state.tunnel_manager.stop().await;
 }
 
 async fn health(State(_state): State<Arc<AppState>>) -> Json<Value> {

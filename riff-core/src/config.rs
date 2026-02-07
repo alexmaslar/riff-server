@@ -10,6 +10,8 @@ pub struct Config {
     pub auth: AuthConfig,
     #[serde(default)]
     pub metadata: MetadataConfig,
+    #[serde(default)]
+    pub remote_access: RemoteAccessConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -88,6 +90,12 @@ pub struct DiscogsConfig {
     pub auto_enrich: bool,
     #[serde(default = "default_true")]
     pub download_covers: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RemoteAccessConfig {
+    #[serde(default)]
+    pub enabled: bool,
 }
 
 fn default_true() -> bool {
@@ -170,6 +178,7 @@ impl Default for Config {
             library: LibraryConfig::default(),
             auth: AuthConfig::default(),
             metadata: MetadataConfig::default(),
+            remote_access: RemoteAccessConfig::default(),
         }
     }
 }

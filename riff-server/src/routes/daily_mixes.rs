@@ -60,28 +60,51 @@ pub async fn list_daily_mixes(
     .fetch_all(&state.db)
     .await?;
 
+    // Pre-fetch all seed artist image URLs in one query
+    let artist_ids: Vec<String> = rows
+        .iter()
+        .filter_map(|row| {
+            let sv: Option<String> = row.get("seed_value");
+            sv.and_then(|s| s.strip_prefix("artist:").map(|id| id.to_string()))
+        })
+        .collect();
+
+    let artist_images: std::collections::HashMap<String, Option<String>> = if !artist_ids.is_empty() {
+        let mut builder = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
+            "SELECT id, image_url FROM artists WHERE id IN ("
+        );
+        let mut sep = builder.separated(", ");
+        for id in &artist_ids {
+            sep.push_bind(id.clone());
+        }
+        sep.push_unseparated(")");
+
+        builder
+            .build()
+            .fetch_all(&state.db)
+            .await?
+            .into_iter()
+            .map(|row| {
+                let id: String = row.get("id");
+                let url: Option<String> = row.get("image_url");
+                (id, url)
+            })
+            .collect()
+    } else {
+        std::collections::HashMap::new()
+    };
+
     let mut mixes: Vec<Value> = Vec::new();
 
     for row in &rows {
         let mix_id: String = row.get("id");
         let seed_value: Option<String> = row.get("seed_value");
 
-        // Extract seed artist image if this is an artist mix
-        let seed_artist_image_url = if let Some(ref sv) = seed_value {
-            if let Some(artist_id) = sv.strip_prefix("artist:") {
-                sqlx::query_as::<_, (Option<String>,)>(
-                    "SELECT image_url FROM artists WHERE id = ?",
-                )
-                .bind(artist_id)
-                .fetch_optional(&state.db)
-                .await?
-                .and_then(|r| r.0)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+        let seed_artist_image_url = seed_value
+            .as_deref()
+            .and_then(|sv| sv.strip_prefix("artist:"))
+            .and_then(|artist_id| artist_images.get(artist_id))
+            .and_then(|url| url.clone());
 
         mixes.push(json!({
             "id": mix_id,

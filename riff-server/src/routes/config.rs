@@ -98,7 +98,8 @@ pub async fn update_config(
     State(state): State<Arc<AppState>>,
     Json(update): Json<ConfigUpdate>,
 ) -> Result<Json<Value>, AppError> {
-    let (response, any_newly_enabled) = {
+    // Clone config under write lock, apply mutations, then drop lock before disk I/O
+    let (config_snapshot, any_newly_enabled) = {
         let mut config = state.config.write().await;
 
         // Snapshot AI flags before mutations
@@ -173,34 +174,6 @@ pub async fn update_config(
             }
         }
 
-        config.save().map_err(|e| AppError::Internal(format!("failed to save config: {e}")))?;
-
-        let response = json!({
-            "library": {
-                "path": config.library.path,
-                "scan_interval": config.library.scan_interval,
-            },
-            "metadata": {
-                "discogs": {
-                    "api_token": config.metadata.discogs.api_token.as_deref().map(mask_secret),
-                    "auto_enrich": config.metadata.discogs.auto_enrich,
-                    "download_covers": config.metadata.discogs.download_covers,
-                },
-                "ai": {
-                    "enabled": config.metadata.ai.enabled,
-                    "provider": provider_to_str(&config.metadata.ai.provider),
-                    "api_key": config.metadata.ai.api_key.as_deref().map(mask_secret),
-                    "model": config.metadata.ai.model,
-                    "base_url": config.metadata.ai.base_url,
-                    "album_summaries": config.metadata.ai.album_summaries,
-                    "album_ratings": config.metadata.ai.album_ratings,
-                    "album_recommendations": config.metadata.ai.album_recommendations,
-                    "artist_bios": config.metadata.ai.artist_bios,
-                    "artist_recommendations": config.metadata.ai.artist_recommendations,
-                }
-            }
-        });
-
         let any_newly_enabled =
             (!old_ai_enabled && config.metadata.ai.enabled) ||
             (!old_album_summaries && config.metadata.ai.album_summaries) ||
@@ -220,8 +193,38 @@ pub async fn update_config(
             tracing::info!("AI features enabled: {}, starting generation", enabled.join(", "));
         }
 
-        (response, any_newly_enabled)
-    }; // write lock dropped
+        let snapshot = config.clone();
+        (snapshot, any_newly_enabled)
+    }; // write lock dropped before disk I/O
+
+    // Save to disk outside the lock
+    config_snapshot.save().map_err(|e| AppError::Internal(format!("failed to save config: {e}")))?;
+
+    let response = json!({
+        "library": {
+            "path": config_snapshot.library.path,
+            "scan_interval": config_snapshot.library.scan_interval,
+        },
+        "metadata": {
+            "discogs": {
+                "api_token": config_snapshot.metadata.discogs.api_token.as_deref().map(mask_secret),
+                "auto_enrich": config_snapshot.metadata.discogs.auto_enrich,
+                "download_covers": config_snapshot.metadata.discogs.download_covers,
+            },
+            "ai": {
+                "enabled": config_snapshot.metadata.ai.enabled,
+                "provider": provider_to_str(&config_snapshot.metadata.ai.provider),
+                "api_key": config_snapshot.metadata.ai.api_key.as_deref().map(mask_secret),
+                "model": config_snapshot.metadata.ai.model,
+                "base_url": config_snapshot.metadata.ai.base_url,
+                "album_summaries": config_snapshot.metadata.ai.album_summaries,
+                "album_ratings": config_snapshot.metadata.ai.album_ratings,
+                "album_recommendations": config_snapshot.metadata.ai.album_recommendations,
+                "artist_bios": config_snapshot.metadata.ai.artist_bios,
+                "artist_recommendations": config_snapshot.metadata.ai.artist_recommendations,
+            }
+        }
+    });
 
     if any_newly_enabled {
         let spawn_state = state.clone();

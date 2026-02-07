@@ -5,7 +5,7 @@ use axum::{
 use riff_core::auth::Claims;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use sqlx::Row;
+use sqlx::{QueryBuilder, Row, Sqlite};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -234,10 +234,13 @@ pub async fn add_track(
     .execute(&state.db)
     .await;
 
-    let _ = sqlx::query("UPDATE playlists SET updated_at = datetime('now') WHERE id = ?")
+    if let Err(e) = sqlx::query("UPDATE playlists SET updated_at = datetime('now') WHERE id = ?")
         .bind(&playlist_id)
         .execute(&state.db)
-        .await;
+        .await
+    {
+        tracing::warn!("playlist timestamp update failed: {e}");
+    }
 
     match result {
         Ok(_) => Json(json!({ "ok": true })),
@@ -271,10 +274,13 @@ pub async fn remove_track(
     .execute(&state.db)
     .await;
 
-    let _ = sqlx::query("UPDATE playlists SET updated_at = datetime('now') WHERE id = ?")
+    if let Err(e) = sqlx::query("UPDATE playlists SET updated_at = datetime('now') WHERE id = ?")
         .bind(&playlist_id)
         .execute(&state.db)
-        .await;
+        .await
+    {
+        tracing::warn!("playlist timestamp update failed: {e}");
+    }
 
     match result {
         Ok(_) => Json(json!({ "ok": true })),
@@ -301,21 +307,39 @@ pub async fn reorder_tracks(
         _ => {}
     }
 
-    for (i, track_id) in body.track_ids.iter().enumerate() {
-        let _ = sqlx::query(
-            "UPDATE playlist_tracks SET sort_order = ? WHERE playlist_id = ? AND track_id = ?",
-        )
-        .bind(i as i64)
-        .bind(&playlist_id)
-        .bind(track_id)
-        .execute(&state.db)
-        .await;
+    if !body.track_ids.is_empty() {
+        // Batch reorder with a single UPDATE using CASE
+        let mut builder = QueryBuilder::<Sqlite>::new(
+            "UPDATE playlist_tracks SET sort_order = CASE track_id",
+        );
+        for (i, track_id) in body.track_ids.iter().enumerate() {
+            builder.push(" WHEN ");
+            builder.push_bind(track_id.clone());
+            builder.push(" THEN ");
+            builder.push_bind(i as i64);
+        }
+        builder.push(" END WHERE playlist_id = ");
+        builder.push_bind(&playlist_id);
+        builder.push(" AND track_id IN (");
+        let mut sep = builder.separated(", ");
+        for track_id in &body.track_ids {
+            sep.push_bind(track_id.clone());
+        }
+        sep.push_unseparated(")");
+
+        if let Err(e) = builder.build().execute(&state.db).await {
+            tracing::warn!("playlist reorder failed: {e}");
+            return Json(json!({ "error": "reorder failed" }));
+        }
     }
 
-    let _ = sqlx::query("UPDATE playlists SET updated_at = datetime('now') WHERE id = ?")
+    if let Err(e) = sqlx::query("UPDATE playlists SET updated_at = datetime('now') WHERE id = ?")
         .bind(&playlist_id)
         .execute(&state.db)
-        .await;
+        .await
+    {
+        tracing::warn!("playlist timestamp update failed: {e}");
+    }
 
     Json(json!({ "ok": true }))
 }

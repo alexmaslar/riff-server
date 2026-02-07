@@ -303,20 +303,48 @@ pub async fn build_album_detail(
     .await?
     .ok_or(AppError::NotFound("album not found".into()))?;
 
-    let track_rows = sqlx::query(
-        "SELECT t.id, t.title, t.track_number, t.disc_number, t.duration_seconds, t.format,
-                t.album_id, ar.name as artist_name, t.sample_rate, t.bit_depth,
-                t.composer, COALESCE(t.bpm_tag, t.bpm_analyzed) as bpm,
-                COALESCE(t.musical_key, t.key_analyzed) as resolved_key, t.loudness_lufs, t.mood
-         FROM tracks t
-         JOIN albums a ON t.album_id = a.id
-         JOIN artists ar ON a.artist_id = ar.id
-         WHERE t.album_id = ? ORDER BY t.disc_number, t.track_number",
-    )
-    .bind(album_id)
-    .fetch_all(db)
-    .await
-    .unwrap_or_default();
+    // Run independent queries concurrently
+    let (track_rows, credits, fav_result, similar_rows) = tokio::join!(
+        sqlx::query(
+            "SELECT t.id, t.title, t.track_number, t.disc_number, t.duration_seconds, t.format,
+                    t.album_id, ar.name as artist_name, t.sample_rate, t.bit_depth,
+                    t.composer, COALESCE(t.bpm_tag, t.bpm_analyzed) as bpm,
+                    COALESCE(t.musical_key, t.key_analyzed) as resolved_key, t.loudness_lufs, t.mood
+             FROM tracks t
+             JOIN albums a ON t.album_id = a.id
+             JOIN artists ar ON a.artist_id = ar.id
+             WHERE t.album_id = ? ORDER BY t.disc_number, t.track_number",
+        )
+        .bind(album_id)
+        .fetch_all(db),
+        sqlx::query_as::<_, (String, String, Option<String>)>(
+            "SELECT artist_name, role, discogs_artist_id
+             FROM album_credits WHERE album_id = ? ORDER BY sort_order",
+        )
+        .bind(album_id)
+        .fetch_all(db),
+        sqlx::query_as::<_, (i64,)>(
+            "SELECT COUNT(*) FROM favorites WHERE user_id = ? AND entity_type = 'album' AND entity_id = ?",
+        )
+        .bind(user_id)
+        .bind(album_id)
+        .fetch_one(db),
+        sqlx::query_as::<_, (String, String, String, Option<i32>, Option<String>, String)>(
+            "SELECT a.id, a.title, ar.name, a.year, a.cover_art_path, r.reason \
+             FROM album_recommendations r \
+             JOIN albums a ON r.recommended_album_id = a.id \
+             JOIN artists ar ON a.artist_id = ar.id \
+             WHERE r.album_id = ? \
+             ORDER BY r.sort_order"
+        )
+        .bind(album_id)
+        .fetch_all(db),
+    );
+
+    let track_rows = track_rows?;
+    let credits = credits?;
+    let is_favorited = fav_result.map(|(count,)| count > 0).unwrap_or(false);
+    let similar_rows = similar_rows?;
 
     let track_summaries: Vec<TrackSummary> = track_rows
         .iter()
@@ -339,15 +367,6 @@ pub async fn build_album_detail(
         })
         .collect();
 
-    let credits = sqlx::query_as::<_, (String, String, Option<String>)>(
-        "SELECT artist_name, role, discogs_artist_id
-         FROM album_credits WHERE album_id = ? ORDER BY sort_order",
-    )
-    .bind(album_id)
-    .fetch_all(db)
-    .await
-    .unwrap_or_default();
-
     let credit_summaries: Vec<CreditSummary> = credits
         .into_iter()
         .map(|(artist_name, role, discogs_artist_id)| CreditSummary {
@@ -356,29 +375,6 @@ pub async fn build_album_detail(
             discogs_artist_id,
         })
         .collect();
-
-    let is_favorited = sqlx::query_as::<_, (i64,)>(
-        "SELECT COUNT(*) FROM favorites WHERE user_id = ? AND entity_type = 'album' AND entity_id = ?",
-    )
-    .bind(user_id)
-    .bind(album_id)
-    .fetch_one(db)
-    .await
-    .map(|(count,)| count > 0)
-    .unwrap_or(false);
-
-    let similar_rows = sqlx::query_as::<_, (String, String, String, Option<i32>, Option<String>, String)>(
-        "SELECT a.id, a.title, ar.name, a.year, a.cover_art_path, r.reason \
-         FROM album_recommendations r \
-         JOIN albums a ON r.recommended_album_id = a.id \
-         JOIN artists ar ON a.artist_id = ar.id \
-         WHERE r.album_id = ? \
-         ORDER BY r.sort_order"
-    )
-    .bind(album_id)
-    .fetch_all(db)
-    .await
-    .unwrap_or_default();
 
     let similar_albums: Vec<SimilarAlbum> = similar_rows
         .into_iter()

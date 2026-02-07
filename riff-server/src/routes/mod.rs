@@ -8,5 +8,6 @@ pub mod featured;
 pub mod history;
 pub mod library;
 pub mod playlists;
+pub mod remote_access;
 pub mod tracks;
 pub mod users;

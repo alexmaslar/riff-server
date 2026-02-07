@@ -117,13 +117,33 @@ pub async fn build_artist_detail(
     .await?
     .ok_or_else(|| AppError::NotFound("artist not found".to_string()))?;
 
-    let albums = sqlx::query_as::<_, (String, String, Option<i32>, Option<String>)>(
-        "SELECT id, title, year, cover_art_path FROM albums WHERE artist_id = ? ORDER BY year, title",
-    )
-    .bind(artist_id)
-    .fetch_all(db)
-    .await
-    .unwrap_or_default();
+    // Run independent queries concurrently
+    let (albums_result, fav_result, similar_result) = tokio::join!(
+        sqlx::query_as::<_, (String, String, Option<i32>, Option<String>)>(
+            "SELECT id, title, year, cover_art_path FROM albums WHERE artist_id = ? ORDER BY year, title",
+        )
+        .bind(artist_id)
+        .fetch_all(db),
+        sqlx::query_as::<_, (i64,)>(
+            "SELECT COUNT(*) FROM favorites WHERE user_id = ? AND entity_type = 'artist' AND entity_id = ?",
+        )
+        .bind(user_id)
+        .bind(artist_id)
+        .fetch_one(db),
+        sqlx::query_as::<_, (String, String, Option<String>, String)>(
+            "SELECT a.id, a.name, a.image_url, r.reason \
+             FROM artist_recommendations r \
+             JOIN artists a ON r.recommended_artist_id = a.id \
+             WHERE r.artist_id = ? \
+             ORDER BY r.sort_order"
+        )
+        .bind(artist_id)
+        .fetch_all(db),
+    );
+
+    let albums = albums_result?;
+    let is_favorited = fav_result.map(|(count,)| count > 0).unwrap_or(false);
+    let similar_rows = similar_result?;
 
     let album_summaries: Vec<AlbumSummary> = albums
         .into_iter()
@@ -134,28 +154,6 @@ pub async fn build_artist_detail(
             cover_art_path,
         })
         .collect();
-
-    let is_favorited = sqlx::query_as::<_, (i64,)>(
-        "SELECT COUNT(*) FROM favorites WHERE user_id = ? AND entity_type = 'artist' AND entity_id = ?",
-    )
-    .bind(user_id)
-    .bind(artist_id)
-    .fetch_one(db)
-    .await
-    .map(|(count,)| count > 0)
-    .unwrap_or(false);
-
-    let similar_rows = sqlx::query_as::<_, (String, String, Option<String>, String)>(
-        "SELECT a.id, a.name, a.image_url, r.reason \
-         FROM artist_recommendations r \
-         JOIN artists a ON r.recommended_artist_id = a.id \
-         WHERE r.artist_id = ? \
-         ORDER BY r.sort_order"
-    )
-    .bind(artist_id)
-    .fetch_all(db)
-    .await
-    .unwrap_or_default();
 
     let similar_artists: Vec<SimilarArtist> = similar_rows
         .into_iter()

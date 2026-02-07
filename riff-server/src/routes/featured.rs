@@ -77,11 +77,11 @@ pub async fn get_featured_albums(
     .await
     .map_err(|e| AppError::Internal(e.to_string()))?;
 
-    let mut albums = Vec::with_capacity(album_ids.len());
-    for id in &album_ids {
-        let detail = build_album_detail(&state.db, id, &claims.sub).await?;
-        albums.push(detail);
-    }
+    let futures: Vec<_> = album_ids
+        .iter()
+        .map(|id| build_album_detail(&state.db, id, &claims.sub))
+        .collect();
+    let albums: Vec<_> = futures::future::try_join_all(futures).await?;
 
     Ok(Json(json!({ "albums": albums })))
 }
@@ -108,11 +108,11 @@ pub async fn get_featured_artists(
     .await
     .map_err(|e| AppError::Internal(e.to_string()))?;
 
-    let mut artists = Vec::with_capacity(artist_ids.len());
-    for id in &artist_ids {
-        let detail = build_artist_detail(&state.db, id, &claims.sub).await?;
-        artists.push(detail);
-    }
+    let futures: Vec<_> = artist_ids
+        .iter()
+        .map(|id| build_artist_detail(&state.db, id, &claims.sub))
+        .collect();
+    let artists: Vec<_> = futures::future::try_join_all(futures).await?;
 
     Ok(Json(json!({ "artists": artists })))
 }
