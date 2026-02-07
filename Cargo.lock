@@ -2944,6 +2944,8 @@ dependencies = [
  "rcgen",
  "reqwest",
  "riff-core",
+ "rustls",
+ "rustls-pemfile",
  "serde",
  "serde_json",
  "sha2",

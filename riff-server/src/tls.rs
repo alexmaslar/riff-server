@@ -1,9 +1,12 @@
 use anyhow::{Context, Result};
+use axum_server::tls_rustls::RustlsConfig;
 use base64::Engine;
 use rcgen::{CertificateParams, DistinguishedName, DnType, KeyPair, SanType};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use sha2::{Digest, Sha256};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// Returns paths to (cert.pem, key.pem), generating them on first run.
 pub fn ensure_certificate() -> Result<(PathBuf, PathBuf)> {
@@ -82,6 +85,33 @@ fn generate_certificate(cert_path: &Path, key_path: &Path) -> Result<()> {
 
     tracing::info!("TLS certificate saved to {}", cert_path.display());
     Ok(())
+}
+
+/// Build a RustlsConfig with an explicit ring CryptoProvider.
+/// This avoids the runtime panic when both ring and aws-lc-rs features
+/// are enabled via Cargo feature unification.
+pub fn build_rustls_config(cert_path: &Path, key_path: &Path) -> Result<RustlsConfig> {
+    let cert_pem = std::fs::read(cert_path).context("reading cert PEM")?;
+    let key_pem = std::fs::read(key_path).context("reading key PEM")?;
+
+    let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut &cert_pem[..])
+        .collect::<std::result::Result<_, _>>()
+        .context("parsing certificate PEM")?;
+
+    let key: PrivateKeyDer<'static> = rustls_pemfile::private_key(&mut &key_pem[..])
+        .context("parsing private key PEM")?
+        .ok_or_else(|| anyhow::anyhow!("no private key found in PEM file"))?;
+
+    let server_config = rustls::ServerConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .context("setting TLS protocol versions")?
+    .with_no_client_auth()
+    .with_single_cert(certs, key)
+    .context("configuring TLS certificate")?;
+
+    Ok(RustlsConfig::from_config(Arc::new(server_config)))
 }
 
 fn pem_to_der(pem: &str) -> Result<Vec<u8>> {

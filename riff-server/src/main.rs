@@ -13,7 +13,6 @@ use axum::{
     routing::{delete, get, post, put},
     BoxError, Json, Router,
 };
-use axum_server::tls_rustls::RustlsConfig;
 use riff_core::{ai, analysis, auth, config::Config, daily_mixes, db, discogs, scanner};
 use serde_json::{json, Value};
 use sqlx::SqlitePool;
@@ -144,6 +143,11 @@ where
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Install rustls crypto provider before anything uses TLS.
+    // Both ring and aws-lc-rs features get activated via Cargo feature unification,
+    // so we must explicitly pick one. This covers reqwest's outbound HTTPS calls.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
@@ -354,8 +358,11 @@ async fn main() -> Result<()> {
     tracing::info!("HTTP listening on {}", http_addr);
 
     // HTTPS server (remote access via UPnP)
+    // Build rustls ServerConfig with explicit ring provider to avoid
+    // CryptoProvider auto-detection failure when both ring and aws-lc-rs
+    // features are enabled via Cargo feature unification.
     let https_addr = "0.0.0.0:8443";
-    let tls_config = RustlsConfig::from_pem_file(&cert_path, &key_path).await?;
+    let tls_config = tls::build_rustls_config(&cert_path, &key_path)?;
     tracing::info!("HTTPS listening on {}", https_addr);
 
     let shutdown_state = state.clone();
