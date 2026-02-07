@@ -1,28 +1,41 @@
 use anyhow::Result;
-use mdns_sd::{ServiceDaemon, ServiceInfo};
+use std::process::{Child, Command};
 
-pub fn start_discovery(port: u16) -> Result<ServiceDaemon> {
-    let mdns = ServiceDaemon::new()?;
+/// Handle that keeps the mDNS advertisement alive. Drops the child process on drop.
+pub struct DiscoveryHandle {
+    child: Child,
+}
 
+impl Drop for DiscoveryHandle {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// Advertise this server via Bonjour/mDNS using the system's dns-sd command.
+/// On macOS this talks to mDNSResponder (the only reliable path).
+/// On Linux, dns-sd is provided by avahi-compat or mdnsd.
+pub fn start_discovery(port: u16) -> Result<DiscoveryHandle> {
     let hostname = gethostname();
     let service_name = format!("Riff on {}", hostname);
-    let host = format!("{}.local.", hostname);
 
-    let properties = [("version", env!("CARGO_PKG_VERSION"))];
+    let child = Command::new("dns-sd")
+        .args([
+            "-R",
+            &service_name,
+            "_riff._tcp",
+            "local.",
+            &port.to_string(),
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()?;
 
-    let service = ServiceInfo::new(
-        "_riff._tcp.local.",
-        &service_name,
-        &host,
-        "", // auto-detect IP
-        port,
-        properties.as_slice(),
-    )?;
-
-    mdns.register(service)?;
     tracing::info!("mDNS: advertising as '{}' on port {}", service_name, port);
 
-    Ok(mdns)
+    Ok(DiscoveryHandle { child })
 }
 
 fn gethostname() -> String {
