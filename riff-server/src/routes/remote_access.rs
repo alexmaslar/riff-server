@@ -1,55 +1,58 @@
 use axum::{extract::State, Json};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
 use crate::error::AppError;
 use crate::AppState;
 
+fn status_json(status: &crate::upnp::RemoteAccessStatus) -> Value {
+    json!({
+        "enabled": status.enabled,
+        "method": status.method,
+        "status": status.status,
+        "public_address": status.public_address,
+        "external_url": status.external_url,
+        "cert_fingerprint": status.cert_fingerprint,
+        "error_message": status.error_message,
+    })
+}
+
 pub async fn get_status(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Value>, AppError> {
-    let status = state.tunnel_manager.status.read().await;
-    Ok(Json(json!({
-        "enabled": status.enabled,
-        "url": status.url,
-        "status": status.status,
-    })))
+    let status = state.remote_access.status.read().await;
+    Ok(Json(status_json(&status)))
 }
 
 pub async fn enable(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Value>, AppError> {
-    let port = state.config.read().await.server.port;
+    let external_url = state.config.read().await.remote_access.external_url.clone();
 
-    state
-        .tunnel_manager
-        .start(port)
-        .await
-        .map_err(|e| AppError::Internal(format!("failed to start tunnel: {e}")))?;
+    // Start is best-effort for UPnP — don't fail the request if UPnP isn't available
+    let _ = state.remote_access.start(external_url).await;
 
-    // Update config to persist the enabled state
+    // Persist enabled state and cert fingerprint
     {
         let mut config = state.config.write().await;
         config.remote_access.enabled = true;
+        let status = state.remote_access.status.read().await;
+        config.remote_access.cert_fingerprint = status.cert_fingerprint.clone();
         if let Err(e) = config.save() {
             tracing::warn!("failed to save config: {e}");
         }
     }
 
-    let status = state.tunnel_manager.status.read().await;
-    Ok(Json(json!({
-        "enabled": status.enabled,
-        "url": status.url,
-        "status": status.status,
-    })))
+    let status = state.remote_access.status.read().await;
+    Ok(Json(status_json(&status)))
 }
 
 pub async fn disable(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Value>, AppError> {
-    state.tunnel_manager.stop().await;
+    state.remote_access.stop().await;
 
-    // Update config to persist the disabled state
     {
         let mut config = state.config.write().await;
         config.remote_access.enabled = false;
@@ -58,9 +61,40 @@ pub async fn disable(
         }
     }
 
-    Ok(Json(json!({
-        "enabled": false,
-        "url": null,
-        "status": "stopped",
-    })))
+    let status = state.remote_access.status.read().await;
+    Ok(Json(status_json(&status)))
+}
+
+#[derive(Deserialize)]
+pub struct ConfigureRequest {
+    pub external_url: Option<String>,
+}
+
+pub async fn configure(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<ConfigureRequest>,
+) -> Result<Json<Value>, AppError> {
+    // Save external URL to config
+    {
+        let mut config = state.config.write().await;
+        config.remote_access.external_url = body.external_url.clone();
+        if let Err(e) = config.save() {
+            tracing::warn!("failed to save config: {e}");
+        }
+    }
+
+    // If currently enabled, restart with new settings
+    let is_enabled = state.remote_access.status.read().await.enabled;
+    if is_enabled {
+        state.remote_access.stop().await;
+        let _ = state.remote_access.start(body.external_url).await;
+
+        // Re-persist enabled state
+        let mut config = state.config.write().await;
+        config.remote_access.enabled = true;
+        let _ = config.save();
+    }
+
+    let status = state.remote_access.status.read().await;
+    Ok(Json(status_json(&status)))
 }

@@ -14,7 +14,7 @@ use crate::ai::prompt::{
     SMART_PLAYLIST_SYSTEM_PROMPT,
 };
 use crate::ai::provider::{create_provider, GenerateOptions};
-use crate::config::AiConfig;
+use crate::config::{AiConfig, AiProvider};
 
 const MAX_CANDIDATES: usize = 500;
 const MIN_KEYWORD_CANDIDATES: usize = 20;
@@ -36,6 +36,42 @@ pub async fn check_rate_limit(user_id: &str) -> Result<(), String> {
     }
     limits.insert(user_id.to_string(), Instant::now());
     Ok(())
+}
+
+// ─── Cost Estimation ─────────────────────────────────────────────────────────
+
+/// Estimate USD cost per playlist generation based on configured provider/model.
+/// Returns None for local (free) providers.
+/// Assumes ~6000 input tokens (system prompt + ~200 candidates) and ~500 output tokens.
+pub fn estimate_generation_cost(config: &AiConfig) -> Option<f64> {
+    const INPUT_TOKENS: f64 = 6000.0;
+    const OUTPUT_TOKENS: f64 = 500.0;
+
+    let (input_rate, output_rate) = match config.provider {
+        AiProvider::Ollama => return None,
+        AiProvider::OpenAi => {
+            let model = config.model.as_deref().unwrap_or("gpt-4o");
+            match model {
+                m if m.starts_with("gpt-4o-mini") => (0.15, 0.60),
+                m if m.starts_with("gpt-4o") => (2.50, 10.0),
+                m if m.starts_with("gpt-4.1-mini") => (0.40, 1.60),
+                m if m.starts_with("gpt-4.1-nano") => (0.10, 0.40),
+                m if m.starts_with("gpt-4.1") => (2.00, 8.00),
+                _ => (2.50, 10.0),
+            }
+        }
+        AiProvider::Anthropic => {
+            let model = config.model.as_deref().unwrap_or("claude-sonnet-4-20250514");
+            match model {
+                m if m.contains("haiku") => (0.80, 4.00),
+                m if m.contains("sonnet") => (3.00, 15.00),
+                m if m.contains("opus") => (15.00, 75.00),
+                _ => (3.00, 15.00),
+            }
+        }
+    };
+
+    Some((INPUT_TOKENS * input_rate + OUTPUT_TOKENS * output_rate) / 1_000_000.0)
 }
 
 // ─── Suggestion Generation (no AI) ──────────────────────────────────────────

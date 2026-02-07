@@ -2,16 +2,18 @@ pub mod error;
 mod discovery;
 mod middleware;
 mod routes;
-mod tunnel;
+mod tls;
+mod upnp;
 
 use anyhow::Result;
 use axum::{
     extract::State,
     http::StatusCode,
     middleware as axum_mw,
-    routing::{delete, get, post},
+    routing::{delete, get, post, put},
     BoxError, Json, Router,
 };
+use axum_server::tls_rustls::RustlsConfig;
 use riff_core::{ai, analysis, auth, config::Config, daily_mixes, db, discogs, scanner};
 use serde_json::{json, Value};
 use sqlx::SqlitePool;
@@ -36,7 +38,7 @@ pub struct AppState {
     pub recommendation_running: AtomicBool,
     pub artist_bio_running: AtomicBool,
     pub artist_recommendation_running: AtomicBool,
-    pub tunnel_manager: tunnel::TunnelManager,
+    pub remote_access: upnp::RemoteAccessManager,
 }
 
 async fn run_background_pipeline(state: Arc<AppState>) {
@@ -188,6 +190,11 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Generate TLS certificate for HTTPS
+    let (cert_path, key_path) = tls::ensure_certificate()?;
+    let cert_fingerprint = tls::cert_fingerprint(&cert_path)?;
+    tracing::info!("TLS cert fingerprint: {}", cert_fingerprint);
+
     let state = Arc::new(AppState {
         db: pool,
         config: RwLock::new(config.clone()),
@@ -198,8 +205,14 @@ async fn main() -> Result<()> {
         recommendation_running: AtomicBool::new(false),
         artist_bio_running: AtomicBool::new(false),
         artist_recommendation_running: AtomicBool::new(false),
-        tunnel_manager: tunnel::TunnelManager::new(),
+        remote_access: upnp::RemoteAccessManager::new(),
     });
+
+    // Set cert fingerprint on the remote access manager
+    state
+        .remote_access
+        .set_cert_fingerprint(cert_fingerprint)
+        .await;
 
     // Background pipeline: enrich → summarize → rate → analyze
     {
@@ -218,16 +231,13 @@ async fn main() -> Result<()> {
         }
     };
 
-    // Start tunnel if remote access is enabled
+    // Start UPnP remote access if enabled
     if config.remote_access.enabled {
-        let tunnel_state = state.clone();
+        let ra_state = state.clone();
+        let external_url = config.remote_access.external_url.clone();
         tokio::spawn(async move {
-            if let Err(e) = tunnel_state
-                .tunnel_manager
-                .start(tunnel_state.config.read().await.server.port)
-                .await
-            {
-                tracing::warn!("failed to start tunnel: {e}");
+            if let Err(e) = ra_state.remote_access.start(external_url).await {
+                tracing::warn!("remote access setup failed: {e}");
             }
         });
     }
@@ -298,6 +308,7 @@ async fn main() -> Result<()> {
     let admin = Router::new()
         .route("/remote-access/enable", post(routes::remote_access::enable))
         .route("/remote-access/disable", post(routes::remote_access::disable))
+        .route("/remote-access/configure", put(routes::remote_access::configure))
         .route("/library/scan", post(routes::library::trigger_scan))
         .route("/library/enrich", post(routes::library::trigger_enrichment))
         .route("/library/enrich/{album_id}", post(routes::library::enrich_album))
@@ -337,20 +348,42 @@ async fn main() -> Result<()> {
         .layer(cors)
         .with_state(state.clone());
 
-    let addr = format!("0.0.0.0:{}", config.server.port);
-    let listener = tokio::net::TcpListener::bind(&addr).await?;
-    tracing::info!("listening on {}", addr);
+    // HTTP server (local LAN access)
+    let http_addr = format!("0.0.0.0:{}", config.server.port);
+    let http_listener = tokio::net::TcpListener::bind(&http_addr).await?;
+    tracing::info!("HTTP listening on {}", http_addr);
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal(state.clone()))
-        .await?;
+    // HTTPS server (remote access via UPnP)
+    let https_addr = "0.0.0.0:8443";
+    let tls_config = RustlsConfig::from_pem_file(&cert_path, &key_path).await?;
+    tracing::info!("HTTPS listening on {}", https_addr);
+
+    let shutdown_state = state.clone();
+    let http_app = app.clone();
+
+    tokio::select! {
+        result = axum::serve(http_listener, http_app).with_graceful_shutdown(shutdown_signal(shutdown_state)) => {
+            if let Err(e) = result {
+                tracing::error!("HTTP server error: {e}");
+            }
+        }
+        result = axum_server::bind_rustls(https_addr.parse()?, tls_config).serve(app.into_make_service()) => {
+            if let Err(e) = result {
+                tracing::error!("HTTPS server error: {e}");
+            }
+        }
+    }
+
+    // Cleanup UPnP on shutdown
+    state.remote_access.stop().await;
+
     Ok(())
 }
 
 async fn shutdown_signal(state: Arc<AppState>) {
     let _ = tokio::signal::ctrl_c().await;
     tracing::info!("shutting down...");
-    state.tunnel_manager.stop().await;
+    state.remote_access.stop().await;
 }
 
 async fn health(State(_state): State<Arc<AppState>>) -> Json<Value> {

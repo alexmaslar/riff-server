@@ -96,6 +96,10 @@ pub struct DiscogsConfig {
 pub struct RemoteAccessConfig {
     #[serde(default)]
     pub enabled: bool,
+    #[serde(default)]
+    pub external_url: Option<String>,
+    #[serde(default)]
+    pub cert_fingerprint: Option<String>,
 }
 
 fn default_true() -> bool {

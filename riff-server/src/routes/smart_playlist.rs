@@ -5,6 +5,8 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use uuid::Uuid;
 
+use riff_core::config::AiProvider;
+
 use crate::error::AppError;
 use crate::AppState;
 
@@ -46,7 +48,20 @@ pub async fn get_suggestions(
         })
         .collect();
 
-    Ok(Json(json!({ "suggestions": items })))
+    let config = state.config.read().await;
+    let estimated_cost =
+        riff_core::smart_playlist::estimate_generation_cost(&config.metadata.ai);
+    let provider = match config.metadata.ai.provider {
+        AiProvider::Ollama => "ollama",
+        AiProvider::OpenAi => "openai",
+        AiProvider::Anthropic => "anthropic",
+    };
+
+    Ok(Json(json!({
+        "suggestions": items,
+        "estimatedCost": estimated_cost,
+        "provider": provider,
+    })))
 }
 
 /// POST /playlists/ai/generate
