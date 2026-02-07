@@ -9,6 +9,7 @@ use sqlx::{QueryBuilder, Row, Sqlite};
 use std::sync::Arc;
 use uuid::Uuid;
 
+use crate::error::AppError;
 use crate::AppState;
 
 #[derive(Debug, Deserialize)]
@@ -32,7 +33,7 @@ pub struct ReorderTracksBody {
 pub async fn list_playlists(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<Claims>,
-) -> Json<Value> {
+) -> Result<Json<Value>, AppError> {
     let rows = sqlx::query(
         "SELECT p.id, p.name, p.description,
                 COUNT(pt.id) as track_count,
@@ -47,35 +48,31 @@ pub async fn list_playlists(
     )
     .bind(&claims.sub)
     .fetch_all(&state.db)
-    .await;
+    .await
+    .map_err(|e| AppError::Internal(e.to_string()))?;
 
-    match rows {
-        Ok(rows) => {
-            let playlists: Vec<Value> = rows
-                .iter()
-                .map(|row| {
-                    json!({
-                        "id": row.get::<String, _>("id"),
-                        "name": row.get::<String, _>("name"),
-                        "description": row.get::<Option<String>, _>("description"),
-                        "track_count": row.get::<i64, _>("track_count"),
-                        "total_duration": row.get::<i64, _>("total_duration"),
-                        "created_at": row.get::<String, _>("created_at"),
-                        "updated_at": row.get::<String, _>("updated_at"),
-                    })
-                })
-                .collect();
-            Json(json!({ "playlists": playlists }))
-        }
-        Err(e) => Json(json!({ "error": e.to_string() })),
-    }
+    let playlists: Vec<Value> = rows
+        .iter()
+        .map(|row| {
+            json!({
+                "id": row.get::<String, _>("id"),
+                "name": row.get::<String, _>("name"),
+                "description": row.get::<Option<String>, _>("description"),
+                "track_count": row.get::<i64, _>("track_count"),
+                "total_duration": row.get::<i64, _>("total_duration"),
+                "created_at": row.get::<String, _>("created_at"),
+                "updated_at": row.get::<String, _>("updated_at"),
+            })
+        })
+        .collect();
+    Ok(Json(json!({ "playlists": playlists })))
 }
 
 pub async fn get_playlist(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<Claims>,
     Path(id): Path<String>,
-) -> Json<Value> {
+) -> Result<Json<Value>, AppError> {
     let playlist = sqlx::query_as::<_, (String, String, Option<String>, String, String)>(
         "SELECT id, name, description, created_at, updated_at
          FROM playlists WHERE id = ? AND user_id = ?",
@@ -83,12 +80,12 @@ pub async fn get_playlist(
     .bind(&id)
     .bind(&claims.sub)
     .fetch_optional(&state.db)
-    .await;
+    .await
+    .map_err(|e| AppError::Internal(e.to_string()))?;
 
     let playlist = match playlist {
-        Ok(Some(row)) => row,
-        Ok(None) => return Json(json!({ "error": "playlist not found" })),
-        Err(e) => return Json(json!({ "error": e.to_string() })),
+        Some(row) => row,
+        None => return Err(AppError::NotFound("playlist not found".into())),
     };
 
     let tracks = sqlx::query_as::<_, (String, String, i32, i32, i32, String, String, String)>(
@@ -124,24 +121,24 @@ pub async fn get_playlist(
         )
         .collect();
 
-    Json(json!({
+    Ok(Json(json!({
         "id": playlist.0,
         "name": playlist.1,
         "description": playlist.2,
         "tracks": track_list,
         "created_at": playlist.3,
         "updated_at": playlist.4,
-    }))
+    })))
 }
 
 pub async fn create_playlist(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<Claims>,
     Json(body): Json<CreatePlaylistBody>,
-) -> Json<Value> {
+) -> Result<Json<Value>, AppError> {
     let id = Uuid::new_v4().to_string();
 
-    let result = sqlx::query(
+    sqlx::query(
         "INSERT INTO playlists (id, user_id, name, description) VALUES (?, ?, ?, ?)",
     )
     .bind(&id)
@@ -149,50 +146,45 @@ pub async fn create_playlist(
     .bind(&body.name)
     .bind(&body.description)
     .execute(&state.db)
-    .await;
+    .await
+    .map_err(|e| AppError::Internal(e.to_string()))?;
 
-    match result {
-        Ok(_) => {
-            let created = sqlx::query_as::<_, (String, String, Option<String>, String, String)>(
-                "SELECT id, name, description, created_at, updated_at FROM playlists WHERE id = ?",
-            )
-            .bind(&id)
-            .fetch_one(&state.db)
-            .await;
+    let (id, name, description, created_at, updated_at) = sqlx::query_as::<_, (String, String, Option<String>, String, String)>(
+        "SELECT id, name, description, created_at, updated_at FROM playlists WHERE id = ?",
+    )
+    .bind(&id)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|e| AppError::Internal(e.to_string()))?;
 
-            match created {
-                Ok((id, name, description, created_at, updated_at)) => Json(json!({
-                    "id": id,
-                    "name": name,
-                    "description": description,
-                    "track_count": 0,
-                    "total_duration": 0,
-                    "created_at": created_at,
-                    "updated_at": updated_at,
-                })),
-                Err(e) => Json(json!({ "error": e.to_string() })),
-            }
-        }
-        Err(e) => Json(json!({ "error": e.to_string() })),
-    }
+    Ok(Json(json!({
+        "id": id,
+        "name": name,
+        "description": description,
+        "track_count": 0,
+        "total_duration": 0,
+        "created_at": created_at,
+        "updated_at": updated_at,
+    })))
 }
 
 pub async fn delete_playlist(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<Claims>,
     Path(id): Path<String>,
-) -> Json<Value> {
+) -> Result<Json<Value>, AppError> {
     let result = sqlx::query("DELETE FROM playlists WHERE id = ? AND user_id = ?")
         .bind(&id)
         .bind(&claims.sub)
         .execute(&state.db)
-        .await;
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
 
-    match result {
-        Ok(r) if r.rows_affected() > 0 => Json(json!({ "ok": true })),
-        Ok(_) => Json(json!({ "error": "playlist not found" })),
-        Err(e) => Json(json!({ "error": e.to_string() })),
+    if result.rows_affected() == 0 {
+        return Err(AppError::NotFound("playlist not found".into()));
     }
+
+    Ok(Json(json!({ "ok": true })))
 }
 
 pub async fn add_track(
@@ -200,19 +192,19 @@ pub async fn add_track(
     Extension(claims): Extension<Claims>,
     Path(playlist_id): Path<String>,
     Json(body): Json<AddTrackBody>,
-) -> Json<Value> {
+) -> Result<Json<Value>, AppError> {
     // Verify ownership
-    let owns = sqlx::query_as::<_, (i64,)>(
+    let (count,) = sqlx::query_as::<_, (i64,)>(
         "SELECT COUNT(*) FROM playlists WHERE id = ? AND user_id = ?",
     )
     .bind(&playlist_id)
     .bind(&claims.sub)
     .fetch_one(&state.db)
-    .await;
+    .await
+    .map_err(|e| AppError::Internal(e.to_string()))?;
 
-    match owns {
-        Ok((0,)) | Err(_) => return Json(json!({ "error": "playlist not found" })),
-        _ => {}
+    if count == 0 {
+        return Err(AppError::NotFound("playlist not found".into()));
     }
 
     let max_order = sqlx::query_as::<_, (i64,)>(
@@ -224,7 +216,7 @@ pub async fn add_track(
     .unwrap_or((0,));
 
     let id = Uuid::new_v4().to_string();
-    let result = sqlx::query(
+    sqlx::query(
         "INSERT INTO playlist_tracks (id, playlist_id, track_id, sort_order) VALUES (?, ?, ?, ?)",
     )
     .bind(&id)
@@ -232,7 +224,8 @@ pub async fn add_track(
     .bind(&body.track_id)
     .bind(max_order.0 + 1)
     .execute(&state.db)
-    .await;
+    .await
+    .map_err(|e| AppError::Internal(e.to_string()))?;
 
     if let Err(e) = sqlx::query("UPDATE playlists SET updated_at = datetime('now') WHERE id = ?")
         .bind(&playlist_id)
@@ -242,37 +235,35 @@ pub async fn add_track(
         tracing::warn!("playlist timestamp update failed: {e}");
     }
 
-    match result {
-        Ok(_) => Json(json!({ "ok": true })),
-        Err(e) => Json(json!({ "error": e.to_string() })),
-    }
+    Ok(Json(json!({ "ok": true })))
 }
 
 pub async fn remove_track(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<Claims>,
     Path((playlist_id, track_id)): Path<(String, String)>,
-) -> Json<Value> {
-    let owns = sqlx::query_as::<_, (i64,)>(
+) -> Result<Json<Value>, AppError> {
+    let (count,) = sqlx::query_as::<_, (i64,)>(
         "SELECT COUNT(*) FROM playlists WHERE id = ? AND user_id = ?",
     )
     .bind(&playlist_id)
     .bind(&claims.sub)
     .fetch_one(&state.db)
-    .await;
+    .await
+    .map_err(|e| AppError::Internal(e.to_string()))?;
 
-    match owns {
-        Ok((0,)) | Err(_) => return Json(json!({ "error": "playlist not found" })),
-        _ => {}
+    if count == 0 {
+        return Err(AppError::NotFound("playlist not found".into()));
     }
 
-    let result = sqlx::query(
+    sqlx::query(
         "DELETE FROM playlist_tracks WHERE playlist_id = ? AND track_id = ?",
     )
     .bind(&playlist_id)
     .bind(&track_id)
     .execute(&state.db)
-    .await;
+    .await
+    .map_err(|e| AppError::Internal(e.to_string()))?;
 
     if let Err(e) = sqlx::query("UPDATE playlists SET updated_at = datetime('now') WHERE id = ?")
         .bind(&playlist_id)
@@ -282,10 +273,7 @@ pub async fn remove_track(
         tracing::warn!("playlist timestamp update failed: {e}");
     }
 
-    match result {
-        Ok(_) => Json(json!({ "ok": true })),
-        Err(e) => Json(json!({ "error": e.to_string() })),
-    }
+    Ok(Json(json!({ "ok": true })))
 }
 
 pub async fn reorder_tracks(
@@ -293,18 +281,18 @@ pub async fn reorder_tracks(
     Extension(claims): Extension<Claims>,
     Path(playlist_id): Path<String>,
     Json(body): Json<ReorderTracksBody>,
-) -> Json<Value> {
-    let owns = sqlx::query_as::<_, (i64,)>(
+) -> Result<Json<Value>, AppError> {
+    let (count,) = sqlx::query_as::<_, (i64,)>(
         "SELECT COUNT(*) FROM playlists WHERE id = ? AND user_id = ?",
     )
     .bind(&playlist_id)
     .bind(&claims.sub)
     .fetch_one(&state.db)
-    .await;
+    .await
+    .map_err(|e| AppError::Internal(e.to_string()))?;
 
-    match owns {
-        Ok((0,)) | Err(_) => return Json(json!({ "error": "playlist not found" })),
-        _ => {}
+    if count == 0 {
+        return Err(AppError::NotFound("playlist not found".into()));
     }
 
     if !body.track_ids.is_empty() {
@@ -327,10 +315,11 @@ pub async fn reorder_tracks(
         }
         sep.push_unseparated(")");
 
-        if let Err(e) = builder.build().execute(&state.db).await {
-            tracing::warn!("playlist reorder failed: {e}");
-            return Json(json!({ "error": "reorder failed" }));
-        }
+        builder.build().execute(&state.db).await
+            .map_err(|e| {
+                tracing::warn!("playlist reorder failed: {e}");
+                AppError::Internal("reorder failed".into())
+            })?;
     }
 
     if let Err(e) = sqlx::query("UPDATE playlists SET updated_at = datetime('now') WHERE id = ?")
@@ -341,5 +330,5 @@ pub async fn reorder_tracks(
         tracing::warn!("playlist timestamp update failed: {e}");
     }
 
-    Json(json!({ "ok": true }))
+    Ok(Json(json!({ "ok": true })))
 }

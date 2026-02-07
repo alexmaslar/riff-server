@@ -5,6 +5,7 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use uuid::Uuid;
 
+use crate::error::AppError;
 use crate::AppState;
 
 #[derive(Debug, Deserialize)]
@@ -16,7 +17,7 @@ pub struct LoginRequest {
 pub async fn login(
     State(state): State<Arc<AppState>>,
     Json(req): Json<LoginRequest>,
-) -> Json<Value> {
+) -> Result<Json<Value>, AppError> {
     let user = sqlx::query_as::<_, (String, String, String, String)>(
         "SELECT id, username, password_hash, role FROM users WHERE username = ?",
     )
@@ -26,58 +27,58 @@ pub async fn login(
 
     let (id_str, username, password_hash, role) = match user {
         Ok(Some(row)) => row,
-        Ok(None) => return Json(json!({ "error": "invalid credentials" })),
-        Err(e) => return Json(json!({ "error": e.to_string() })),
+        Ok(None) => return Err(AppError::Unauthorized("invalid credentials".into())),
+        Err(e) => return Err(AppError::Internal(e.to_string())),
     };
 
     match auth::verify_password(&req.password, &password_hash) {
         Ok(true) => {}
-        Ok(false) => return Json(json!({ "error": "invalid credentials" })),
-        Err(e) => return Json(json!({ "error": e.to_string() })),
+        Ok(false) => return Err(AppError::Unauthorized("invalid credentials".into())),
+        Err(e) => return Err(AppError::Internal(e.to_string())),
     }
 
     let user_id = match Uuid::parse_str(&id_str) {
         Ok(id) => id,
-        Err(e) => return Json(json!({ "error": e.to_string() })),
+        Err(e) => return Err(AppError::BadRequest(e.to_string())),
     };
 
     match auth::create_token(&user_id, &username, &role, &state.config.read().await.auth.jwt_secret) {
-        Ok(token) => Json(json!({
+        Ok(token) => Ok(Json(json!({
             "token": token,
             "user": {
                 "id": id_str,
                 "username": username,
                 "role": role,
             }
-        })),
-        Err(e) => Json(json!({ "error": e.to_string() })),
+        }))),
+        Err(e) => Err(AppError::Internal(e.to_string())),
     }
 }
 
 pub async fn refresh(
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
-) -> Json<Value> {
+) -> Result<Json<Value>, AppError> {
     let token = match extract_bearer(&headers) {
         Some(t) => t,
-        None => return Json(json!({ "error": "missing authorization header" })),
+        None => return Err(AppError::Unauthorized("missing authorization header".into())),
     };
 
     let jwt_secret = state.config.read().await.auth.jwt_secret.clone();
 
     let claims = match auth::validate_token(token, &jwt_secret) {
         Ok(c) => c,
-        Err(e) => return Json(json!({ "error": format!("invalid token: {}", e) })),
+        Err(e) => return Err(AppError::Unauthorized(format!("invalid token: {}", e))),
     };
 
     let user_id = match Uuid::parse_str(&claims.sub) {
         Ok(id) => id,
-        Err(e) => return Json(json!({ "error": e.to_string() })),
+        Err(e) => return Err(AppError::BadRequest(e.to_string())),
     };
 
     match auth::create_token(&user_id, &claims.username, &claims.role, &jwt_secret) {
-        Ok(new_token) => Json(json!({ "token": new_token })),
-        Err(e) => Json(json!({ "error": e.to_string() })),
+        Ok(new_token) => Ok(Json(json!({ "token": new_token }))),
+        Err(e) => Err(AppError::Internal(e.to_string())),
     }
 }
 

@@ -8,6 +8,7 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use uuid::Uuid;
 
+use crate::error::AppError;
 use crate::AppState;
 
 #[derive(Debug, Deserialize)]
@@ -18,46 +19,40 @@ pub struct CreateUserRequest {
     pub role: Option<String>,
 }
 
-pub async fn list_users(State(state): State<Arc<AppState>>) -> Json<Value> {
-    let users = sqlx::query_as::<_, (String, String, String, String, String)>(
+pub async fn list_users(State(state): State<Arc<AppState>>) -> Result<Json<Value>, AppError> {
+    let rows = sqlx::query_as::<_, (String, String, String, String, String)>(
         "SELECT id, username, display_name, role, created_at FROM users ORDER BY username",
     )
     .fetch_all(&state.db)
-    .await;
+    .await
+    .map_err(|e| AppError::Internal(e.to_string()))?;
 
-    match users {
-        Ok(rows) => {
-            let users: Vec<Value> = rows
-                .into_iter()
-                .map(|(id, username, display_name, role, created_at)| {
-                    json!({
-                        "id": id,
-                        "username": username,
-                        "display_name": display_name,
-                        "role": role,
-                        "created_at": created_at,
-                    })
-                })
-                .collect();
-            Json(json!({ "users": users }))
-        }
-        Err(e) => Json(json!({ "error": e.to_string() })),
-    }
+    let users: Vec<Value> = rows
+        .into_iter()
+        .map(|(id, username, display_name, role, created_at)| {
+            json!({
+                "id": id,
+                "username": username,
+                "display_name": display_name,
+                "role": role,
+                "created_at": created_at,
+            })
+        })
+        .collect();
+    Ok(Json(json!({ "users": users })))
 }
 
 pub async fn create_user(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateUserRequest>,
-) -> Json<Value> {
-    let hash = match auth::hash_password(&req.password) {
-        Ok(h) => h,
-        Err(e) => return Json(json!({ "error": e.to_string() })),
-    };
+) -> Result<Json<Value>, AppError> {
+    let hash = auth::hash_password(&req.password)
+        .map_err(|e| AppError::Internal(e.to_string()))?;
 
     let id = Uuid::new_v4();
     let role = req.role.unwrap_or_else(|| "user".to_string());
 
-    let result = sqlx::query(
+    sqlx::query(
         "INSERT INTO users (id, username, password_hash, display_name, role) VALUES (?, ?, ?, ?, ?)",
     )
     .bind(id.to_string())
@@ -66,38 +61,35 @@ pub async fn create_user(
     .bind(&req.display_name)
     .bind(&role)
     .execute(&state.db)
-    .await;
+    .await
+    .map_err(|e| AppError::BadRequest(e.to_string()))?;
 
-    match result {
-        Ok(_) => Json(json!({
-            "id": id.to_string(),
-            "username": req.username,
-            "display_name": req.display_name,
-            "role": role,
-        })),
-        Err(e) => Json(json!({ "error": e.to_string() })),
-    }
+    Ok(Json(json!({
+        "id": id.to_string(),
+        "username": req.username,
+        "display_name": req.display_name,
+        "role": role,
+    })))
 }
 
 pub async fn delete_user(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<Claims>,
     Path(user_id): Path<String>,
-) -> Json<Value> {
+) -> Result<Json<Value>, AppError> {
     if claims.sub == user_id {
-        return Json(json!({ "error": "cannot delete yourself" }));
+        return Err(AppError::Forbidden("cannot delete yourself".into()));
     }
 
     // Verify user exists
-    let exists = sqlx::query_as::<_, (i64,)>("SELECT COUNT(*) FROM users WHERE id = ?")
+    let (count,) = sqlx::query_as::<_, (i64,)>("SELECT COUNT(*) FROM users WHERE id = ?")
         .bind(&user_id)
         .fetch_one(&state.db)
-        .await;
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
 
-    match exists {
-        Ok((0,)) => return Json(json!({ "error": "user not found" })),
-        Err(e) => return Json(json!({ "error": e.to_string() })),
-        _ => {}
+    if count == 0 {
+        return Err(AppError::NotFound("user not found".into()));
     }
 
     // Delete related data then the user
@@ -110,10 +102,9 @@ pub async fn delete_user(
     ];
 
     for query in queries {
-        if let Err(e) = sqlx::query(query).bind(&user_id).execute(&state.db).await {
-            return Json(json!({ "error": e.to_string() }));
-        }
+        sqlx::query(query).bind(&user_id).execute(&state.db).await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
     }
 
-    Json(json!({ "status": "deleted" }))
+    Ok(Json(json!({ "status": "deleted" })))
 }
