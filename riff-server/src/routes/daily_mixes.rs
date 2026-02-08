@@ -299,10 +299,22 @@ pub async fn get_mix_cover(
         }
     };
 
+    let file_size = match file.metadata().await {
+        Ok(m) => m.len(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": format!("metadata read failed: {}", e) })),
+            )
+                .into_response()
+        }
+    };
+
     let stream = tokio_util::io::ReaderStream::new(file);
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "image/jpeg")
+        .header(header::CONTENT_LENGTH, file_size.to_string())
         .header(header::CACHE_CONTROL, "public, max-age=86400")
         .body(Body::from_stream(stream))
         .unwrap()
