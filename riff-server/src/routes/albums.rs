@@ -16,6 +16,11 @@ use crate::error::AppError;
 use crate::AppState;
 
 #[derive(Debug, Deserialize)]
+pub struct CoverParams {
+    pub w: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct ListParams {
     pub search: Option<String>,
     pub sort: Option<String>,
@@ -433,6 +438,7 @@ pub async fn get_album(
 pub async fn get_cover(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    Query(params): Query<CoverParams>,
 ) -> Response {
     // Fetch album cover path
     let row = sqlx::query_as::<_, (Option<String>,)>(
@@ -461,7 +467,13 @@ pub async fn get_cover(
         }
     };
 
-    // Serve raw album art
+    // If ?w= is specified, serve a cached thumbnail
+    if let Some(w) = params.w {
+        let w = w.clamp(50, 2000);
+        return serve_thumbnail(&cover_path, &id, w).await;
+    }
+
+    // Serve original cover art
     let mime = if cover_path.ends_with(".png") {
         "image/png"
     } else {
@@ -495,6 +507,105 @@ pub async fn get_cover(
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, mime)
+        .header(header::CONTENT_LENGTH, file_size.to_string())
+        .header(header::CACHE_CONTROL, "public, max-age=86400")
+        .body(Body::from_stream(stream))
+        .unwrap()
+}
+
+/// Serve a resized thumbnail, caching it to disk.
+pub async fn serve_thumbnail(original_path: &str, entity_id: &str, width: u32) -> Response {
+    let thumbs_dir = match dirs::data_dir() {
+        Some(d) => d.join("riff").join("thumbs"),
+        None => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "could not determine data directory" })),
+            )
+                .into_response()
+        }
+    };
+
+    let thumb_filename = format!("{}_{}.jpg", entity_id, width);
+    let thumb_path = thumbs_dir.join(&thumb_filename);
+
+    // Check if cached thumb exists and is newer than the original
+    let needs_generate = if thumb_path.exists() {
+        match (
+            std::fs::metadata(original_path).and_then(|m| m.modified()),
+            std::fs::metadata(&thumb_path).and_then(|m| m.modified()),
+        ) {
+            (Ok(orig_time), Ok(thumb_time)) => orig_time > thumb_time,
+            _ => true,
+        }
+    } else {
+        true
+    };
+
+    if needs_generate {
+        // Generate thumbnail
+        let original = original_path.to_string();
+        let dest = thumb_path.clone();
+        let dir = thumbs_dir.clone();
+
+        let result = tokio::task::spawn_blocking(move || {
+            std::fs::create_dir_all(&dir)?;
+            let img = image::open(&original)?;
+            let resized = img.resize(width, width, image::imageops::FilterType::Lanczos3);
+            let mut output = std::io::BufWriter::new(std::fs::File::create(&dest)?);
+            resized.write_to(&mut output, image::ImageFormat::Jpeg)?;
+            Ok::<(), anyhow::Error>(())
+        })
+        .await;
+
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                tracing::warn!("thumbnail generation failed: {e}");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": format!("thumbnail generation failed: {}", e) })),
+                )
+                    .into_response();
+            }
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": format!("thumbnail task failed: {}", e) })),
+                )
+                    .into_response();
+            }
+        }
+    }
+
+    // Serve the cached thumbnail
+    let file = match File::open(&thumb_path).await {
+        Ok(f) => f,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": format!("thumb file open failed: {}", e) })),
+            )
+                .into_response()
+        }
+    };
+
+    let file_size = match file.metadata().await {
+        Ok(m) => m.len(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": format!("metadata read failed: {}", e) })),
+            )
+                .into_response()
+        }
+    };
+
+    let stream = tokio_util::io::ReaderStream::new(file);
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "image/jpeg")
         .header(header::CONTENT_LENGTH, file_size.to_string())
         .header(header::CACHE_CONTROL, "public, max-age=86400")
         .body(Body::from_stream(stream))

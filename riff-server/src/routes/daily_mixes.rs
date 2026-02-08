@@ -1,6 +1,6 @@
 use axum::{
     body::Body,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{header, StatusCode},
     response::{IntoResponse, Response},
     Extension, Json,
@@ -14,6 +14,7 @@ use tokio::fs::File;
 use uuid::Uuid;
 
 use crate::error::AppError;
+use crate::routes::albums::CoverParams;
 use crate::AppState;
 
 /// GET /mixes/daily — Get today's mixes for the authenticated user
@@ -261,6 +262,7 @@ pub async fn save_mix_as_playlist(
 pub async fn get_mix_cover(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    Query(params): Query<CoverParams>,
 ) -> Response {
     let row = sqlx::query_as::<_, (Option<String>,)>(
         "SELECT cover_path FROM daily_mixes WHERE id = ?",
@@ -287,6 +289,12 @@ pub async fn get_mix_cover(
                 .into_response()
         }
     };
+
+    // If ?w= is specified, serve a cached thumbnail
+    if let Some(w) = params.w {
+        let w = w.clamp(50, 2000);
+        return crate::routes::albums::serve_thumbnail(&cover_path, &id, w).await;
+    }
 
     let file = match File::open(&cover_path).await {
         Ok(f) => f,

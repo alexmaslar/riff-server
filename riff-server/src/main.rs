@@ -235,7 +235,7 @@ async fn main() -> Result<()> {
         }
     };
 
-    // Start remote access if enabled (tries cloudflared → UPnP by default)
+    // Start remote access if enabled
     if config.remote_access.enabled {
         let ra_state = state.clone();
         let external_url = config.remote_access.external_url.clone();
@@ -346,7 +346,7 @@ async fn main() -> Result<()> {
                 .layer(axum::error_handling::HandleErrorLayer::new(|_: BoxError| async {
                     StatusCode::REQUEST_TIMEOUT
                 }))
-                .layer(TimeoutLayer::new(Duration::from_secs(30)))
+                .layer(TimeoutLayer::new(Duration::from_secs(120)))
         )
         .layer(TraceLayer::new_for_http())
         .layer(CompressionLayer::new().gzip(true))

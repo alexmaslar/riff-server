@@ -69,6 +69,8 @@ pub struct AiConfig {
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
+    pub fast_model: Option<String>,
+    #[serde(default)]
     pub base_url: Option<String>,
     #[serde(default = "default_true")]
     pub album_summaries: bool,
@@ -80,6 +82,8 @@ pub struct AiConfig {
     pub artist_bios: bool,
     #[serde(default = "default_true")]
     pub artist_recommendations: bool,
+    #[serde(default = "default_true")]
+    pub playlist_generation: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -96,7 +100,7 @@ pub struct DiscogsConfig {
 pub struct RemoteAccessConfig {
     #[serde(default)]
     pub enabled: bool,
-    /// Preferred remote access method: auto | cloudflare | upnp | manual
+    /// Preferred remote access method: upnp | manual
     #[serde(default = "default_remote_method")]
     pub method: String,
     #[serde(default)]
@@ -106,7 +110,7 @@ pub struct RemoteAccessConfig {
 }
 
 fn default_remote_method() -> String {
-    "auto".to_string()
+    "upnp".to_string()
 }
 
 fn default_true() -> bool {
@@ -124,12 +128,14 @@ impl Default for AiConfig {
             provider: default_ai_provider(),
             api_key: None,
             model: None,
+            fast_model: None,
             base_url: None,
             album_summaries: true,
             album_ratings: true,
             album_recommendations: true,
             artist_bios: true,
             artist_recommendations: true,
+            playlist_generation: true,
         }
     }
 }
