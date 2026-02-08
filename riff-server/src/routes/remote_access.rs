@@ -28,10 +28,13 @@ pub async fn get_status(
 pub async fn enable(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Value>, AppError> {
-    let external_url = state.config.read().await.remote_access.external_url.clone();
+    let config = state.config.read().await;
+    let external_url = config.remote_access.external_url.clone();
+    let method = config.remote_access.method.clone();
+    drop(config);
 
-    // Start is best-effort for UPnP — don't fail the request if UPnP isn't available
-    let _ = state.remote_access.start(external_url).await;
+    // Start is best-effort — don't fail the request if remote access method isn't available
+    let _ = state.remote_access.start(external_url, &method).await;
 
     // Persist enabled state and cert fingerprint
     {
@@ -87,7 +90,8 @@ pub async fn configure(
     let is_enabled = state.remote_access.status.read().await.enabled;
     if is_enabled {
         state.remote_access.stop().await;
-        let _ = state.remote_access.start(body.external_url).await;
+        let method = state.config.read().await.remote_access.method.clone();
+        let _ = state.remote_access.start(body.external_url, &method).await;
 
         // Re-persist enabled state
         let mut config = state.config.write().await;

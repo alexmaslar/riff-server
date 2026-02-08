@@ -5,6 +5,7 @@ use igd_next::PortMappingProtocol;
 use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 
@@ -40,6 +41,7 @@ impl Default for RemoteAccessStatus {
 pub struct RemoteAccessManager {
     pub status: Arc<RwLock<RemoteAccessStatus>>,
     renewal_handle: Arc<RwLock<Option<JoinHandle<()>>>>,
+    cloudflared_process: Arc<RwLock<Option<tokio::process::Child>>>,
 }
 
 impl RemoteAccessManager {
@@ -47,6 +49,7 @@ impl RemoteAccessManager {
         Self {
             status: Arc::new(RwLock::new(RemoteAccessStatus::default())),
             renewal_handle: Arc::new(RwLock::new(None)),
+            cloudflared_process: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -56,8 +59,16 @@ impl RemoteAccessManager {
         status.cert_fingerprint = Some(fingerprint);
     }
 
-    /// Start UPnP port forwarding. If external_url is configured, uses that instead.
-    pub async fn start(&self, external_url: Option<String>) -> Result<()> {
+    /// Start remote access. Tries methods based on `preferred_method`:
+    /// - "manual": use external_url directly
+    /// - "cloudflare": try cloudflared only
+    /// - "upnp": try UPnP only
+    /// - "auto" (default): try cloudflared → UPnP
+    pub async fn start(
+        &self,
+        external_url: Option<String>,
+        preferred_method: &str,
+    ) -> Result<()> {
         {
             let status = self.status.read().await;
             if status.status == "active" {
@@ -65,7 +76,7 @@ impl RemoteAccessManager {
             }
         }
 
-        // Manual URL mode — skip UPnP entirely
+        // Manual URL mode — skip everything
         if let Some(url) = external_url {
             let mut status = self.status.write().await;
             status.enabled = true;
@@ -74,11 +85,106 @@ impl RemoteAccessManager {
             status.external_url = Some(url.clone());
             status.public_address = Some(url);
             status.error_message = None;
-            tracing::info!("remote access using manual URL: {}", status.public_address.as_ref().unwrap());
+            tracing::info!(
+                "remote access using manual URL: {}",
+                status.public_address.as_ref().unwrap()
+            );
             return Ok(());
         }
 
-        // UPnP mode
+        match preferred_method {
+            "cloudflare" => self.start_cloudflare().await,
+            "upnp" => self.start_upnp().await,
+            _ => {
+                // "auto": try cloudflared first, fall back to UPnP
+                if cloudflared_available() {
+                    match self.start_cloudflare().await {
+                        Ok(()) => return Ok(()),
+                        Err(e) => {
+                            tracing::warn!("cloudflared failed, falling back to UPnP: {e}");
+                        }
+                    }
+                }
+                self.start_upnp().await
+            }
+        }
+    }
+
+    /// Start a Cloudflare Quick Tunnel via `cloudflared`.
+    async fn start_cloudflare(&self) -> Result<()> {
+        {
+            let mut status = self.status.write().await;
+            status.enabled = true;
+            status.method = "cloudflare".to_string();
+            status.status = "starting".to_string();
+            status.error_message = None;
+        }
+
+        let mut child = tokio::process::Command::new("cloudflared")
+            .args(["tunnel", "--url", "http://localhost:8080", "--no-autoupdate"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .context("spawning cloudflared (is it installed?)")?;
+
+        // cloudflared prints the tunnel URL to stderr
+        let stderr = child
+            .stderr
+            .take()
+            .context("capturing cloudflared stderr")?;
+
+        let mut reader = BufReader::new(stderr).lines();
+        let tunnel_url = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            async {
+                while let Some(line) = reader.next_line().await? {
+                    tracing::debug!("cloudflared: {line}");
+                    // Look for the tunnel URL in the output
+                    if let Some(url) = extract_tunnel_url(&line) {
+                        return Ok::<String, anyhow::Error>(url);
+                    }
+                }
+                anyhow::bail!("cloudflared exited without producing a tunnel URL")
+            },
+        )
+        .await
+        .context("timed out waiting for cloudflared tunnel URL")?
+        .context("reading cloudflared output")?;
+
+        // Store the child process so we can kill it on stop
+        {
+            let mut proc = self.cloudflared_process.write().await;
+            *proc = Some(child);
+        }
+
+        // Spawn a background task to keep reading stderr (prevents pipe buffer from filling)
+        let status_clone = self.status.clone();
+        tokio::spawn(async move {
+            while let Ok(Some(line)) = reader.next_line().await {
+                tracing::debug!("cloudflared: {line}");
+                // If cloudflared reports a new URL (reconnection), update status
+                if let Some(url) = extract_tunnel_url(&line) {
+                    let mut s = status_clone.write().await;
+                    if s.public_address.as_ref() != Some(&url) {
+                        tracing::info!("cloudflare tunnel URL changed: {url}");
+                        s.public_address = Some(url);
+                    }
+                }
+            }
+        });
+
+        let mut status = self.status.write().await;
+        status.status = "active".to_string();
+        status.public_address = Some(tunnel_url.clone());
+        status.error_message = None;
+        tracing::info!("cloudflare tunnel active: {tunnel_url}");
+
+        Ok(())
+    }
+
+    /// Start UPnP port forwarding.
+    async fn start_upnp(&self) -> Result<()> {
         {
             let mut status = self.status.write().await;
             status.enabled = true;
@@ -110,7 +216,7 @@ impl RemoteAccessManager {
         }
     }
 
-    /// Stop UPnP and remove port mapping.
+    /// Stop remote access (UPnP, cloudflared, or manual).
     pub async fn stop(&self) {
         // Cancel renewal loop
         {
@@ -120,12 +226,27 @@ impl RemoteAccessManager {
             }
         }
 
-        // Try to remove the port mapping
-        if let Ok(gateway) = discover_gateway().await {
-            let _ = gateway
-                .remove_port(PortMappingProtocol::TCP, HTTPS_PORT)
-                .await;
-            tracing::info!("UPnP port mapping removed");
+        // Kill cloudflared process if running
+        {
+            let mut proc = self.cloudflared_process.write().await;
+            if let Some(mut child) = proc.take() {
+                let _ = child.kill().await;
+                tracing::info!("cloudflared process stopped");
+            }
+        }
+
+        // Try to remove the UPnP port mapping (no-op if cloudflared was used)
+        let current_method = {
+            let s = self.status.read().await;
+            s.method.clone()
+        };
+        if current_method == "upnp" {
+            if let Ok(gateway) = discover_gateway().await {
+                let _ = gateway
+                    .remove_port(PortMappingProtocol::TCP, HTTPS_PORT)
+                    .await;
+                tracing::info!("UPnP port mapping removed");
+            }
         }
 
         let mut status = self.status.write().await;
@@ -232,6 +353,30 @@ impl RemoteAccessManager {
 
         *handle = Some(h);
     }
+}
+
+/// Check if `cloudflared` binary is available in PATH.
+fn cloudflared_available() -> bool {
+    std::process::Command::new("cloudflared")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok()
+}
+
+/// Extract a trycloudflare.com tunnel URL from a cloudflared log line.
+fn extract_tunnel_url(line: &str) -> Option<String> {
+    // cloudflared outputs lines like:
+    //   "... https://random-words.trycloudflare.com ..."
+    for word in line.split_whitespace() {
+        if word.starts_with("https://") && word.contains("trycloudflare.com") {
+            // Strip any trailing punctuation
+            let url = word.trim_end_matches(|c: char| !c.is_alphanumeric());
+            return Some(url.to_string());
+        }
+    }
+    None
 }
 
 async fn discover_gateway() -> Result<Gateway<Tokio>> {

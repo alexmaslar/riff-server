@@ -235,12 +235,13 @@ async fn main() -> Result<()> {
         }
     };
 
-    // Start UPnP remote access if enabled
+    // Start remote access if enabled (tries cloudflared → UPnP by default)
     if config.remote_access.enabled {
         let ra_state = state.clone();
         let external_url = config.remote_access.external_url.clone();
+        let method = config.remote_access.method.clone();
         tokio::spawn(async move {
-            if let Err(e) = ra_state.remote_access.start(external_url).await {
+            if let Err(e) = ra_state.remote_access.start(external_url, &method).await {
                 tracing::warn!("remote access setup failed: {e}");
             }
         });

@@ -96,10 +96,17 @@ pub struct DiscogsConfig {
 pub struct RemoteAccessConfig {
     #[serde(default)]
     pub enabled: bool,
+    /// Preferred remote access method: auto | cloudflare | upnp | manual
+    #[serde(default = "default_remote_method")]
+    pub method: String,
     #[serde(default)]
     pub external_url: Option<String>,
     #[serde(default)]
     pub cert_fingerprint: Option<String>,
+}
+
+fn default_remote_method() -> String {
+    "auto".to_string()
 }
 
 fn default_true() -> bool {
