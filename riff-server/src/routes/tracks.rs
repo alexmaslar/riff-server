@@ -51,11 +51,42 @@ pub async fn stream_track(
 
     let mime = mime_for_format(&format);
 
-    // Parse Range header
-    let range = headers
-        .get(header::RANGE)
+    // Generate ETag from file size + mtime for resume validation
+    let metadata = match tokio::fs::metadata(&file_path).await {
+        Ok(m) => m,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": format!("metadata failed: {}", e) })),
+            )
+                .into_response()
+        }
+    };
+    let mtime = metadata
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let etag = format!("\"{:x}-{:x}\"", file_size, mtime);
+
+    // If-Range validation: if the client sends If-Range and it doesn't match
+    // the current ETag, ignore the Range header and serve the full file.
+    let if_range_valid = headers
+        .get(header::IF_RANGE)
         .and_then(|v| v.to_str().ok())
-        .and_then(|s| parse_range(s, file_size as u64));
+        .map(|ir| ir == etag)
+        .unwrap_or(true); // no If-Range header → always honor Range
+
+    // Parse Range header (only if If-Range is valid or absent)
+    let range = if if_range_valid {
+        headers
+            .get(header::RANGE)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| parse_range(s, file_size as u64))
+    } else {
+        None
+    };
 
     match range {
         Some((start, end)) => {
@@ -91,6 +122,7 @@ pub async fn stream_track(
                     format!("bytes {}-{}/{}", start, end, file_size),
                 )
                 .header(header::ACCEPT_RANGES, "bytes")
+                .header(header::ETAG, &etag)
                 .body(Body::from_stream(stream))
                 .unwrap()
         }
@@ -114,6 +146,7 @@ pub async fn stream_track(
                 .header(header::CONTENT_TYPE, mime)
                 .header(header::CONTENT_LENGTH, file_size.to_string())
                 .header(header::ACCEPT_RANGES, "bytes")
+                .header(header::ETAG, &etag)
                 .body(Body::from_stream(stream))
                 .unwrap()
         }

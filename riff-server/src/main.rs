@@ -287,6 +287,16 @@ async fn main() -> Result<()> {
         .route("/albums/{id}/cover", get(routes::albums::get_cover))
         .route("/mixes/daily/{id}/cover", get(routes::daily_mixes::get_mix_cover));
 
+    // Streaming routes — no timeout, no gzip (audio is already compressed;
+    // gzip switches to chunked encoding which breaks Content-Length on iOS)
+    let streaming = Router::new()
+        .route("/tracks/{id}/stream", get(routes::tracks::stream_track))
+        .route("/tracks/{id}/download", get(routes::tracks::download_track))
+        .route_layer(axum_mw::from_fn_with_state(
+            state.clone(),
+            middleware::require_auth,
+        ));
+
     // Protected routes (require valid JWT)
     let protected = Router::new()
         .route("/remote-access/status", get(routes::remote_access::get_status))
@@ -295,8 +305,6 @@ async fn main() -> Result<()> {
         .route("/albums", get(routes::albums::list_albums))
         .route("/albums/{id}", get(routes::albums::get_album))
         .route("/albums/{id}/play", post(routes::albums::increment_play_count))
-        .route("/tracks/{id}/stream", get(routes::tracks::stream_track))
-        .route("/tracks/{id}/download", get(routes::tracks::download_track))
         .route("/playlists", get(routes::playlists::list_playlists).post(routes::playlists::create_playlist))
         .route("/playlists/{id}", get(routes::playlists::get_playlist).delete(routes::playlists::delete_playlist))
         .route("/playlists/{id}/tracks", post(routes::playlists::add_track).put(routes::playlists::reorder_tracks))
@@ -356,8 +364,8 @@ async fn main() -> Result<()> {
             middleware::require_auth,
         ));
 
-    let app = Router::new()
-        .merge(public)
+    // Apply timeout + gzip compression only to JSON API routes (not streaming)
+    let timed_routes = Router::new()
         .merge(protected)
         .merge(admin)
         .layer(
@@ -367,8 +375,13 @@ async fn main() -> Result<()> {
                 }))
                 .layer(TimeoutLayer::new(Duration::from_secs(120)))
         )
+        .layer(CompressionLayer::new().gzip(true));
+
+    let app = Router::new()
+        .merge(public)
+        .merge(streaming)      // no timeout, no gzip — raw bytes with accurate Content-Length
+        .merge(timed_routes)   // 120s timeout + gzip for JSON API responses
         .layer(TraceLayer::new_for_http())
-        .layer(CompressionLayer::new().gzip(true))
         .layer(cors)
         .with_state(state.clone());
 
@@ -388,32 +401,37 @@ async fn main() -> Result<()> {
     let tls_config = tls::build_rustls_config(&cert_path, &key_path)?;
     tracing::info!("HTTPS listening on {}", https_addr);
 
-    let shutdown_state = state.clone();
     let http_app = app.clone();
 
-    tokio::select! {
-        result = axum::serve(http_listener, http_app).with_graceful_shutdown(shutdown_signal(shutdown_state)) => {
-            if let Err(e) = result {
-                tracing::error!("HTTP server error: {e}");
-            }
+    // Run HTTP and HTTPS listeners as independent tasks so one failing
+    // doesn't take down the other.
+    let http_task = tokio::spawn(async move {
+        if let Err(e) = axum::serve(http_listener, http_app).await {
+            tracing::error!("HTTP server error: {e}");
         }
-        result = axum_server::from_tcp_rustls(https_listener, tls_config).serve(app.into_make_service()) => {
-            if let Err(e) = result {
-                tracing::error!("HTTPS server error: {e}");
-            }
+    });
+
+    let https_task = tokio::spawn(async move {
+        if let Err(e) = axum_server::from_tcp_rustls(https_listener, tls_config)
+            .serve(app.into_make_service())
+            .await
+        {
+            tracing::error!("HTTPS server error: {e}");
         }
-    }
+    });
 
-    // Cleanup UPnP on shutdown
-    state.remote_access.stop().await;
-
-    Ok(())
-}
-
-async fn shutdown_signal(state: Arc<AppState>) {
+    // Wait for shutdown signal
     let _ = tokio::signal::ctrl_c().await;
     tracing::info!("shutting down...");
+
+    // Cleanup UPnP
     state.remote_access.stop().await;
+
+    // Abort both listeners
+    http_task.abort();
+    https_task.abort();
+
+    Ok(())
 }
 
 async fn health(State(_state): State<Arc<AppState>>) -> Json<Value> {
