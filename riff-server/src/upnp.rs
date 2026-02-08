@@ -192,24 +192,41 @@ impl RemoteAccessManager {
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(RENEWAL_INTERVAL)).await;
 
-                match renew_mapping().await {
-                    Ok(new_address) => {
-                        let mut s = status.write().await;
-                        let old_address = s.public_address.clone();
-                        if old_address.as_ref() != Some(&new_address) {
-                            tracing::info!("external address changed: {}", new_address);
-                            s.public_address = Some(new_address);
+                let mut success = false;
+                for attempt in 1..=3u32 {
+                    match renew_mapping().await {
+                        Ok(new_address) => {
+                            let mut s = status.write().await;
+                            let old_address = s.public_address.clone();
+                            if old_address.as_ref() != Some(&new_address) {
+                                tracing::info!("external address changed: {}", new_address);
+                                s.public_address = Some(new_address);
+                            }
+                            s.status = "active".to_string();
+                            s.error_message = None;
+                            success = true;
+                            break;
                         }
-                        s.status = "active".to_string();
-                        s.error_message = None;
-                    }
-                    Err(e) => {
-                        let mut s = status.write().await;
-                        s.status = "error".to_string();
-                        s.error_message = Some(format!("renewal failed: {e}"));
-                        tracing::warn!("UPnP lease renewal failed: {e}");
+                        Err(e) => {
+                            if attempt < 3 {
+                                tracing::warn!(
+                                    "UPnP renewal attempt {}/3 failed: {e}, retrying in 10s",
+                                    attempt
+                                );
+                                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                            } else {
+                                tracing::warn!(
+                                    "UPnP lease renewal failed after 3 attempts: {e}"
+                                );
+                                // Set error message but keep public_address — mapping may still be valid
+                                let mut s = status.write().await;
+                                s.error_message =
+                                    Some(format!("renewal failed: {e}"));
+                            }
+                        }
                     }
                 }
+                let _ = success;
             }
         });
 
@@ -234,7 +251,8 @@ async fn renew_mapping() -> Result<String> {
     let local_ip = local_ip_address::local_ip().context("getting local IP")?;
     let local_addr: SocketAddr = SocketAddr::new(local_ip, HTTPS_PORT);
 
-    gateway
+    // Try add_port first (works on most routers for renewal)
+    if gateway
         .add_port(
             PortMappingProtocol::TCP,
             HTTPS_PORT,
@@ -243,7 +261,23 @@ async fn renew_mapping() -> Result<String> {
             "Riff Music Server",
         )
         .await
-        .context("renewing UPnP port mapping")?;
+        .is_err()
+    {
+        // Some routers reject duplicate mappings — remove first, then re-add
+        let _ = gateway
+            .remove_port(PortMappingProtocol::TCP, HTTPS_PORT)
+            .await;
+        gateway
+            .add_port(
+                PortMappingProtocol::TCP,
+                HTTPS_PORT,
+                local_addr,
+                LEASE_DURATION,
+                "Riff Music Server",
+            )
+            .await
+            .context("re-adding UPnP port mapping after remove")?;
+    }
 
     Ok(format!("https://{}:{}", external_ip, HTTPS_PORT))
 }
