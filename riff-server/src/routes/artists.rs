@@ -51,6 +51,7 @@ pub struct AlbumSummary {
     pub title: String,
     pub year: Option<i32>,
     pub cover_art_path: Option<String>,
+    pub play_count: i64,
 }
 
 pub async fn list_artists(
@@ -119,8 +120,8 @@ pub async fn build_artist_detail(
 
     // Run independent queries concurrently
     let (albums_result, fav_result, similar_result) = tokio::join!(
-        sqlx::query_as::<_, (String, String, Option<i32>, Option<String>)>(
-            "SELECT id, title, year, cover_art_path FROM albums WHERE artist_id = ? ORDER BY year, title",
+        sqlx::query_as::<_, (String, String, Option<i32>, Option<String>, i64)>(
+            "SELECT id, title, year, cover_art_path, play_count FROM albums WHERE artist_id = ? ORDER BY year, title",
         )
         .bind(artist_id)
         .fetch_all(db),
@@ -147,11 +148,12 @@ pub async fn build_artist_detail(
 
     let album_summaries: Vec<AlbumSummary> = albums
         .into_iter()
-        .map(|(id, title, year, cover_art_path)| AlbumSummary {
+        .map(|(id, title, year, cover_art_path, play_count)| AlbumSummary {
             id,
             title,
             year,
             cover_art_path,
+            play_count,
         })
         .collect();
 
