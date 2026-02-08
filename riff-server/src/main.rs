@@ -15,7 +15,9 @@ use axum::{
 };
 use riff_core::{ai, analysis, auth, config::Config, daily_mixes, db, discogs, scanner};
 use serde_json::{json, Value};
+use socket2::{Domain, Protocol, Socket, TcpKeepalive, Type};
 use sqlx::SqlitePool;
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -139,6 +141,23 @@ where
         }
         flag.store(false, Ordering::SeqCst);
     }
+}
+
+/// Create a TCP listener with keepalive probes to survive cellular NAT timeouts.
+/// Probes start after 15s idle, repeat every 5s, and give up after 3 failures (~30s total).
+fn create_keepalive_listener(addr: SocketAddr) -> std::io::Result<std::net::TcpListener> {
+    let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
+    socket.set_reuse_address(true)?;
+    socket.set_nodelay(true)?;
+    socket.set_tcp_keepalive(
+        &TcpKeepalive::new()
+            .with_time(Duration::from_secs(15))
+            .with_interval(Duration::from_secs(5))
+            .with_retries(3),
+    )?;
+    socket.bind(&addr.into())?;
+    socket.listen(1024)?;
+    Ok(std::net::TcpListener::from(socket))
 }
 
 #[tokio::main]
@@ -353,16 +372,19 @@ async fn main() -> Result<()> {
         .layer(cors)
         .with_state(state.clone());
 
-    // HTTP server (local LAN access)
-    let http_addr = format!("0.0.0.0:{}", config.server.port);
-    let http_listener = tokio::net::TcpListener::bind(&http_addr).await?;
+    // HTTP server (local LAN access) — with TCP keepalive for cellular resilience
+    let http_addr: SocketAddr = format!("0.0.0.0:{}", config.server.port).parse()?;
+    let std_listener = create_keepalive_listener(http_addr)?;
+    std_listener.set_nonblocking(true)?;
+    let http_listener = tokio::net::TcpListener::from_std(std_listener)?;
     tracing::info!("HTTP listening on {}", http_addr);
 
-    // HTTPS server (remote access via UPnP)
+    // HTTPS server (remote access via UPnP) — with TCP keepalive for cellular resilience
     // Build rustls ServerConfig with explicit ring provider to avoid
     // CryptoProvider auto-detection failure when both ring and aws-lc-rs
     // features are enabled via Cargo feature unification.
-    let https_addr = "0.0.0.0:8443";
+    let https_addr: SocketAddr = "0.0.0.0:8443".parse()?;
+    let https_listener = create_keepalive_listener(https_addr)?;
     let tls_config = tls::build_rustls_config(&cert_path, &key_path)?;
     tracing::info!("HTTPS listening on {}", https_addr);
 
@@ -375,7 +397,7 @@ async fn main() -> Result<()> {
                 tracing::error!("HTTP server error: {e}");
             }
         }
-        result = axum_server::bind_rustls(https_addr.parse()?, tls_config).serve(app.into_make_service()) => {
+        result = axum_server::from_tcp_rustls(https_listener, tls_config).serve(app.into_make_service()) => {
             if let Err(e) = result {
                 tracing::error!("HTTPS server error: {e}");
             }
