@@ -74,6 +74,9 @@ pub async fn generate(
     if !config.metadata.ai.enabled {
         return Err(AppError::BadRequest("AI is not enabled".to_string()));
     }
+    if !config.metadata.ai.playlist_generation {
+        return Err(AppError::BadRequest("AI playlist generation is not enabled".to_string()));
+    }
     let ai_config = config.metadata.ai.clone();
     drop(config);
 
@@ -136,6 +139,9 @@ pub async fn refine(
     let config = state.config.read().await;
     if !config.metadata.ai.enabled {
         return Err(AppError::BadRequest("AI is not enabled".to_string()));
+    }
+    if !config.metadata.ai.playlist_generation {
+        return Err(AppError::BadRequest("AI playlist generation is not enabled".to_string()));
     }
     let ai_config = config.metadata.ai.clone();
     drop(config);

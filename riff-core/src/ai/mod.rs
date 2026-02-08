@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use crate::config::AiConfig;
 use prompt::{AlbumContext, AlbumSummaryCompact, ArtistSummaryCompact, CreditInfo, TrackInfo, SYSTEM_PROMPT, RATING_SYSTEM_PROMPT, RECOMMEND_SYSTEM_PROMPT, ARTIST_RECOMMEND_SYSTEM_PROMPT, ARTIST_BIO_SYSTEM_PROMPT, build_album_prompt, build_rating_prompt, build_recommend_prompt, build_recommend_prompt_incremental, build_artist_recommend_prompt, build_artist_recommend_prompt_incremental, build_artist_bio_prompt};
-use provider::{GenerateOptions, create_provider};
+use provider::{GenerateOptions, create_provider, create_provider_with_model};
 
 pub struct SummarizationResult {
     pub albums_summarized: u32,
@@ -243,7 +243,7 @@ pub async fn rate_library(
     pool: &SqlitePool,
     config: &AiConfig,
 ) -> anyhow::Result<RatingResult> {
-    let provider = create_provider(config)?;
+    let provider = create_provider_with_model(config, config.fast_model.as_deref())?;
 
     let mut result = RatingResult {
         albums_rated: 0,
@@ -331,7 +331,7 @@ pub async fn rate_album(
     };
 
     let genre: Vec<String> = serde_json::from_str(&genre_json).unwrap_or_default();
-    let provider = create_provider(config)?;
+    let provider = create_provider_with_model(config, config.fast_model.as_deref())?;
     let user_prompt = build_rating_prompt(&title, &artist, year, &genre);
 
     let opts = GenerateOptions {
@@ -596,7 +596,7 @@ async fn recommend_library_inner(
     albums: &[(String, String, String, Option<i32>, String, String, Option<String>)],
     force_full: bool,
 ) -> anyhow::Result<RecommendResult> {
-    let provider = create_provider(config)?;
+    let provider = create_provider_with_model(config, config.fast_model.as_deref())?;
 
     let album_ids: std::collections::HashSet<&str> = albums.iter().map(|(id, ..)| id.as_str()).collect();
 
@@ -794,7 +794,7 @@ async fn recommend_artists_inner(
     artists: &[(String, String)],
     force_full: bool,
 ) -> anyhow::Result<RecommendResult> {
-    let provider = create_provider(config)?;
+    let provider = create_provider_with_model(config, config.fast_model.as_deref())?;
 
     let artist_ids: std::collections::HashSet<&str> = artists.iter().map(|(id, _)| id.as_str()).collect();
 

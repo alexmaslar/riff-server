@@ -13,7 +13,7 @@ use crate::ai::prompt::{
     INTENT_EXTRACTION_SYSTEM_PROMPT, SMART_PLAYLIST_REFINE_SYSTEM_PROMPT,
     SMART_PLAYLIST_SYSTEM_PROMPT,
 };
-use crate::ai::provider::{create_provider, GenerateOptions};
+use crate::ai::provider::{create_provider_with_model, GenerateOptions};
 use crate::config::{AiConfig, AiProvider};
 
 const MAX_CANDIDATES: usize = 500;
@@ -50,7 +50,9 @@ pub fn estimate_generation_cost(config: &AiConfig) -> Option<f64> {
     let (input_rate, output_rate) = match config.provider {
         AiProvider::Ollama => return None,
         AiProvider::OpenAi => {
-            let model = config.model.as_deref().unwrap_or("gpt-4o");
+            let model = config.fast_model.as_deref()
+                .or(config.model.as_deref())
+                .unwrap_or("gpt-4o");
             match model {
                 m if m.starts_with("gpt-4o-mini") => (0.15, 0.60),
                 m if m.starts_with("gpt-4o") => (2.50, 10.0),
@@ -61,7 +63,9 @@ pub fn estimate_generation_cost(config: &AiConfig) -> Option<f64> {
             }
         }
         AiProvider::Anthropic => {
-            let model = config.model.as_deref().unwrap_or("claude-sonnet-4-20250514");
+            let model = config.fast_model.as_deref()
+                .or(config.model.as_deref())
+                .unwrap_or("claude-sonnet-4-20250514");
             match model {
                 m if m.contains("haiku") => (0.80, 4.00),
                 m if m.contains("sonnet") => (3.00, 15.00),
@@ -280,7 +284,7 @@ pub async fn generate_smart_playlist(
     let candidate_count = candidates.len();
 
     // Step 2: AI track selection
-    let provider = create_provider(config)?;
+    let provider = create_provider_with_model(config, config.fast_model.as_deref())?;
     let track_candidates: Vec<TrackCandidate> = candidates
         .iter()
         .map(|c| TrackCandidate {
@@ -420,7 +424,7 @@ pub async fn refine_smart_playlist(
         track_count,
     );
 
-    let provider = create_provider(config)?;
+    let provider = create_provider_with_model(config, config.fast_model.as_deref())?;
     let opts = GenerateOptions {
         max_tokens: 4096,
         temperature: Some(0.3),
@@ -866,7 +870,7 @@ struct AiIntentResponse {
 }
 
 async fn extract_intent_with_ai(config: &AiConfig, prompt: &str) -> Result<CandidateFilters> {
-    let provider = create_provider(config)?;
+    let provider = create_provider_with_model(config, config.fast_model.as_deref())?;
     let opts = GenerateOptions {
         max_tokens: 512,
         temperature: Some(0.0),

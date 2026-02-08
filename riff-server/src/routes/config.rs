@@ -44,12 +44,14 @@ pub async fn get_config(
                 "provider": provider_to_str(&config.metadata.ai.provider),
                 "api_key": config.metadata.ai.api_key.as_deref().map(mask_secret),
                 "model": config.metadata.ai.model,
+                "fast_model": config.metadata.ai.fast_model,
                 "base_url": config.metadata.ai.base_url,
                 "album_summaries": config.metadata.ai.album_summaries,
                 "album_ratings": config.metadata.ai.album_ratings,
                 "album_recommendations": config.metadata.ai.album_recommendations,
                 "artist_bios": config.metadata.ai.artist_bios,
                 "artist_recommendations": config.metadata.ai.artist_recommendations,
+                "playlist_generation": config.metadata.ai.playlist_generation,
             }
         }
     })))
@@ -86,12 +88,14 @@ pub struct AiUpdate {
     pub provider: Option<String>,
     pub api_key: Option<String>,
     pub model: Option<String>,
+    pub fast_model: Option<String>,
     pub base_url: Option<Option<String>>,
     pub album_summaries: Option<bool>,
     pub album_ratings: Option<bool>,
     pub album_recommendations: Option<bool>,
     pub artist_bios: Option<bool>,
     pub artist_recommendations: Option<bool>,
+    pub playlist_generation: Option<bool>,
 }
 
 pub async fn update_config(
@@ -153,6 +157,9 @@ pub async fn update_config(
                 if let Some(model) = ai.model {
                     config.metadata.ai.model = if model.is_empty() { None } else { Some(model) };
                 }
+                if let Some(fast_model) = ai.fast_model {
+                    config.metadata.ai.fast_model = if fast_model.is_empty() { None } else { Some(fast_model) };
+                }
                 if let Some(base_url) = ai.base_url {
                     config.metadata.ai.base_url = base_url.filter(|s| !s.is_empty());
                 }
@@ -170,6 +177,9 @@ pub async fn update_config(
                 }
                 if let Some(v) = ai.artist_recommendations {
                     config.metadata.ai.artist_recommendations = v;
+                }
+                if let Some(v) = ai.playlist_generation {
+                    config.metadata.ai.playlist_generation = v;
                 }
             }
         }
@@ -216,12 +226,14 @@ pub async fn update_config(
                 "provider": provider_to_str(&config_snapshot.metadata.ai.provider),
                 "api_key": config_snapshot.metadata.ai.api_key.as_deref().map(mask_secret),
                 "model": config_snapshot.metadata.ai.model,
+                "fast_model": config_snapshot.metadata.ai.fast_model,
                 "base_url": config_snapshot.metadata.ai.base_url,
                 "album_summaries": config_snapshot.metadata.ai.album_summaries,
                 "album_ratings": config_snapshot.metadata.ai.album_ratings,
                 "album_recommendations": config_snapshot.metadata.ai.album_recommendations,
                 "artist_bios": config_snapshot.metadata.ai.artist_bios,
                 "artist_recommendations": config_snapshot.metadata.ai.artist_recommendations,
+                "playlist_generation": config_snapshot.metadata.ai.playlist_generation,
             }
         }
     });

@@ -32,6 +32,10 @@ pub trait AiProviderTrait: Send + Sync {
 }
 
 pub fn create_provider(config: &AiConfig) -> anyhow::Result<Box<dyn AiProviderTrait>> {
+    create_provider_with_model(config, None)
+}
+
+pub fn create_provider_with_model(config: &AiConfig, model_override: Option<&str>) -> anyhow::Result<Box<dyn AiProviderTrait>> {
     let quota = Quota::per_second(NonZeroU32::new(1).unwrap());
     let limiter = Arc::new(RateLimiter::direct(quota));
     let http = reqwest::Client::new();
@@ -42,7 +46,9 @@ pub fn create_provider(config: &AiConfig) -> anyhow::Result<Box<dyn AiProviderTr
                 .ok_or_else(|| anyhow::anyhow!("api_key required for OpenAI provider"))?;
             let base_url = config.base_url.as_deref()
                 .unwrap_or("https://api.openai.com/v1");
-            let model = config.model.as_deref().unwrap_or("gpt-4o");
+            let model = model_override
+                .or(config.model.as_deref())
+                .unwrap_or("gpt-4o");
             Ok(Box::new(OpenAiProvider {
                 http,
                 limiter,
@@ -56,7 +62,9 @@ pub fn create_provider(config: &AiConfig) -> anyhow::Result<Box<dyn AiProviderTr
                 .ok_or_else(|| anyhow::anyhow!("api_key required for Anthropic provider"))?;
             let base_url = config.base_url.as_deref()
                 .unwrap_or("https://api.anthropic.com/v1");
-            let model = config.model.as_deref().unwrap_or("claude-sonnet-4-20250514");
+            let model = model_override
+                .or(config.model.as_deref())
+                .unwrap_or("claude-sonnet-4-20250514");
             Ok(Box::new(AnthropicProvider {
                 http,
                 limiter,
@@ -68,7 +76,9 @@ pub fn create_provider(config: &AiConfig) -> anyhow::Result<Box<dyn AiProviderTr
         AiProvider::Ollama => {
             let base_url = config.base_url.as_deref()
                 .unwrap_or("http://localhost:11434");
-            let model = config.model.as_deref().unwrap_or("llama3.1");
+            let model = model_override
+                .or(config.model.as_deref())
+                .unwrap_or("llama3.1");
             Ok(Box::new(OllamaProvider {
                 http,
                 limiter,
