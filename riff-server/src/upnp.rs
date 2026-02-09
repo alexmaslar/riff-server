@@ -21,6 +21,7 @@ pub struct RemoteAccessStatus {
     pub cert_fingerprint: Option<String>,
     pub error_message: Option<String>,
     pub https_port: u16,
+    pub local_ip: Option<String>,
 }
 
 impl Default for RemoteAccessStatus {
@@ -34,6 +35,7 @@ impl Default for RemoteAccessStatus {
             cert_fingerprint: None,
             error_message: None,
             https_port: 8443,
+            local_ip: None,
         }
     }
 }

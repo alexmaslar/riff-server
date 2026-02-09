@@ -7,6 +7,9 @@ use crate::error::AppError;
 use crate::AppState;
 
 fn status_json(status: &crate::upnp::RemoteAccessStatus) -> Value {
+    let local_ip = local_ip_address::local_ip()
+        .ok()
+        .map(|ip| ip.to_string());
     json!({
         "enabled": status.enabled,
         "method": status.method,
@@ -16,6 +19,7 @@ fn status_json(status: &crate::upnp::RemoteAccessStatus) -> Value {
         "cert_fingerprint": status.cert_fingerprint,
         "error_message": status.error_message,
         "https_port": status.https_port,
+        "local_ip": local_ip,
     })
 }
 
