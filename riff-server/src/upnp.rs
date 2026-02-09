@@ -149,11 +149,20 @@ impl RemoteAccessManager {
             s.method.clone()
         };
         if current_method == "upnp" {
-            if let Ok(gateway) = discover_gateway().await {
-                let _ = gateway
-                    .remove_port(PortMappingProtocol::TCP, self.https_port)
-                    .await;
-                tracing::info!("UPnP port mapping removed");
+            let https_port = self.https_port;
+            let cleanup = async {
+                if let Ok(gateway) = discover_gateway().await {
+                    let _ = gateway
+                        .remove_port(PortMappingProtocol::TCP, https_port)
+                        .await;
+                    tracing::info!("UPnP port mapping removed");
+                }
+            };
+            if tokio::time::timeout(std::time::Duration::from_secs(5), cleanup)
+                .await
+                .is_err()
+            {
+                tracing::warn!("UPnP cleanup timed out — mapping will expire naturally");
             }
         }
 
@@ -224,7 +233,16 @@ impl RemoteAccessManager {
 
                 let mut success = false;
                 for attempt in 1..=3u32 {
-                    match renew_mapping(https_port).await {
+                    let result = tokio::time::timeout(
+                        std::time::Duration::from_secs(15),
+                        renew_mapping(https_port),
+                    )
+                    .await;
+                    let result = match result {
+                        Ok(r) => r,
+                        Err(_) => Err(anyhow::anyhow!("renewal timed out")),
+                    };
+                    match result {
                         Ok(new_address) => {
                             let mut s = status.write().await;
                             let old_address = s.public_address.clone();
@@ -265,9 +283,12 @@ impl RemoteAccessManager {
 }
 
 async fn discover_gateway() -> Result<Gateway<Tokio>> {
-    igd_next::aio::tokio::search_gateway(igd_next::SearchOptions::default())
-        .await
-        .context("discovering UPnP gateway (is UPnP enabled on your router?)")
+    igd_next::aio::tokio::search_gateway(igd_next::SearchOptions {
+        timeout: Some(std::time::Duration::from_secs(3)),
+        ..Default::default()
+    })
+    .await
+    .context("discovering UPnP gateway (is UPnP enabled on your router?)")
 }
 
 async fn renew_mapping(https_port: u16) -> Result<String> {

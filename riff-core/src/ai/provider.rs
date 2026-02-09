@@ -38,7 +38,10 @@ pub fn create_provider(config: &AiConfig) -> anyhow::Result<Box<dyn AiProviderTr
 pub fn create_provider_with_model(config: &AiConfig, model_override: Option<&str>) -> anyhow::Result<Box<dyn AiProviderTrait>> {
     let quota = Quota::per_second(NonZeroU32::new(1).unwrap());
     let limiter = Arc::new(RateLimiter::direct(quota));
-    let http = reqwest::Client::new();
+    let http = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .build()?;
 
     match config.provider {
         AiProvider::OpenAi => {

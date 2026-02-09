@@ -36,8 +36,7 @@ pub async fn require_auth(
         }
     };
 
-    let jwt_secret = state.config.read().await.auth.jwt_secret.clone();
-    match auth::validate_token(token, &jwt_secret) {
+    match auth::validate_token(token, &state.jwt_secret) {
         Ok(claims) => {
             req.extensions_mut().insert(claims);
             next.run(req).await

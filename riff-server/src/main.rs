@@ -32,6 +32,7 @@ use tracing_subscriber::EnvFilter;
 pub struct AppState {
     pub db: SqlitePool,
     pub config: RwLock<Config>,
+    pub jwt_secret: String,
     pub enrichment_running: AtomicBool,
     pub analysis_running: AtomicBool,
     pub summarization_running: AtomicBool,
@@ -222,6 +223,7 @@ async fn main() -> Result<()> {
     let state = Arc::new(AppState {
         db: pool,
         config: RwLock::new(config.clone()),
+        jwt_secret: config.auth.jwt_secret.clone(),
         enrichment_running: AtomicBool::new(false),
         analysis_running: AtomicBool::new(false),
         summarization_running: AtomicBool::new(false),
@@ -289,7 +291,7 @@ async fn main() -> Result<()> {
         .route("/albums/{id}/cover", get(routes::albums::get_cover))
         .route("/mixes/daily/{id}/cover", get(routes::daily_mixes::get_mix_cover));
 
-    // Streaming routes — no timeout, no gzip (audio is already compressed;
+    // Streaming routes — generous timeout, no gzip (audio is already compressed;
     // gzip switches to chunked encoding which breaks Content-Length on iOS)
     let streaming = Router::new()
         .route("/tracks/{id}/stream", get(routes::tracks::stream_track))
@@ -297,7 +299,14 @@ async fn main() -> Result<()> {
         .route_layer(axum_mw::from_fn_with_state(
             state.clone(),
             middleware::require_auth,
-        ));
+        ))
+        .layer(
+            ServiceBuilder::new()
+                .layer(axum::error_handling::HandleErrorLayer::new(|_: BoxError| async {
+                    StatusCode::REQUEST_TIMEOUT
+                }))
+                .layer(TimeoutLayer::new(Duration::from_secs(600)))
+        );
 
     // Protected routes (require valid JWT)
     let protected = Router::new()
@@ -400,6 +409,7 @@ async fn main() -> Result<()> {
     // features are enabled via Cargo feature unification.
     let https_addr: SocketAddr = format!("0.0.0.0:{}", config.server.https_port).parse()?;
     let https_listener = create_keepalive_listener(https_addr)?;
+    https_listener.set_nonblocking(true)?;
     let tls_config = tls::build_rustls_config(&cert_path, &key_path)?;
     tracing::info!("HTTPS listening on {}", https_addr);
 
@@ -414,10 +424,13 @@ async fn main() -> Result<()> {
     });
 
     let https_task = tokio::spawn(async move {
-        if let Err(e) = axum_server::from_tcp_rustls(https_listener, tls_config)
-            .serve(app.into_make_service())
-            .await
-        {
+        let mut server = axum_server::from_tcp_rustls(https_listener, tls_config);
+        server
+            .http_builder()
+            .http1()
+            .keep_alive(true)
+            .header_read_timeout(Duration::from_secs(30));
+        if let Err(e) = server.serve(app.into_make_service()).await {
             tracing::error!("HTTPS server error: {e}");
         }
     });
@@ -442,6 +455,9 @@ async fn main() -> Result<()> {
     https_task.abort();
 
     if restarting {
+        // Kill dns-sd child process before exec() replaces us
+        drop(_mdns);
+
         // Re-exec the same binary so it picks up the new config
         use std::os::unix::process::CommandExt;
         let exe = std::env::current_exe().expect("failed to get current executable path");

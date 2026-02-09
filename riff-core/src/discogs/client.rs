@@ -30,6 +30,8 @@ impl DiscogsClient {
 
         let http = reqwest::Client::builder()
             .default_headers(headers)
+            .timeout(std::time::Duration::from_secs(30))
+            .connect_timeout(std::time::Duration::from_secs(10))
             .build()?;
 
         // Discogs allows 60 requests/minute for authenticated users → 1/sec
