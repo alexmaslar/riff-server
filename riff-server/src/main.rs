@@ -228,7 +228,7 @@ async fn main() -> Result<()> {
         recommendation_running: AtomicBool::new(false),
         artist_bio_running: AtomicBool::new(false),
         artist_recommendation_running: AtomicBool::new(false),
-        remote_access: upnp::RemoteAccessManager::new(),
+        remote_access: upnp::RemoteAccessManager::new(config.server.https_port),
     });
 
     // Set cert fingerprint on the remote access manager
@@ -396,7 +396,7 @@ async fn main() -> Result<()> {
     // Build rustls ServerConfig with explicit ring provider to avoid
     // CryptoProvider auto-detection failure when both ring and aws-lc-rs
     // features are enabled via Cargo feature unification.
-    let https_addr: SocketAddr = "0.0.0.0:8443".parse()?;
+    let https_addr: SocketAddr = format!("0.0.0.0:{}", config.server.https_port).parse()?;
     let https_listener = create_keepalive_listener(https_addr)?;
     let tls_config = tls::build_rustls_config(&cert_path, &key_path)?;
     tracing::info!("HTTPS listening on {}", https_addr);

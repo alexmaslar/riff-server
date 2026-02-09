@@ -29,6 +29,9 @@ pub async fn get_config(
     let config = state.config.read().await;
 
     Ok(Json(json!({
+        "server": {
+            "https_port": config.server.https_port,
+        },
         "library": {
             "path": config.library.path,
             "scan_interval": config.library.scan_interval,
@@ -59,8 +62,14 @@ pub async fn get_config(
 
 #[derive(Debug, Deserialize)]
 pub struct ConfigUpdate {
+    pub server: Option<ServerUpdate>,
     pub library: Option<LibraryUpdate>,
     pub metadata: Option<MetadataUpdate>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ServerUpdate {
+    pub https_port: Option<u16>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -103,7 +112,7 @@ pub async fn update_config(
     Json(update): Json<ConfigUpdate>,
 ) -> Result<Json<Value>, AppError> {
     // Clone config under write lock, apply mutations, then drop lock before disk I/O
-    let (config_snapshot, any_newly_enabled) = {
+    let (config_snapshot, any_newly_enabled, https_port_changed) = {
         let mut config = state.config.write().await;
 
         // Snapshot AI flags before mutations
@@ -113,6 +122,16 @@ pub async fn update_config(
         let old_album_recommendations = config.metadata.ai.album_recommendations;
         let old_artist_bios = config.metadata.ai.artist_bios;
         let old_artist_recommendations = config.metadata.ai.artist_recommendations;
+
+        let mut https_port_changed = false;
+        if let Some(srv) = update.server {
+            if let Some(port) = srv.https_port {
+                if port != config.server.https_port {
+                    config.server.https_port = port;
+                    https_port_changed = true;
+                }
+            }
+        }
 
         if let Some(lib) = update.library {
             if let Some(path) = lib.path {
@@ -204,13 +223,23 @@ pub async fn update_config(
         }
 
         let snapshot = config.clone();
-        (snapshot, any_newly_enabled)
+        (snapshot, any_newly_enabled, https_port_changed)
     }; // write lock dropped before disk I/O
 
     // Save to disk outside the lock
     config_snapshot.save().map_err(|e| AppError::Internal(format!("failed to save config: {e}")))?;
 
+    if https_port_changed {
+        tracing::info!(
+            "HTTPS port changed to {} — restart required to take effect",
+            config_snapshot.server.https_port
+        );
+    }
+
     let response = json!({
+        "server": {
+            "https_port": config_snapshot.server.https_port,
+        },
         "library": {
             "path": config_snapshot.library.path,
             "scan_interval": config_snapshot.library.scan_interval,

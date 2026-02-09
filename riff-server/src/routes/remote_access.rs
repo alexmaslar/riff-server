@@ -15,6 +15,7 @@ fn status_json(status: &crate::upnp::RemoteAccessStatus) -> Value {
         "external_url": status.external_url,
         "cert_fingerprint": status.cert_fingerprint,
         "error_message": status.error_message,
+        "https_port": status.https_port,
     })
 }
 

@@ -18,6 +18,8 @@ pub struct Config {
 pub struct ServerConfig {
     #[serde(default = "default_port")]
     pub port: u16,
+    #[serde(default = "default_https_port")]
+    pub https_port: u16,
     #[serde(default)]
     pub cors_origins: Option<Vec<String>>,
 }
@@ -162,8 +164,13 @@ impl Default for DiscogsConfig {
 fn default_server() -> ServerConfig {
     ServerConfig {
         port: default_port(),
+        https_port: default_https_port(),
         cors_origins: None,
     }
+}
+
+fn default_https_port() -> u16 {
+    8443
 }
 
 fn default_port() -> u16 {

@@ -10,7 +10,6 @@ use tokio::task::JoinHandle;
 
 const LEASE_DURATION: u32 = 3600; // 1 hour
 const RENEWAL_INTERVAL: u64 = 1800; // 30 minutes
-const HTTPS_PORT: u16 = 8443;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemoteAccessStatus {
@@ -21,6 +20,7 @@ pub struct RemoteAccessStatus {
     pub external_url: Option<String>,
     pub cert_fingerprint: Option<String>,
     pub error_message: Option<String>,
+    pub https_port: u16,
 }
 
 impl Default for RemoteAccessStatus {
@@ -33,6 +33,7 @@ impl Default for RemoteAccessStatus {
             external_url: None,
             cert_fingerprint: None,
             error_message: None,
+            https_port: 8443,
         }
     }
 }
@@ -40,13 +41,18 @@ impl Default for RemoteAccessStatus {
 pub struct RemoteAccessManager {
     pub status: Arc<RwLock<RemoteAccessStatus>>,
     renewal_handle: Arc<RwLock<Option<JoinHandle<()>>>>,
+    https_port: u16,
 }
 
 impl RemoteAccessManager {
-    pub fn new() -> Self {
+    pub fn new(https_port: u16) -> Self {
         Self {
-            status: Arc::new(RwLock::new(RemoteAccessStatus::default())),
+            status: Arc::new(RwLock::new(RemoteAccessStatus {
+                https_port,
+                ..Default::default()
+            })),
             renewal_handle: Arc::new(RwLock::new(None)),
+            https_port,
         }
     }
 
@@ -143,7 +149,7 @@ impl RemoteAccessManager {
         if current_method == "upnp" {
             if let Ok(gateway) = discover_gateway().await {
                 let _ = gateway
-                    .remove_port(PortMappingProtocol::TCP, HTTPS_PORT)
+                    .remove_port(PortMappingProtocol::TCP, self.https_port)
                     .await;
                 tracing::info!("UPnP port mapping removed");
             }
@@ -179,12 +185,12 @@ impl RemoteAccessManager {
         }
 
         let local_ip = local_ip_address::local_ip().context("getting local IP")?;
-        let local_addr: SocketAddr = SocketAddr::new(local_ip, HTTPS_PORT);
+        let local_addr: SocketAddr = SocketAddr::new(local_ip, self.https_port);
 
         gateway
             .add_port(
                 PortMappingProtocol::TCP,
-                HTTPS_PORT,
+                self.https_port,
                 local_addr,
                 LEASE_DURATION,
                 "Riff Music Server",
@@ -195,11 +201,11 @@ impl RemoteAccessManager {
         tracing::info!(
             "UPnP port mapping: external {}:{} -> {}",
             external_ip,
-            HTTPS_PORT,
+            self.https_port,
             local_addr
         );
 
-        Ok(format!("https://{}:{}", external_ip, HTTPS_PORT))
+        Ok(format!("https://{}:{}", external_ip, self.https_port))
     }
 
     async fn start_renewal_loop(&self) {
@@ -209,13 +215,14 @@ impl RemoteAccessManager {
         }
 
         let status = self.status.clone();
+        let https_port = self.https_port;
         let h = tokio::spawn(async move {
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(RENEWAL_INTERVAL)).await;
 
                 let mut success = false;
                 for attempt in 1..=3u32 {
-                    match renew_mapping().await {
+                    match renew_mapping(https_port).await {
                         Ok(new_address) => {
                             let mut s = status.write().await;
                             let old_address = s.public_address.clone();
@@ -261,7 +268,7 @@ async fn discover_gateway() -> Result<Gateway<Tokio>> {
         .context("discovering UPnP gateway (is UPnP enabled on your router?)")
 }
 
-async fn renew_mapping() -> Result<String> {
+async fn renew_mapping(https_port: u16) -> Result<String> {
     let gateway = discover_gateway().await?;
 
     let external_ip = gateway
@@ -270,13 +277,13 @@ async fn renew_mapping() -> Result<String> {
         .context("getting external IP")?;
 
     let local_ip = local_ip_address::local_ip().context("getting local IP")?;
-    let local_addr: SocketAddr = SocketAddr::new(local_ip, HTTPS_PORT);
+    let local_addr: SocketAddr = SocketAddr::new(local_ip, https_port);
 
     // Try add_port first (works on most routers for renewal)
     if gateway
         .add_port(
             PortMappingProtocol::TCP,
-            HTTPS_PORT,
+            https_port,
             local_addr,
             LEASE_DURATION,
             "Riff Music Server",
@@ -286,12 +293,12 @@ async fn renew_mapping() -> Result<String> {
     {
         // Some routers reject duplicate mappings — remove first, then re-add
         let _ = gateway
-            .remove_port(PortMappingProtocol::TCP, HTTPS_PORT)
+            .remove_port(PortMappingProtocol::TCP, https_port)
             .await;
         gateway
             .add_port(
                 PortMappingProtocol::TCP,
-                HTTPS_PORT,
+                https_port,
                 local_addr,
                 LEASE_DURATION,
                 "Riff Music Server",
@@ -300,5 +307,5 @@ async fn renew_mapping() -> Result<String> {
             .context("re-adding UPnP port mapping after remove")?;
     }
 
-    Ok(format!("https://{}:{}", external_ip, HTTPS_PORT))
+    Ok(format!("https://{}:{}", external_ip, https_port))
 }
