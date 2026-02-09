@@ -424,12 +424,13 @@ async fn main() -> Result<()> {
     });
 
     let https_task = tokio::spawn(async move {
-        let mut server = axum_server::from_tcp_rustls(https_listener, tls_config);
-        server
-            .http_builder()
-            .http1()
-            .keep_alive(true)
-            .header_read_timeout(Duration::from_secs(30));
+        // Build acceptor with handshake timeout — bots that connect but never
+        // send a TLS ClientHello will be dropped after 10s instead of blocking
+        // the acceptor indefinitely.
+        let acceptor = axum_server::tls_rustls::RustlsAcceptor::new(tls_config)
+            .handshake_timeout(Duration::from_secs(10));
+        let mut server = axum_server::Server::from_tcp(https_listener).acceptor(acceptor);
+        server.http_builder().http1().keep_alive(true);
         if let Err(e) = server.serve(app.into_make_service()).await {
             tracing::error!("HTTPS server error: {e}");
         }
