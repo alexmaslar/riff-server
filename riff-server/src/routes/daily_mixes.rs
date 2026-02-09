@@ -21,7 +21,7 @@ use crate::AppState;
 pub async fn list_daily_mixes(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<Claims>,
-) -> Result<Json<Value>, AppError> {
+) -> Result<([(header::HeaderName, String); 1], Json<Value>), AppError> {
     let today = chrono::Utc::now().date_naive();
     let today_str = today.format("%Y-%m-%d").to_string();
 
@@ -118,10 +118,15 @@ pub async fn list_daily_mixes(
         }));
     }
 
-    Ok(Json(json!({
-        "date": today_str,
-        "mixes": mixes,
-    })))
+    let end_of_day = today.and_hms_opt(23, 59, 59).unwrap();
+    let remaining = (end_of_day - chrono::Utc::now().naive_utc()).num_seconds().max(60);
+    Ok((
+        [(header::CACHE_CONTROL, format!("private, max-age={remaining}"))],
+        Json(json!({
+            "date": today_str,
+            "mixes": mixes,
+        })),
+    ))
 }
 
 /// GET /mixes/daily/:id — Get a specific mix with full track list

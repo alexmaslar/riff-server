@@ -1,4 +1,4 @@
-use axum::{extract::State, Json};
+use axum::{extract::State, http::header, Json};
 use riff_core::config::AiProvider;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -25,39 +25,42 @@ fn provider_to_str(p: &AiProvider) -> &'static str {
 
 pub async fn get_config(
     State(state): State<Arc<AppState>>,
-) -> Result<Json<Value>, AppError> {
+) -> Result<([(header::HeaderName, &'static str); 1], Json<Value>), AppError> {
     let config = state.config.read().await;
 
-    Ok(Json(json!({
-        "server": {
-            "https_port": config.server.https_port,
-        },
-        "library": {
-            "path": config.library.path,
-            "scan_interval": config.library.scan_interval,
-        },
-        "metadata": {
-            "discogs": {
-                "api_token": config.metadata.discogs.api_token.as_deref().map(mask_secret),
-                "auto_enrich": config.metadata.discogs.auto_enrich,
-                "download_covers": config.metadata.discogs.download_covers,
+    Ok((
+        [(header::CACHE_CONTROL, "private, max-age=3600")],
+        Json(json!({
+            "server": {
+                "https_port": config.server.https_port,
             },
-            "ai": {
-                "enabled": config.metadata.ai.enabled,
-                "provider": provider_to_str(&config.metadata.ai.provider),
-                "api_key": config.metadata.ai.api_key.as_deref().map(mask_secret),
-                "model": config.metadata.ai.model,
-                "fast_model": config.metadata.ai.fast_model,
-                "base_url": config.metadata.ai.base_url,
-                "album_summaries": config.metadata.ai.album_summaries,
-                "album_ratings": config.metadata.ai.album_ratings,
-                "album_recommendations": config.metadata.ai.album_recommendations,
-                "artist_bios": config.metadata.ai.artist_bios,
-                "artist_recommendations": config.metadata.ai.artist_recommendations,
-                "playlist_generation": config.metadata.ai.playlist_generation,
+            "library": {
+                "path": config.library.path,
+                "scan_interval": config.library.scan_interval,
+            },
+            "metadata": {
+                "discogs": {
+                    "api_token": config.metadata.discogs.api_token.as_deref().map(mask_secret),
+                    "auto_enrich": config.metadata.discogs.auto_enrich,
+                    "download_covers": config.metadata.discogs.download_covers,
+                },
+                "ai": {
+                    "enabled": config.metadata.ai.enabled,
+                    "provider": provider_to_str(&config.metadata.ai.provider),
+                    "api_key": config.metadata.ai.api_key.as_deref().map(mask_secret),
+                    "model": config.metadata.ai.model,
+                    "fast_model": config.metadata.ai.fast_model,
+                    "base_url": config.metadata.ai.base_url,
+                    "album_summaries": config.metadata.ai.album_summaries,
+                    "album_ratings": config.metadata.ai.album_ratings,
+                    "album_recommendations": config.metadata.ai.album_recommendations,
+                    "artist_bios": config.metadata.ai.artist_bios,
+                    "artist_recommendations": config.metadata.ai.artist_recommendations,
+                    "playlist_generation": config.metadata.ai.playlist_generation,
+                }
             }
-        }
-    })))
+        })),
+    ))
 }
 
 #[derive(Debug, Deserialize)]

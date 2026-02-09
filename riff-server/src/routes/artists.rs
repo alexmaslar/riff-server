@@ -1,5 +1,6 @@
 use axum::{
     extract::{Path, Query, State},
+    http::header,
     Extension, Json,
 };
 use riff_core::auth::Claims;
@@ -100,9 +101,12 @@ pub async fn get_artist(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<Claims>,
     Path(id): Path<String>,
-) -> Result<Json<Value>, AppError> {
+) -> Result<([(header::HeaderName, &'static str); 1], Json<Value>), AppError> {
     let detail = build_artist_detail(&state.db, &id, &claims.sub).await?;
-    Ok(Json(json!(detail)))
+    Ok((
+        [(header::CACHE_CONTROL, "private, max-age=3600")],
+        Json(json!(detail)),
+    ))
 }
 
 pub async fn build_artist_detail(

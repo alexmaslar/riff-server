@@ -430,9 +430,12 @@ pub async fn get_album(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<Claims>,
     Path(id): Path<String>,
-) -> Result<Json<Value>, AppError> {
+) -> Result<([(header::HeaderName, &'static str); 1], Json<Value>), AppError> {
     let detail = build_album_detail(&state.db, &id, &claims.sub).await?;
-    Ok(Json(json!(detail)))
+    Ok((
+        [(header::CACHE_CONTROL, "private, max-age=3600")],
+        Json(json!(detail)),
+    ))
 }
 
 pub async fn get_cover(
