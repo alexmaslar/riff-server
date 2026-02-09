@@ -6,7 +6,7 @@ use std::sync::Arc;
 use crate::error::AppError;
 use crate::AppState;
 
-fn status_json(status: &crate::upnp::RemoteAccessStatus) -> Value {
+fn status_json(status: &crate::upnp::RemoteAccessStatus, https_port: u16) -> Value {
     let local_ip = local_ip_address::local_ip()
         .ok()
         .map(|ip| ip.to_string());
@@ -18,7 +18,7 @@ fn status_json(status: &crate::upnp::RemoteAccessStatus) -> Value {
         "external_url": status.external_url,
         "cert_fingerprint": status.cert_fingerprint,
         "error_message": status.error_message,
-        "https_port": status.https_port,
+        "https_port": https_port,
         "local_ip": local_ip,
     })
 }
@@ -27,7 +27,8 @@ pub async fn get_status(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Value>, AppError> {
     let status = state.remote_access.status.read().await;
-    Ok(Json(status_json(&status)))
+    let https_port = state.config.read().await.server.https_port;
+    Ok(Json(status_json(&status, https_port)))
 }
 
 pub async fn enable(
@@ -53,7 +54,8 @@ pub async fn enable(
     }
 
     let status = state.remote_access.status.read().await;
-    Ok(Json(status_json(&status)))
+    let https_port = state.config.read().await.server.https_port;
+    Ok(Json(status_json(&status, https_port)))
 }
 
 pub async fn disable(
@@ -70,7 +72,8 @@ pub async fn disable(
     }
 
     let status = state.remote_access.status.read().await;
-    Ok(Json(status_json(&status)))
+    let https_port = state.config.read().await.server.https_port;
+    Ok(Json(status_json(&status, https_port)))
 }
 
 #[derive(Deserialize)]
@@ -105,5 +108,6 @@ pub async fn configure(
     }
 
     let status = state.remote_access.status.read().await;
-    Ok(Json(status_json(&status)))
+    let https_port = state.config.read().await.server.https_port;
+    Ok(Json(status_json(&status, https_port)))
 }
