@@ -20,6 +20,8 @@ fn status_json(status: &crate::upnp::RemoteAccessStatus, https_port: u16) -> Val
         "error_message": status.error_message,
         "https_port": https_port,
         "local_ip": local_ip,
+        "nat_type": status.nat_type,
+        "port_reachable": status.port_reachable,
     })
 }
 
