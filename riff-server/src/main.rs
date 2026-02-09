@@ -21,7 +21,7 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::RwLock;
+use tokio::sync::{Notify, RwLock};
 use tower::ServiceBuilder;
 use tower::timeout::TimeoutLayer;
 use tower_http::compression::CompressionLayer;
@@ -40,6 +40,7 @@ pub struct AppState {
     pub artist_bio_running: AtomicBool,
     pub artist_recommendation_running: AtomicBool,
     pub remote_access: upnp::RemoteAccessManager,
+    pub restart: Notify,
 }
 
 async fn run_background_pipeline(state: Arc<AppState>) {
@@ -229,6 +230,7 @@ async fn main() -> Result<()> {
         artist_bio_running: AtomicBool::new(false),
         artist_recommendation_running: AtomicBool::new(false),
         remote_access: upnp::RemoteAccessManager::new(config.server.https_port),
+        restart: Notify::new(),
     });
 
     // Set cert fingerprint on the remote access manager
@@ -420,9 +422,17 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Wait for shutdown signal
-    let _ = tokio::signal::ctrl_c().await;
-    tracing::info!("shutting down...");
+    // Wait for shutdown or restart signal
+    let restarting = tokio::select! {
+        _ = tokio::signal::ctrl_c() => {
+            tracing::info!("shutting down...");
+            false
+        }
+        _ = state.restart.notified() => {
+            tracing::info!("restarting server...");
+            true
+        }
+    };
 
     // Cleanup UPnP
     state.remote_access.stop().await;
@@ -430,6 +440,17 @@ async fn main() -> Result<()> {
     // Abort both listeners
     http_task.abort();
     https_task.abort();
+
+    if restarting {
+        // Re-exec the same binary so it picks up the new config
+        use std::os::unix::process::CommandExt;
+        let exe = std::env::current_exe().expect("failed to get current executable path");
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        let err = std::process::Command::new(&exe).args(&args).exec();
+        // exec() only returns on failure
+        tracing::error!("exec failed: {err}");
+        std::process::exit(1);
+    }
 
     Ok(())
 }
