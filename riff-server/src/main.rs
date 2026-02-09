@@ -423,6 +423,7 @@ async fn main() -> Result<()> {
         }
     });
 
+    let https_port = config.server.https_port;
     let https_task = tokio::spawn(async move {
         // Build acceptor with handshake timeout — bots that connect but never
         // send a TLS ClientHello will be dropped after 10s instead of blocking
@@ -431,8 +432,20 @@ async fn main() -> Result<()> {
             .handshake_timeout(Duration::from_secs(10));
         let mut server = axum_server::Server::from_tcp(https_listener).acceptor(acceptor);
         server.http_builder().http1().keep_alive(true);
-        if let Err(e) = server.serve(app.into_make_service()).await {
-            tracing::error!("HTTPS server error: {e}");
+        match server.serve(app.into_make_service()).await {
+            Ok(()) => tracing::error!("HTTPS serve loop exited without error (should not happen)"),
+            Err(e) => tracing::error!("HTTPS serve loop exited unexpectedly: {e}"),
+        }
+    });
+
+    // Periodic self-test: TCP-connect to the HTTPS port every 60s to detect silent acceptor stalls
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            match tokio::net::TcpStream::connect(("127.0.0.1", https_port)).await {
+                Ok(_) => {}
+                Err(e) => tracing::error!("HTTPS self-test FAILED on port {https_port}: {e}"),
+            }
         }
     });
 
