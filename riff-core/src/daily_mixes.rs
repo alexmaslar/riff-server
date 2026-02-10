@@ -171,7 +171,8 @@ pub async fn generate_all_daily_mixes(pool: &SqlitePool) -> Result<()> {
         .fetch_one(pool)
         .await?;
 
-        if existing.0 > 0 {
+        if existing.0 >= 4 {
+            debug!("daily mixes: all 4 mixes exist for {user_id}, skipping generation");
             // Backfill covers for mixes missing artwork
             let uncovered = sqlx::query_as::<_, (String,)>(
                 "SELECT id FROM daily_mixes WHERE user_id = ? AND mix_date = ? AND cover_path IS NULL",
@@ -189,6 +190,7 @@ pub async fn generate_all_daily_mixes(pool: &SqlitePool) -> Result<()> {
             continue;
         }
 
+        info!("daily mixes: {user_id} has {}/4 mixes, regenerating", existing.0);
         if let Err(e) = generate_daily_mixes(pool, user_id, date).await {
             warn!("daily mix generation failed for user {user_id}: {e}");
         }
@@ -236,6 +238,7 @@ async fn generate_artist_mix(
         .await?;
 
         if fallback_artists.is_empty() {
+            info!("artist mix: no top-played or rated artists found for {user_id}, skipping");
             return Ok(());
         }
 
@@ -350,6 +353,7 @@ async fn build_artist_mix(
     let selected = score_and_select(&candidate_tracks, &ctx).await?;
 
     if selected.is_empty() {
+        info!("artist mix: scoring produced no tracks for {user_id} (seed artist {seed_artist_id}), skipping");
         return Ok(());
     }
 
@@ -410,6 +414,7 @@ async fn generate_genre_mix(
     };
 
     if genres.is_empty() {
+        info!("genre mix: no genres found in play history or library for {user_id}, skipping");
         return Ok(());
     }
 
@@ -453,6 +458,7 @@ async fn generate_genre_mix(
     let selected = score_and_select(&candidate_tracks, &ctx).await?;
 
     if selected.is_empty() {
+        info!("genre mix: scoring produced no tracks for {user_id} (seed genre '{seed_genre}'), skipping");
         return Ok(());
     }
 
@@ -531,6 +537,7 @@ async fn generate_deep_cuts_mix(
         };
         let selected = score_and_select(&fallback, &ctx).await?;
         if selected.is_empty() {
+            info!("deep cuts: no candidates even from rarely-played fallback for {user_id}, skipping");
             return Ok(());
         }
 
@@ -554,6 +561,7 @@ async fn generate_deep_cuts_mix(
     };
     let selected = score_and_select(&candidate_tracks, &ctx).await?;
     if selected.is_empty() {
+        info!("deep cuts: scoring produced no tracks for {user_id}, skipping");
         return Ok(());
     }
 
@@ -608,6 +616,7 @@ async fn generate_decade_mix(
     };
 
     if decades.is_empty() {
+        info!("decade mix: no decades found in play history or library for {user_id}, skipping");
         return Ok(());
     }
 
@@ -644,6 +653,7 @@ async fn generate_decade_mix(
     };
     let selected = score_and_select(&candidate_tracks, &ctx).await?;
     if selected.is_empty() {
+        info!("decade mix: scoring produced no tracks for {user_id} (seed decade {seed_decade}s), skipping");
         return Ok(());
     }
 
