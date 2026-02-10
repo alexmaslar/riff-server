@@ -2,14 +2,13 @@ use axum::{
     body::Body,
     extract::{Path, State},
     http::{header, StatusCode},
-    response::{IntoResponse, Response},
-    Json,
+    response::Response,
 };
-use serde_json::json;
 use std::sync::Arc;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
+use crate::error::AppError;
 use crate::middleware::IsRemote;
 use crate::transcode;
 use crate::AppState;
@@ -24,11 +23,21 @@ fn mime_for_format(format: &str) -> &'static str {
     }
 }
 
+fn ext_for_format(format: &str) -> &'static str {
+    match format {
+        "FLAC" => "flac",
+        "ALAC" => "m4a",
+        "WAV" => "wav",
+        "AIFF" => "aiff",
+        _ => "bin",
+    }
+}
+
 pub async fn stream_track(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     request: axum::extract::Request,
-) -> Response {
+) -> Result<Response, AppError> {
     let is_remote = request
         .extensions()
         .get::<IsRemote>()
@@ -36,50 +45,32 @@ pub async fn stream_track(
         .unwrap_or(false);
     let headers = request.headers().clone();
 
-    let track = sqlx::query_as::<_, (String, String, i64)>(
+    let (file_path, format, file_size) = sqlx::query_as::<_, (String, String, i64)>(
         "SELECT file_path, format, file_size_bytes FROM tracks WHERE id = ?",
     )
     .bind(&id)
     .fetch_optional(&state.db)
-    .await;
-
-    let (file_path, format, file_size) = match track {
-        Ok(Some(row)) => row,
-        Ok(None) => {
-            return (StatusCode::NOT_FOUND, Json(json!({ "error": "track not found" })))
-                .into_response()
-        }
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": e.to_string() })),
-            )
-                .into_response()
-        }
-    };
+    .await?
+    .ok_or_else(|| AppError::NotFound("track not found".into()))?;
 
     // Remote + FFmpeg + lossless → transcode to AAC
-    let should_transcode = is_remote
-        && state.ffmpeg_available
-        && transcode::is_lossless(&format);
-
-    if should_transcode {
+    if is_remote && state.ffmpeg_available && transcode::is_lossless(&format) {
         let config = state.config.read().await;
         let bitrate = config.streaming.remote_bitrate;
         drop(config);
 
         match transcode::transcode_to_aac(&file_path, bitrate).await {
             Ok(body) => {
-                return Response::builder()
+                return Ok(Response::builder()
                     .status(StatusCode::OK)
                     .header(header::CONTENT_TYPE, "audio/aac")
                     .header("X-Riff-Transcoded", "true")
                     // No Accept-Ranges, Content-Length, or ETag — stream is not seekable
                     .body(body)
-                    .unwrap();
+                    .unwrap());
             }
             Err(e) => {
-                tracing::warn!("transcode failed, falling back to raw: {e:?}");
+                tracing::warn!("transcode failed, falling back to raw: {e}");
                 // fall through to serve raw file
             }
         }
@@ -88,16 +79,9 @@ pub async fn stream_track(
     let mime = mime_for_format(&format);
 
     // Generate ETag from file size + mtime for resume validation
-    let metadata = match tokio::fs::metadata(&file_path).await {
-        Ok(m) => m,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": format!("metadata failed: {}", e) })),
-            )
-                .into_response()
-        }
-    };
+    let metadata = tokio::fs::metadata(&file_path)
+        .await
+        .map_err(|e| AppError::Internal(format!("metadata failed: {e}")))?;
     let mtime = metadata
         .modified()
         .ok()
@@ -131,28 +115,17 @@ pub async fn stream_track(
         Some((start, end)) => {
             // Partial content (206)
             let length = end - start + 1;
-            let mut file = match File::open(&file_path).await {
-                Ok(f) => f,
-                Err(e) => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({ "error": format!("file open failed: {}", e) })),
-                    )
-                        .into_response()
-                }
-            };
+            let mut file = File::open(&file_path)
+                .await
+                .map_err(|e| AppError::Internal(format!("file open failed: {e}")))?;
 
-            if let Err(e) = file.seek(std::io::SeekFrom::Start(start)).await {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({ "error": format!("seek failed: {}", e) })),
-                )
-                    .into_response();
-            }
+            file.seek(std::io::SeekFrom::Start(start))
+                .await
+                .map_err(|e| AppError::Internal(format!("seek failed: {e}")))?;
 
             let stream = tokio_util::io::ReaderStream::with_capacity(file.take(length), buf_size);
 
-            Response::builder()
+            Ok(Response::builder()
                 .status(StatusCode::PARTIAL_CONTENT)
                 .header(header::CONTENT_TYPE, mime)
                 .header(header::CONTENT_LENGTH, length.to_string())
@@ -163,31 +136,24 @@ pub async fn stream_track(
                 .header(header::ACCEPT_RANGES, "bytes")
                 .header(header::ETAG, &etag)
                 .body(Body::from_stream(stream))
-                .unwrap()
+                .unwrap())
         }
         None => {
             // Full content (200)
-            let file = match File::open(&file_path).await {
-                Ok(f) => f,
-                Err(e) => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({ "error": format!("file open failed: {}", e) })),
-                    )
-                        .into_response()
-                }
-            };
+            let file = File::open(&file_path)
+                .await
+                .map_err(|e| AppError::Internal(format!("file open failed: {e}")))?;
 
             let stream = tokio_util::io::ReaderStream::with_capacity(file, buf_size);
 
-            Response::builder()
+            Ok(Response::builder()
                 .status(StatusCode::OK)
                 .header(header::CONTENT_TYPE, mime)
                 .header(header::CONTENT_LENGTH, file_size.to_string())
                 .header(header::ACCEPT_RANGES, "bytes")
                 .header(header::ETAG, &etag)
                 .body(Body::from_stream(stream))
-                .unwrap()
+                .unwrap())
         }
     }
 }
@@ -195,53 +161,26 @@ pub async fn stream_track(
 pub async fn download_track(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> Response {
-    let track = sqlx::query_as::<_, (String, String, String, i64)>(
+) -> Result<Response, AppError> {
+    let (file_path, format, title, file_size) = sqlx::query_as::<_, (String, String, String, i64)>(
         "SELECT file_path, format, title, file_size_bytes FROM tracks WHERE id = ?",
     )
     .bind(&id)
     .fetch_optional(&state.db)
-    .await;
-
-    let (file_path, format, title, file_size) = match track {
-        Ok(Some(row)) => row,
-        Ok(None) => {
-            return (StatusCode::NOT_FOUND, Json(json!({ "error": "track not found" })))
-                .into_response()
-        }
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": e.to_string() })),
-            )
-                .into_response()
-        }
-    };
+    .await?
+    .ok_or_else(|| AppError::NotFound("track not found".into()))?;
 
     let mime = mime_for_format(&format);
-    let ext = match format.as_str() {
-        "FLAC" => "flac",
-        "ALAC" => "m4a",
-        "WAV" => "wav",
-        "AIFF" => "aiff",
-        _ => "bin",
-    };
+    let ext = ext_for_format(&format);
     let filename = format!("{}.{}", title, ext);
 
-    let file = match File::open(&file_path).await {
-        Ok(f) => f,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": format!("file open failed: {}", e) })),
-            )
-                .into_response()
-        }
-    };
+    let file = File::open(&file_path)
+        .await
+        .map_err(|e| AppError::Internal(format!("file open failed: {e}")))?;
 
     let stream = tokio_util::io::ReaderStream::with_capacity(file, 64 * 1024);
 
-    Response::builder()
+    Ok(Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, mime)
         .header(header::CONTENT_LENGTH, file_size.to_string())
@@ -250,7 +189,7 @@ pub async fn download_track(
             format!("attachment; filename=\"{}\"", filename),
         )
         .body(Body::from_stream(stream))
-        .unwrap()
+        .unwrap())
 }
 
 /// Parse a Range header value like "bytes=0-1023" or "bytes=1024-"
