@@ -393,8 +393,6 @@ async fn main() -> Result<()> {
         .route("/mixes/daily", get(routes::daily_mixes::list_daily_mixes))
         .route("/mixes/daily/{id}", get(routes::daily_mixes::get_daily_mix))
         .route("/mixes/daily/{id}/save", post(routes::daily_mixes::save_mix_as_playlist))
-        // Diagnostics (streaming timing from iOS clients)
-        .route("/diagnostics/streaming", post(routes::diagnostics::record))
         .route_layer(axum_mw::from_fn_with_state(
             state.clone(),
             middleware::require_auth,
