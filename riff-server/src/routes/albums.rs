@@ -105,6 +105,7 @@ pub struct TrackSummary {
     pub musical_key: Option<String>,
     pub loudness_lufs: Option<f64>,
     pub mood: Option<String>,
+    pub file_size_bytes: Option<i64>,
 }
 
 pub async fn list_albums(
@@ -314,7 +315,8 @@ pub async fn build_album_detail(
             "SELECT t.id, t.title, t.track_number, t.disc_number, t.duration_seconds, t.format,
                     t.album_id, ar.name as artist_name, t.sample_rate, t.bit_depth,
                     t.composer, COALESCE(t.bpm_tag, t.bpm_analyzed) as bpm,
-                    COALESCE(t.musical_key, t.key_analyzed) as resolved_key, t.loudness_lufs, t.mood
+                    COALESCE(t.musical_key, t.key_analyzed) as resolved_key, t.loudness_lufs, t.mood,
+                    t.file_size_bytes
              FROM tracks t
              JOIN albums a ON t.album_id = a.id
              JOIN artists ar ON a.artist_id = ar.id
@@ -369,6 +371,7 @@ pub async fn build_album_detail(
             musical_key: row.get(12),
             loudness_lufs: row.get(13),
             mood: row.get(14),
+            file_size_bytes: row.get(15),
         })
         .collect();
 

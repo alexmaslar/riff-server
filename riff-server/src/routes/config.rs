@@ -58,6 +58,11 @@ pub async fn get_config(
                     "artist_recommendations": config.metadata.ai.artist_recommendations,
                     "playlist_generation": config.metadata.ai.playlist_generation,
                 }
+            },
+            "streaming": {
+                "remote_bitrate": config.streaming.remote_bitrate,
+                "remote_format": config.streaming.remote_format,
+                "ffmpeg_available": state.ffmpeg_available,
             }
         })),
     ))
@@ -68,6 +73,13 @@ pub struct ConfigUpdate {
     pub server: Option<ServerUpdate>,
     pub library: Option<LibraryUpdate>,
     pub metadata: Option<MetadataUpdate>,
+    pub streaming: Option<StreamingUpdate>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct StreamingUpdate {
+    pub remote_bitrate: Option<u32>,
+    pub remote_format: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -206,6 +218,17 @@ pub async fn update_config(
             }
         }
 
+        if let Some(streaming) = update.streaming {
+            if let Some(bitrate) = streaming.remote_bitrate {
+                config.streaming.remote_bitrate = bitrate.clamp(64, 320);
+            }
+            if let Some(format) = streaming.remote_format {
+                if format == "aac" || format == "opus" {
+                    config.streaming.remote_format = format;
+                }
+            }
+        }
+
         let any_newly_enabled =
             (!old_ai_enabled && config.metadata.ai.enabled) ||
             (!old_album_summaries && config.metadata.ai.album_summaries) ||
@@ -274,6 +297,11 @@ pub async fn update_config(
                 "artist_recommendations": config_snapshot.metadata.ai.artist_recommendations,
                 "playlist_generation": config_snapshot.metadata.ai.playlist_generation,
             }
+        },
+        "streaming": {
+            "remote_bitrate": config_snapshot.streaming.remote_bitrate,
+            "remote_format": config_snapshot.streaming.remote_format,
+            "ffmpeg_available": state.ffmpeg_available,
         }
     });
 

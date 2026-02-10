@@ -3,6 +3,7 @@ mod discovery;
 mod middleware;
 mod routes;
 mod tls;
+mod transcode;
 mod upnp;
 
 use anyhow::Result;
@@ -42,6 +43,8 @@ pub struct AppState {
     pub artist_recommendation_running: AtomicBool,
     pub remote_access: upnp::RemoteAccessManager,
     pub restart: Notify,
+    pub ffmpeg_available: bool,
+    pub hls_generating: tokio::sync::Mutex<std::collections::HashSet<String>>,
 }
 
 async fn run_background_pipeline(state: Arc<AppState>) {
@@ -127,6 +130,9 @@ async fn run_background_pipeline(state: Arc<AppState>) {
         Ok(_) => tracing::info!("daily mixes complete"),
         Err(e) => tracing::warn!("daily mixes failed: {e}"),
     }
+
+    // Step 5: Clean up stale HLS cache (segments not accessed in 24h)
+    routes::hls::cleanup_hls_cache().await;
 }
 
 async fn run_stage<F, R>(flag: &AtomicBool, name: &str, f: F)
@@ -215,6 +221,21 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Check for FFmpeg availability
+    let ffmpeg_available = tokio::process::Command::new("ffmpeg")
+        .arg("-version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if ffmpeg_available {
+        tracing::info!("ffmpeg found — remote transcoding enabled");
+    } else {
+        tracing::warn!("ffmpeg not found — remote clients will receive lossless files");
+    }
+
     // Generate TLS certificate for HTTPS
     let (cert_path, key_path) = tls::ensure_certificate()?;
     let cert_fingerprint = tls::cert_fingerprint(&cert_path)?;
@@ -233,6 +254,8 @@ async fn main() -> Result<()> {
         artist_recommendation_running: AtomicBool::new(false),
         remote_access: upnp::RemoteAccessManager::new(config.server.https_port),
         restart: Notify::new(),
+        ffmpeg_available,
+        hls_generating: tokio::sync::Mutex::new(std::collections::HashSet::new()),
     });
 
     // Set cert fingerprint on the remote access manager
@@ -296,6 +319,8 @@ async fn main() -> Result<()> {
     let streaming = Router::new()
         .route("/tracks/{id}/stream", get(routes::tracks::stream_track))
         .route("/tracks/{id}/download", get(routes::tracks::download_track))
+        .route("/tracks/{id}/hls/playlist.m3u8", get(routes::hls::master_playlist))
+        .route("/tracks/{id}/hls/{segment}", get(routes::hls::serve_segment))
         .route_layer(axum_mw::from_fn_with_state(
             state.clone(),
             middleware::require_auth,
@@ -413,7 +438,8 @@ async fn main() -> Result<()> {
     let tls_config = tls::build_rustls_config(&cert_path, &key_path)?;
     tracing::info!("HTTPS listening on {}", https_addr);
 
-    let http_app = app.clone();
+    let http_app = app.clone().layer(axum_mw::from_fn(middleware::mark_local));
+    let https_app = app.layer(axum_mw::from_fn(middleware::mark_remote));
 
     // Run HTTP and HTTPS listeners as independent tasks so one failing
     // doesn't take down the other.
@@ -432,7 +458,7 @@ async fn main() -> Result<()> {
             .handshake_timeout(Duration::from_secs(10));
         let mut server = axum_server::Server::from_tcp(https_listener).acceptor(acceptor);
         server.http_builder().http1().keep_alive(true);
-        match server.serve(app.into_make_service()).await {
+        match server.serve(https_app.into_make_service()).await {
             Ok(()) => tracing::error!("HTTPS serve loop exited without error (should not happen)"),
             Err(e) => tracing::error!("HTTPS serve loop exited unexpectedly: {e}"),
         }

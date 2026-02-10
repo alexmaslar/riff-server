@@ -12,6 +12,21 @@ use std::sync::Arc;
 
 use crate::AppState;
 
+/// Marker inserted into request extensions to indicate whether the client
+/// connected via HTTPS (remote) or HTTP (local LAN).
+#[derive(Debug, Clone, Copy)]
+pub struct IsRemote(pub bool);
+
+pub async fn mark_remote(mut req: Request<Body>, next: Next) -> Response {
+    req.extensions_mut().insert(IsRemote(true));
+    next.run(req).await
+}
+
+pub async fn mark_local(mut req: Request<Body>, next: Next) -> Response {
+    req.extensions_mut().insert(IsRemote(false));
+    next.run(req).await
+}
+
 /// Middleware that requires a valid JWT token.
 /// Injects the Claims into request extensions.
 pub async fn require_auth(

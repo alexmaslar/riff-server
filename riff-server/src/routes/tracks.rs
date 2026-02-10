@@ -1,7 +1,7 @@
 use axum::{
     body::Body,
     extract::{Path, State},
-    http::{header, HeaderMap, StatusCode},
+    http::{header, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
@@ -10,6 +10,8 @@ use std::sync::Arc;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
+use crate::middleware::IsRemote;
+use crate::transcode;
 use crate::AppState;
 
 fn mime_for_format(format: &str) -> &'static str {
@@ -25,8 +27,15 @@ fn mime_for_format(format: &str) -> &'static str {
 pub async fn stream_track(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-    headers: HeaderMap,
+    request: axum::extract::Request,
 ) -> Response {
+    let is_remote = request
+        .extensions()
+        .get::<IsRemote>()
+        .map(|r| r.0)
+        .unwrap_or(false);
+    let headers = request.headers().clone();
+
     let track = sqlx::query_as::<_, (String, String, i64)>(
         "SELECT file_path, format, file_size_bytes FROM tracks WHERE id = ?",
     )
@@ -48,6 +57,33 @@ pub async fn stream_track(
                 .into_response()
         }
     };
+
+    // Remote + FFmpeg + lossless → transcode to AAC
+    let should_transcode = is_remote
+        && state.ffmpeg_available
+        && transcode::is_lossless(&format);
+
+    if should_transcode {
+        let config = state.config.read().await;
+        let bitrate = config.streaming.remote_bitrate;
+        drop(config);
+
+        match transcode::transcode_to_aac(&file_path, bitrate).await {
+            Ok(body) => {
+                return Response::builder()
+                    .status(StatusCode::OK)
+                    .header(header::CONTENT_TYPE, "audio/aac")
+                    .header("X-Riff-Transcoded", "true")
+                    // No Accept-Ranges, Content-Length, or ETag — stream is not seekable
+                    .body(body)
+                    .unwrap();
+            }
+            Err(e) => {
+                tracing::warn!("transcode failed, falling back to raw: {e:?}");
+                // fall through to serve raw file
+            }
+        }
+    }
 
     let mime = mime_for_format(&format);
 
@@ -88,6 +124,9 @@ pub async fn stream_track(
         None
     };
 
+    // Use larger buffer for remote connections
+    let buf_size = if is_remote { 256 * 1024 } else { 64 * 1024 };
+
     match range {
         Some((start, end)) => {
             // Partial content (206)
@@ -111,7 +150,7 @@ pub async fn stream_track(
                     .into_response();
             }
 
-            let stream = tokio_util::io::ReaderStream::with_capacity(file.take(length), 64 * 1024);
+            let stream = tokio_util::io::ReaderStream::with_capacity(file.take(length), buf_size);
 
             Response::builder()
                 .status(StatusCode::PARTIAL_CONTENT)
@@ -139,7 +178,7 @@ pub async fn stream_track(
                 }
             };
 
-            let stream = tokio_util::io::ReaderStream::with_capacity(file, 64 * 1024);
+            let stream = tokio_util::io::ReaderStream::with_capacity(file, buf_size);
 
             Response::builder()
                 .status(StatusCode::OK)

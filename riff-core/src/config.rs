@@ -12,6 +12,8 @@ pub struct Config {
     pub metadata: MetadataConfig,
     #[serde(default)]
     pub remote_access: RemoteAccessConfig,
+    #[serde(default)]
+    pub streaming: StreamingConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -111,6 +113,31 @@ pub struct RemoteAccessConfig {
     pub cert_fingerprint: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StreamingConfig {
+    #[serde(default = "default_remote_bitrate")]
+    pub remote_bitrate: u32,
+    #[serde(default = "default_remote_format")]
+    pub remote_format: String,
+}
+
+impl Default for StreamingConfig {
+    fn default() -> Self {
+        Self {
+            remote_bitrate: default_remote_bitrate(),
+            remote_format: default_remote_format(),
+        }
+    }
+}
+
+fn default_remote_bitrate() -> u32 {
+    256
+}
+
+fn default_remote_format() -> String {
+    "aac".to_string()
+}
+
 fn default_remote_method() -> String {
     "upnp".to_string()
 }
@@ -203,6 +230,7 @@ impl Default for Config {
             auth: AuthConfig::default(),
             metadata: MetadataConfig::default(),
             remote_access: RemoteAccessConfig::default(),
+            streaming: StreamingConfig::default(),
         }
     }
 }

@@ -155,7 +155,7 @@ pub async fn get_daily_mix(
                 t.sample_rate, t.bit_depth, t.composer,
                 COALESCE(t.bpm_analyzed, t.bpm_tag) as bpm,
                 COALESCE(t.key_analyzed, t.musical_key) as musical_key,
-                t.loudness_lufs, t.mood
+                t.loudness_lufs, t.mood, t.file_size_bytes
          FROM daily_mix_tracks dmt
          JOIN tracks t ON dmt.track_id = t.id
          JOIN albums a ON t.album_id = a.id
@@ -186,6 +186,7 @@ pub async fn get_daily_mix(
                 "musicalKey": row.get::<Option<String>, _>("musical_key"),
                 "loudnessLufs": row.get::<Option<f64>, _>("loudness_lufs"),
                 "mood": row.get::<Option<String>, _>("mood"),
+                "fileSizeBytes": row.get::<Option<i64>, _>("file_size_bytes"),
             })
         })
         .collect();

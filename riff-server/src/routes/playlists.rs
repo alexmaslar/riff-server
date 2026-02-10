@@ -88,9 +88,9 @@ pub async fn get_playlist(
         None => return Err(AppError::NotFound("playlist not found".into())),
     };
 
-    let tracks = sqlx::query_as::<_, (String, String, i32, i32, i32, String, String, String)>(
+    let tracks = sqlx::query_as::<_, (String, String, i32, i32, i32, String, String, String, Option<i64>)>(
         "SELECT t.id, t.title, t.track_number, t.disc_number, t.duration_seconds, t.format,
-                t.album_id, ar.name
+                t.album_id, ar.name, t.file_size_bytes
          FROM playlist_tracks pt
          JOIN tracks t ON pt.track_id = t.id
          JOIN albums a ON t.album_id = a.id
@@ -106,7 +106,7 @@ pub async fn get_playlist(
     let track_list: Vec<Value> = tracks
         .into_iter()
         .map(
-            |(id, title, track_number, disc_number, duration_seconds, format, album_id, artist_name)| {
+            |(id, title, track_number, disc_number, duration_seconds, format, album_id, artist_name, file_size_bytes)| {
                 json!({
                     "id": id,
                     "title": title,
@@ -116,6 +116,7 @@ pub async fn get_playlist(
                     "format": format,
                     "album_id": album_id,
                     "artist_name": artist_name,
+                    "file_size_bytes": file_size_bytes,
                 })
             },
         )
