@@ -9,6 +9,7 @@ pub mod history;
 pub mod hls;
 pub mod library;
 pub mod playlists;
+pub mod podcasts;
 pub mod remote_access;
 pub mod smart_playlist;
 pub mod tracks;

@@ -14,7 +14,7 @@ use axum::{
     routing::{delete, get, post, put},
     BoxError, Json, Router,
 };
-use riff_core::{ai, analysis, auth, config::Config, daily_mixes, db, discogs, scanner};
+use riff_core::{ai, analysis, auth, config::Config, daily_mixes, db, musicbrainz, scanner};
 use serde_json::{json, Value};
 use socket2::{Domain, Protocol, Socket, TcpKeepalive, Type};
 use sqlx::SqlitePool;
@@ -51,15 +51,14 @@ pub struct AppState {
 }
 
 async fn run_background_pipeline(state: Arc<AppState>) {
-    // Step 1: Enrichment (if Discogs configured)
+    // Step 1: Enrichment (MusicBrainz — no API key needed)
     {
         let config = state.config.read().await;
-        if config.metadata.discogs.api_token.is_some() && config.metadata.discogs.auto_enrich {
-            let discogs_config = config.metadata.discogs.clone();
+        if config.metadata.enrichment.auto_enrich {
             let db = state.db.clone();
             drop(config);
             run_stage(&state.enrichment_running, "enrichment", async move {
-                discogs::enrich_library(&db, &discogs_config).await
+                musicbrainz::enrich_library(&db).await
             })
             .await;
         }
@@ -121,10 +120,10 @@ async fn run_background_pipeline(state: Arc<AppState>) {
         }
     }
 
-    // Step 3: Deezer top tracks (always — no API key needed)
+    // Step 3: Deezer top tracks + artist images (no API key needed)
     run_stage(&state.top_tracks_running, "top tracks", {
         let db = state.db.clone();
-        async move { discogs::enrich_artist_top_tracks(&db).await }
+        async move { musicbrainz::enrich_artist_top_tracks(&db).await }
     })
     .await;
 
@@ -193,10 +192,8 @@ async fn main() -> Result<()> {
     let config = Config::load()?;
     tracing::info!("loaded config, port={}", config.server.port);
 
-    if config.metadata.discogs.api_token.is_some() {
-        tracing::info!("discogs api token loaded");
-    } else {
-        tracing::warn!("no discogs api token configured");
+    if config.metadata.enrichment.auto_enrich {
+        tracing::info!("metadata enrichment enabled (MusicBrainz)");
     }
 
     if config.metadata.ai.enabled {
@@ -398,6 +395,8 @@ async fn main() -> Result<()> {
         .route("/featured-artist", get(routes::featured::get_featured_artist))
         .route("/featured-albums", get(routes::featured::get_featured_albums))
         .route("/featured-artists", get(routes::featured::get_featured_artists))
+        // Podcast Backup
+        .route("/podcasts/backup", get(routes::podcasts::get_backup).put(routes::podcasts::save_backup))
         // Daily Mixes
         .route("/mixes/daily", get(routes::daily_mixes::list_daily_mixes))
         .route("/mixes/daily/{id}", get(routes::daily_mixes::get_daily_mix))
