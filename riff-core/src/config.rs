@@ -119,6 +119,10 @@ pub struct StreamingConfig {
     pub remote_bitrate: u32,
     #[serde(default = "default_remote_format")]
     pub remote_format: String,
+    /// Maximum concurrent FFmpeg transcode processes (default: 2).
+    /// Prevents OOM on low-power hardware (Raspberry Pi, NAS).
+    #[serde(default = "default_max_transcode_processes")]
+    pub max_transcode_processes: usize,
 }
 
 impl Default for StreamingConfig {
@@ -126,6 +130,7 @@ impl Default for StreamingConfig {
         Self {
             remote_bitrate: default_remote_bitrate(),
             remote_format: default_remote_format(),
+            max_transcode_processes: default_max_transcode_processes(),
         }
     }
 }
@@ -136,6 +141,10 @@ fn default_remote_bitrate() -> u32 {
 
 fn default_remote_format() -> String {
     "aac".to_string()
+}
+
+fn default_max_transcode_processes() -> usize {
+    2
 }
 
 fn default_remote_method() -> String {

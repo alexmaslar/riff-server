@@ -45,8 +45,8 @@ pub async fn stream_track(
         .unwrap_or(false);
     let headers = request.headers().clone();
 
-    let (file_path, format, file_size) = sqlx::query_as::<_, (String, String, i64)>(
-        "SELECT file_path, format, file_size_bytes FROM tracks WHERE id = ?",
+    let (file_path, format) = sqlx::query_as::<_, (String, String)>(
+        "SELECT file_path, format FROM tracks WHERE id = ?",
     )
     .bind(&id)
     .fetch_optional(&state.db)
@@ -59,8 +59,69 @@ pub async fn stream_track(
         let bitrate = config.streaming.remote_bitrate;
         drop(config);
 
-        match transcode::transcode_to_aac(&file_path, bitrate).await {
-            Ok(body) => {
+        let opts = transcode::TranscodeOptions {
+            file_path: file_path.clone(),
+            track_id: id.clone(),
+            bitrate_kbps: bitrate,
+            use_fdk_aac: state.ffmpeg_has_fdk_aac,
+            semaphore: state.transcode_semaphore.clone(),
+        };
+
+        match transcode::transcode_to_aac(opts).await {
+            Ok(transcode::TranscodeResult::Cached { path, size }) => {
+                // Serve cached transcode with full HTTP semantics
+                let tc_etag = format!("\"tc-{}-{}\"", id, bitrate);
+                let range = headers
+                    .get(header::RANGE)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| parse_range(s, size));
+
+                return match range {
+                    Some((start, end)) => {
+                        let length = end - start + 1;
+                        let mut f = File::open(&path)
+                            .await
+                            .map_err(|e| AppError::Internal(format!("cache open: {e}")))?;
+                        f.seek(std::io::SeekFrom::Start(start))
+                            .await
+                            .map_err(|e| AppError::Internal(format!("cache seek: {e}")))?;
+                        let stream = tokio_util::io::ReaderStream::with_capacity(
+                            f.take(length),
+                            256 * 1024,
+                        );
+                        Ok(Response::builder()
+                            .status(StatusCode::PARTIAL_CONTENT)
+                            .header(header::CONTENT_TYPE, "audio/aac")
+                            .header(header::CONTENT_LENGTH, length.to_string())
+                            .header(
+                                header::CONTENT_RANGE,
+                                format!("bytes {start}-{end}/{size}"),
+                            )
+                            .header(header::ACCEPT_RANGES, "bytes")
+                            .header(header::ETAG, &tc_etag)
+                            .header("X-Riff-Transcoded", "cached")
+                            .body(Body::from_stream(stream))
+                            .unwrap())
+                    }
+                    None => {
+                        let f = File::open(&path)
+                            .await
+                            .map_err(|e| AppError::Internal(format!("cache open: {e}")))?;
+                        let stream =
+                            tokio_util::io::ReaderStream::with_capacity(f, 256 * 1024);
+                        Ok(Response::builder()
+                            .status(StatusCode::OK)
+                            .header(header::CONTENT_TYPE, "audio/aac")
+                            .header(header::CONTENT_LENGTH, size.to_string())
+                            .header(header::ACCEPT_RANGES, "bytes")
+                            .header(header::ETAG, &tc_etag)
+                            .header("X-Riff-Transcoded", "cached")
+                            .body(Body::from_stream(stream))
+                            .unwrap())
+                    }
+                };
+            }
+            Ok(transcode::TranscodeResult::Streaming { body }) => {
                 return Ok(Response::builder()
                     .status(StatusCode::OK)
                     .header(header::CONTENT_TYPE, "audio/aac")
@@ -78,10 +139,11 @@ pub async fn stream_track(
 
     let mime = mime_for_format(&format);
 
-    // Generate ETag from file size + mtime for resume validation
+    // Use filesystem metadata for authoritative file size (prevents stale DB values)
     let metadata = tokio::fs::metadata(&file_path)
         .await
         .map_err(|e| AppError::Internal(format!("metadata failed: {e}")))?;
+    let file_size = metadata.len();
     let mtime = metadata
         .modified()
         .ok()
@@ -103,7 +165,7 @@ pub async fn stream_track(
         headers
             .get(header::RANGE)
             .and_then(|v| v.to_str().ok())
-            .and_then(|s| parse_range(s, file_size as u64))
+            .and_then(|s| parse_range(s, file_size))
     } else {
         None
     };

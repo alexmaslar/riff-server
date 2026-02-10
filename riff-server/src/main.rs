@@ -44,6 +44,8 @@ pub struct AppState {
     pub remote_access: upnp::RemoteAccessManager,
     pub restart: Notify,
     pub ffmpeg_available: bool,
+    pub ffmpeg_has_fdk_aac: bool,
+    pub transcode_semaphore: Arc<tokio::sync::Semaphore>,
     pub hls_generating: tokio::sync::Mutex<std::collections::HashSet<String>>,
 }
 
@@ -131,8 +133,9 @@ async fn run_background_pipeline(state: Arc<AppState>) {
         Err(e) => tracing::warn!("daily mixes failed: {e}"),
     }
 
-    // Step 5: Clean up stale HLS cache (segments not accessed in 24h)
+    // Step 5: Clean up stale caches (not accessed in 24h)
     routes::hls::cleanup_hls_cache().await;
+    transcode::cleanup_cache(std::time::Duration::from_secs(86400)).await;
 }
 
 async fn run_stage<F, R>(flag: &AtomicBool, name: &str, f: F)
@@ -221,7 +224,7 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Check for FFmpeg availability
+    // Check for FFmpeg availability and codec support
     let ffmpeg_available = tokio::process::Command::new("ffmpeg")
         .arg("-version")
         .stdout(std::process::Stdio::null())
@@ -230,8 +233,27 @@ async fn main() -> Result<()> {
         .await
         .map(|s| s.success())
         .unwrap_or(false);
+
+    let ffmpeg_has_fdk_aac = if ffmpeg_available {
+        // Probe for libfdk_aac — substantially better quality than native aac below 192kbps
+        let output = tokio::process::Command::new("ffmpeg")
+            .args(["-encoders"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .await
+            .ok();
+        output
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.contains("libfdk_aac"))
+            .unwrap_or(false)
+    } else {
+        false
+    };
+
     if ffmpeg_available {
-        tracing::info!("ffmpeg found — remote transcoding enabled");
+        let codec = if ffmpeg_has_fdk_aac { "libfdk_aac" } else { "native aac" };
+        tracing::info!("ffmpeg found ({codec}) — remote transcoding enabled");
     } else {
         tracing::warn!("ffmpeg not found — remote clients will receive lossless files");
     }
@@ -241,6 +263,7 @@ async fn main() -> Result<()> {
     let cert_fingerprint = tls::cert_fingerprint(&cert_path)?;
     tracing::info!("TLS cert fingerprint: {}", cert_fingerprint);
 
+    let max_transcodes = config.streaming.max_transcode_processes;
     let state = Arc::new(AppState {
         db: pool,
         config: RwLock::new(config.clone()),
@@ -255,6 +278,8 @@ async fn main() -> Result<()> {
         remote_access: upnp::RemoteAccessManager::new(config.server.https_port),
         restart: Notify::new(),
         ffmpeg_available,
+        ffmpeg_has_fdk_aac,
+        transcode_semaphore: Arc::new(tokio::sync::Semaphore::new(max_transcodes)),
         hls_generating: tokio::sync::Mutex::new(std::collections::HashSet::new()),
     });
 
@@ -320,7 +345,8 @@ async fn main() -> Result<()> {
         .route("/tracks/{id}/stream", get(routes::tracks::stream_track))
         .route("/tracks/{id}/download", get(routes::tracks::download_track))
         .route("/tracks/{id}/hls/playlist.m3u8", get(routes::hls::master_playlist))
-        .route("/tracks/{id}/hls/{segment}", get(routes::hls::serve_segment))
+        .route("/tracks/{id}/hls/{variant}/playlist.m3u8", get(routes::hls::variant_playlist))
+        .route("/tracks/{id}/hls/{variant}/{segment}", get(routes::hls::serve_segment))
         .route_layer(axum_mw::from_fn_with_state(
             state.clone(),
             middleware::require_auth,

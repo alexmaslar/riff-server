@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Returns paths to (cert.pem, key.pem), generating them on first run.
+/// Regenerates the certificate if the local IP has changed (DHCP lease change)
+/// so the SAN stays valid for cert pinning.
 pub fn ensure_certificate() -> Result<(PathBuf, PathBuf)> {
     let dir = cert_dir()?;
     let cert_path = dir.join("cert.pem");
@@ -19,7 +21,13 @@ pub fn ensure_certificate() -> Result<(PathBuf, PathBuf)> {
         let cert_pem = std::fs::read_to_string(&cert_path)?;
         let key_pem = std::fs::read_to_string(&key_path)?;
         if !cert_pem.is_empty() && !key_pem.is_empty() {
-            tracing::debug!("using existing TLS certificate");
+            // Check if local IP changed since last cert generation
+            if san_ip_changed(&dir) {
+                tracing::info!("local IP changed, regenerating TLS certificate");
+                generate_certificate(&cert_path, &key_path)?;
+            } else {
+                tracing::debug!("using existing TLS certificate");
+            }
             return Ok((cert_path, key_path));
         }
     }
@@ -38,6 +46,27 @@ pub fn cert_fingerprint(cert_path: &Path) -> Result<String> {
 
     let hash = Sha256::digest(&der);
     Ok(base64::engine::general_purpose::STANDARD.encode(hash))
+}
+
+/// Returns true if the local IP differs from the IP stored when the cert was generated.
+fn san_ip_changed(cert_dir: &Path) -> bool {
+    let ip_file = cert_dir.join("san_ip.txt");
+    let stored = std::fs::read_to_string(&ip_file).unwrap_or_default();
+    let current = local_ip_address::local_ip()
+        .ok()
+        .map(|ip| ip.to_string())
+        .unwrap_or_default();
+    if current.is_empty() {
+        return false; // Can't determine IP — don't regenerate
+    }
+    stored.trim() != current
+}
+
+/// Save the current local IP alongside the cert for future change detection.
+fn save_san_ip(cert_dir: &Path) {
+    if let Ok(ip) = local_ip_address::local_ip() {
+        let _ = std::fs::write(cert_dir.join("san_ip.txt"), ip.to_string());
+    }
 }
 
 fn cert_dir() -> Result<PathBuf> {
@@ -82,6 +111,11 @@ fn generate_certificate(cert_path: &Path, key_path: &Path) -> Result<()> {
 
     std::fs::write(cert_path, cert.pem())?;
     std::fs::write(key_path, key_pair.serialize_pem())?;
+
+    // Track the IP used in SANs for future change detection
+    if let Some(dir) = cert_path.parent() {
+        save_san_ip(dir);
+    }
 
     tracing::info!("TLS certificate saved to {}", cert_path.display());
     Ok(())

@@ -23,7 +23,13 @@ pub async fn mark_remote(mut req: Request<Body>, next: Next) -> Response {
 }
 
 pub async fn mark_local(mut req: Request<Body>, next: Next) -> Response {
-    req.extensions_mut().insert(IsRemote(false));
+    // Allow reverse proxy users to force remote mode via header
+    let is_remote = req
+        .headers()
+        .get("X-Riff-Remote")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v == "true" || v == "1");
+    req.extensions_mut().insert(IsRemote(is_remote));
     next.run(req).await
 }
 
