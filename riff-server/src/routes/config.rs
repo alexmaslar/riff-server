@@ -57,6 +57,9 @@ pub async fn get_config(
                     "artist_bios": config.metadata.ai.artist_bios,
                     "artist_recommendations": config.metadata.ai.artist_recommendations,
                     "playlist_generation": config.metadata.ai.playlist_generation,
+                },
+                "lastfm": {
+                    "api_key": config.metadata.lastfm.api_key.as_deref().map(mask_secret),
                 }
             },
             "streaming": {
@@ -97,6 +100,12 @@ pub struct LibraryUpdate {
 pub struct MetadataUpdate {
     pub discogs: Option<DiscogsUpdate>,
     pub ai: Option<AiUpdate>,
+    pub lastfm: Option<LastfmUpdate>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct LastfmUpdate {
+    pub api_key: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -216,6 +225,12 @@ pub async fn update_config(
                     config.metadata.ai.playlist_generation = v;
                 }
             }
+
+            if let Some(lastfm) = meta.lastfm {
+                if let Some(key) = lastfm.api_key {
+                    config.metadata.lastfm.api_key = if key.is_empty() { None } else { Some(key) };
+                }
+            }
         }
 
         if let Some(streaming) = update.streaming {
@@ -296,6 +311,9 @@ pub async fn update_config(
                 "artist_bios": config_snapshot.metadata.ai.artist_bios,
                 "artist_recommendations": config_snapshot.metadata.ai.artist_recommendations,
                 "playlist_generation": config_snapshot.metadata.ai.playlist_generation,
+            },
+            "lastfm": {
+                "api_key": config_snapshot.metadata.lastfm.api_key.as_deref().map(mask_secret),
             }
         },
         "streaming": {

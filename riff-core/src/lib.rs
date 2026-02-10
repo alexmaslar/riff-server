@@ -6,6 +6,7 @@ pub mod daily_mixes;
 pub mod db;
 pub mod featured;
 pub mod discogs;
+pub mod lastfm;
 pub mod mix_collage;
 pub mod models;
 pub mod scanner;

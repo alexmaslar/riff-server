@@ -36,6 +36,20 @@ pub struct SimilarArtist {
 }
 
 #[derive(Debug, Serialize)]
+pub struct PopularTrack {
+    pub rank: i32,
+    pub name: String,
+    pub playcount: i64,
+    pub track_id: Option<String>,
+    pub title: Option<String>,
+    pub duration_seconds: Option<i32>,
+    pub format: Option<String>,
+    pub album_id: Option<String>,
+    pub album_title: Option<String>,
+    pub cover_art_path: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
 pub struct ArtistDetailResponse {
     pub id: String,
     pub name: String,
@@ -44,6 +58,7 @@ pub struct ArtistDetailResponse {
     pub albums: Vec<AlbumSummary>,
     pub is_favorited: bool,
     pub similar_artists: Vec<SimilarArtist>,
+    pub popular_tracks: Vec<PopularTrack>,
 }
 
 #[derive(Debug, Serialize)]
@@ -123,7 +138,7 @@ pub async fn build_artist_detail(
     .ok_or_else(|| AppError::NotFound("artist not found".to_string()))?;
 
     // Run independent queries concurrently
-    let (albums_result, fav_result, similar_result) = tokio::join!(
+    let (albums_result, fav_result, similar_result, top_tracks_result) = tokio::join!(
         sqlx::query_as::<_, (String, String, Option<i32>, Option<String>, i64)>(
             "SELECT id, title, year, cover_art_path, play_count FROM albums WHERE artist_id = ? ORDER BY year, title",
         )
@@ -144,11 +159,26 @@ pub async fn build_artist_detail(
         )
         .bind(artist_id)
         .fetch_all(db),
+        sqlx::query_as::<_, (String, i32, i64, Option<String>, Option<String>, Option<i32>, Option<String>, Option<String>, Option<String>, Option<String>)>(
+            "SELECT att.track_name, att.rank, att.playcount, \
+                    t.id, t.title, t.duration_seconds, t.format, \
+                    al.id, al.title, al.cover_art_path \
+             FROM artist_top_tracks att \
+             LEFT JOIN albums al ON al.artist_id = att.artist_id \
+             LEFT JOIN tracks t ON t.album_id = al.id \
+                 AND LOWER(TRIM(t.title)) = LOWER(TRIM(att.track_name)) \
+             WHERE att.artist_id = ? AND att.track_name != '' \
+             ORDER BY att.rank \
+             LIMIT 10"
+        )
+        .bind(artist_id)
+        .fetch_all(db),
     );
 
     let albums = albums_result?;
     let is_favorited = fav_result.map(|(count,)| count > 0).unwrap_or(false);
     let similar_rows = similar_result?;
+    let top_tracks_rows = top_tracks_result.unwrap_or_default();
 
     let album_summaries: Vec<AlbumSummary> = albums
         .into_iter()
@@ -171,6 +201,24 @@ pub async fn build_artist_detail(
         })
         .collect();
 
+    let popular_tracks: Vec<PopularTrack> = top_tracks_rows
+        .into_iter()
+        .map(|(track_name, rank, playcount, track_id, title, duration_seconds, format, album_id, album_title, cover_art_path)| {
+            PopularTrack {
+                rank,
+                name: track_name,
+                playcount,
+                track_id,
+                title,
+                duration_seconds,
+                format,
+                album_id,
+                album_title,
+                cover_art_path,
+            }
+        })
+        .collect();
+
     Ok(ArtistDetailResponse {
         id: artist.0,
         name: artist.1,
@@ -179,5 +227,6 @@ pub async fn build_artist_detail(
         albums: album_summaries,
         is_favorited,
         similar_artists,
+        popular_tracks,
     })
 }

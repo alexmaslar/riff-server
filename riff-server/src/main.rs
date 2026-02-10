@@ -41,6 +41,7 @@ pub struct AppState {
     pub recommendation_running: AtomicBool,
     pub artist_bio_running: AtomicBool,
     pub artist_recommendation_running: AtomicBool,
+    pub top_tracks_running: AtomicBool,
     pub remote_access: upnp::RemoteAccessManager,
     pub restart: Notify,
     pub ffmpeg_available: bool,
@@ -120,20 +121,34 @@ async fn run_background_pipeline(state: Arc<AppState>) {
         }
     }
 
-    // Step 3: Analysis (always)
+    // Step 3: Last.fm top tracks (if configured)
+    {
+        let config = state.config.read().await;
+        if let Some(ref api_key) = config.metadata.lastfm.api_key {
+            let api_key = api_key.clone();
+            let db = state.db.clone();
+            drop(config);
+            run_stage(&state.top_tracks_running, "Last.fm top tracks", async move {
+                discogs::enrich_artist_top_tracks(&db, &api_key).await
+            })
+            .await;
+        }
+    }
+
+    // Step 4: Analysis (always)
     run_stage(&state.analysis_running, "analysis", {
         let db = state.db.clone();
         async move { analysis::analyze_library(&db).await }
     })
     .await;
 
-    // Step 4: Daily mixes (always, after analysis so ratings/BPM are available)
+    // Step 5: Daily mixes (always, after analysis so ratings/BPM are available)
     match daily_mixes::generate_all_daily_mixes(&state.db).await {
         Ok(_) => tracing::info!("daily mixes complete"),
         Err(e) => tracing::warn!("daily mixes failed: {e}"),
     }
 
-    // Step 5: Clean up stale caches (not accessed in 24h)
+    // Step 6: Clean up stale caches (not accessed in 24h)
     routes::hls::cleanup_hls_cache().await;
     transcode::cleanup_cache(std::time::Duration::from_secs(86400)).await;
 }
@@ -275,6 +290,7 @@ async fn main() -> Result<()> {
         recommendation_running: AtomicBool::new(false),
         artist_bio_running: AtomicBool::new(false),
         artist_recommendation_running: AtomicBool::new(false),
+        top_tracks_running: AtomicBool::new(false),
         remote_access: upnp::RemoteAccessManager::new(config.server.https_port),
         restart: Notify::new(),
         ffmpeg_available,

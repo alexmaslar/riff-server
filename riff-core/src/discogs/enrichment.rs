@@ -5,6 +5,7 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::config::DiscogsConfig;
+use crate::lastfm;
 use super::client::DiscogsClient;
 use super::matching;
 
@@ -355,6 +356,82 @@ async fn enrich_one_artist(
         .await?;
 
     Ok(())
+}
+
+/// Fetch Last.fm top tracks for artists that haven't been enriched yet (or stale > 30 days).
+pub async fn enrich_artist_top_tracks(
+    pool: &SqlitePool,
+    api_key: &str,
+) -> anyhow::Result<u32> {
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT a.id, a.name FROM artists a \
+         WHERE a.name IS NOT NULL \
+         AND NOT EXISTS ( \
+             SELECT 1 FROM artist_top_tracks att \
+             WHERE att.artist_id = a.id \
+             AND att.updated_at > datetime('now', '-30 days') \
+         )"
+    )
+    .fetch_all(pool)
+    .await?;
+
+    if rows.is_empty() {
+        info!("no artists need Last.fm top tracks enrichment");
+        return Ok(0);
+    }
+
+    info!("enriching {} artists with Last.fm top tracks", rows.len());
+
+    let client = reqwest::Client::new();
+    let mut enriched = 0u32;
+
+    for (artist_id, artist_name) in &rows {
+        match lastfm::fetch_top_tracks(&client, api_key, artist_name, 10).await {
+            Ok(tracks) if !tracks.is_empty() => {
+                // Delete existing rows then insert fresh
+                sqlx::query("DELETE FROM artist_top_tracks WHERE artist_id = ?")
+                    .bind(artist_id)
+                    .execute(pool)
+                    .await?;
+
+                for track in &tracks {
+                    sqlx::query(
+                        "INSERT INTO artist_top_tracks (artist_id, track_name, rank, playcount, listeners, updated_at) \
+                         VALUES (?, ?, ?, ?, ?, datetime('now'))"
+                    )
+                    .bind(artist_id)
+                    .bind(&track.name)
+                    .bind(track.rank)
+                    .bind(track.playcount)
+                    .bind(track.listeners)
+                    .execute(pool)
+                    .await?;
+                }
+
+                enriched += 1;
+                debug!("Last.fm: {} top tracks for '{}'", tracks.len(), artist_name);
+            }
+            Ok(_) => {
+                // No tracks returned — insert a sentinel so we don't re-query immediately
+                sqlx::query(
+                    "INSERT OR REPLACE INTO artist_top_tracks (artist_id, track_name, rank, playcount, listeners, updated_at) \
+                     VALUES (?, '', 0, 0, 0, datetime('now'))"
+                )
+                .bind(artist_id)
+                .execute(pool)
+                .await?;
+            }
+            Err(e) => {
+                warn!("Last.fm error for '{}': {}", artist_name, e);
+            }
+        }
+
+        // Rate limit: ~1 request/second
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+
+    info!("Last.fm top tracks enrichment complete: {} artists", enriched);
+    Ok(enriched)
 }
 
 /// Clean Discogs markup like [a=Artist Name] -> Artist Name
