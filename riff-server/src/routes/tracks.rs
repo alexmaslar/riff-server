@@ -111,7 +111,7 @@ pub async fn stream_track(
                     .into_response();
             }
 
-            let stream = tokio_util::io::ReaderStream::new(file.take(length));
+            let stream = tokio_util::io::ReaderStream::with_capacity(file.take(length), 64 * 1024);
 
             Response::builder()
                 .status(StatusCode::PARTIAL_CONTENT)
@@ -139,7 +139,7 @@ pub async fn stream_track(
                 }
             };
 
-            let stream = tokio_util::io::ReaderStream::new(file);
+            let stream = tokio_util::io::ReaderStream::with_capacity(file, 64 * 1024);
 
             Response::builder()
                 .status(StatusCode::OK)
@@ -200,7 +200,7 @@ pub async fn download_track(
         }
     };
 
-    let stream = tokio_util::io::ReaderStream::new(file);
+    let stream = tokio_util::io::ReaderStream::with_capacity(file, 64 * 1024);
 
     Response::builder()
         .status(StatusCode::OK)

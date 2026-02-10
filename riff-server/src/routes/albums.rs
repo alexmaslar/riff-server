@@ -532,31 +532,33 @@ pub async fn serve_thumbnail(original_path: &str, entity_id: &str, width: u32) -
     let thumb_filename = format!("{}_{}.jpg", entity_id, width);
     let thumb_path = thumbs_dir.join(&thumb_filename);
 
-    // Check if cached thumb exists and is newer than the original
-    let needs_generate = if thumb_path.exists() {
-        match (
-            std::fs::metadata(original_path).and_then(|m| m.modified()),
-            std::fs::metadata(&thumb_path).and_then(|m| m.modified()),
-        ) {
-            (Ok(orig_time), Ok(thumb_time)) => orig_time > thumb_time,
-            _ => true,
-        }
-    } else {
-        true
-    };
-
-    if needs_generate {
-        // Generate thumbnail
+    // Generate thumbnail if needed (all filesystem checks inside spawn_blocking)
+    {
         let original = original_path.to_string();
         let dest = thumb_path.clone();
         let dir = thumbs_dir.clone();
 
         let result = tokio::task::spawn_blocking(move || {
-            std::fs::create_dir_all(&dir)?;
-            let img = image::open(&original)?;
-            let resized = img.resize(width, width, image::imageops::FilterType::Lanczos3);
-            let mut output = std::io::BufWriter::new(std::fs::File::create(&dest)?);
-            resized.write_to(&mut output, image::ImageFormat::Jpeg)?;
+            // Check if cached thumb exists and is newer than the original
+            let needs_generate = if dest.exists() {
+                match (
+                    std::fs::metadata(&original).and_then(|m| m.modified()),
+                    std::fs::metadata(&dest).and_then(|m| m.modified()),
+                ) {
+                    (Ok(orig_time), Ok(thumb_time)) => orig_time > thumb_time,
+                    _ => true,
+                }
+            } else {
+                true
+            };
+
+            if needs_generate {
+                std::fs::create_dir_all(&dir)?;
+                let img = image::open(&original)?;
+                let resized = img.resize(width, width, image::imageops::FilterType::Lanczos3);
+                let mut output = std::io::BufWriter::new(std::fs::File::create(&dest)?);
+                resized.write_to(&mut output, image::ImageFormat::Jpeg)?;
+            }
             Ok::<(), anyhow::Error>(())
         })
         .await;
