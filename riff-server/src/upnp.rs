@@ -327,7 +327,28 @@ impl RemoteAccessManager {
                         }
                     }
                 }
-                let _ = success;
+                if !success {
+                    tracing::info!("UPnP renewal failed — accelerated retry in 2 minutes");
+                    tokio::time::sleep(std::time::Duration::from_secs(120)).await;
+                    // Some routers lose mappings on restart — remove stale + re-add
+                    if let Ok(gw) = discover_gateway().await {
+                        let _ = gw.remove_port(PortMappingProtocol::TCP, https_port).await;
+                    }
+                    match renew_mapping(https_port).await {
+                        Ok(addr) => {
+                            let mut s = status.write().await;
+                            s.public_address = Some(addr);
+                            s.status = "active".to_string();
+                            s.error_message = None;
+                            tracing::info!("UPnP recovered after accelerated retry");
+                        }
+                        Err(e) => {
+                            let mut s = status.write().await;
+                            s.error_message = Some(format!("renewal still failing: {e}"));
+                            tracing::warn!("UPnP accelerated retry failed: {e}");
+                        }
+                    }
+                }
             }
         });
 

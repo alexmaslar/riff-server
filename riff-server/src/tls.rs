@@ -102,7 +102,7 @@ pub fn build_rustls_config(cert_path: &Path, key_path: &Path) -> Result<RustlsCo
         .context("parsing private key PEM")?
         .ok_or_else(|| anyhow::anyhow!("no private key found in PEM file"))?;
 
-    let server_config = rustls::ServerConfig::builder_with_provider(Arc::new(
+    let mut server_config = rustls::ServerConfig::builder_with_provider(Arc::new(
         rustls::crypto::ring::default_provider(),
     ))
     .with_safe_default_protocol_versions()
@@ -110,6 +110,10 @@ pub fn build_rustls_config(cert_path: &Path, key_path: &Path) -> Result<RustlsCo
     .with_no_client_auth()
     .with_single_cert(certs, key)
     .context("configuring TLS certificate")?;
+
+    // Advertise h2 and http/1.1 via ALPN so clients can negotiate HTTP/2,
+    // multiplexing all requests over a single TCP+TLS connection.
+    server_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
 
     Ok(RustlsConfig::from_config(Arc::new(server_config)))
 }
