@@ -102,7 +102,7 @@ pub struct DiscogsConfig {
 pub struct RemoteAccessConfig {
     #[serde(default)]
     pub enabled: bool,
-    /// Preferred remote access method: upnp | manual
+    /// Preferred remote access method: upnp | port_forwarding | external_url
     #[serde(default = "default_remote_method")]
     pub method: String,
     #[serde(default)]

@@ -69,7 +69,8 @@ impl RemoteAccessManager {
     }
 
     /// Start remote access. Supported methods:
-    /// - "manual": use external_url directly
+    /// - "external_url" / "manual": use external_url directly
+    /// - "port_forwarding": detect public IP, verify port reachable
     /// - "upnp" (default): UPnP port forwarding
     pub async fn start(
         &self,
@@ -83,24 +84,86 @@ impl RemoteAccessManager {
             }
         }
 
-        // Manual URL mode — skip everything
-        if let Some(url) = external_url {
+        match preferred_method {
+            "external_url" | "manual" => {
+                let url = external_url.ok_or_else(|| {
+                    anyhow::anyhow!("external_url method requires a URL to be configured")
+                })?;
+                let mut status = self.status.write().await;
+                status.enabled = true;
+                status.method = "external_url".to_string();
+                status.status = "active".to_string();
+                status.external_url = Some(url.clone());
+                status.public_address = Some(url);
+                status.error_message = None;
+                tracing::info!(
+                    "remote access using external URL: {}",
+                    status.public_address.as_ref().unwrap()
+                );
+                Ok(())
+            }
+            "port_forwarding" => self.start_port_forwarding().await,
+            _ => self.start_upnp().await,
+        }
+    }
+
+    /// Start port forwarding mode: detect public IP and verify port reachability.
+    /// The user must configure port forwarding on their router manually.
+    async fn start_port_forwarding(&self) -> Result<()> {
+        {
             let mut status = self.status.write().await;
             status.enabled = true;
-            status.method = "manual".to_string();
-            status.status = "active".to_string();
-            status.external_url = Some(url.clone());
-            status.public_address = Some(url);
+            status.method = "port_forwarding".to_string();
+            status.status = "starting".to_string();
             status.error_message = None;
-            tracing::info!(
-                "remote access using manual URL: {}",
-                status.public_address.as_ref().unwrap()
-            );
-            return Ok(());
         }
 
-        match preferred_method {
-            "upnp" | _ => self.start_upnp().await,
+        let public_ip = fetch_public_ip().await.ok_or_else(|| {
+            anyhow::anyhow!("could not detect public IP address")
+        });
+
+        match public_ip {
+            Ok(ip) => {
+                let public_address = format!("https://{}:{}", ip, self.https_port);
+                let port_reachable = check_port_reachable(&ip, self.https_port).await;
+
+                match port_reachable {
+                    Some(true) => {
+                        tracing::info!(
+                            "port {} confirmed reachable from the internet",
+                            self.https_port
+                        );
+                    }
+                    Some(false) => {
+                        tracing::warn!(
+                            "port {} is NOT reachable — ensure port forwarding is configured \
+                             on your router",
+                            self.https_port
+                        );
+                    }
+                    None => {
+                        tracing::info!(
+                            "could not verify external port reachability (inconclusive)"
+                        );
+                    }
+                }
+
+                let mut status = self.status.write().await;
+                status.status = "active".to_string();
+                status.public_address = Some(public_address.clone());
+                status.port_reachable = port_reachable;
+                status.error_message = None;
+                tracing::info!("port forwarding remote access active: {}", public_address);
+                Ok(())
+            }
+            Err(e) => {
+                let msg = format!("{e}");
+                let mut status = self.status.write().await;
+                status.status = "error".to_string();
+                status.error_message = Some(msg.clone());
+                tracing::warn!("port forwarding setup failed: {msg}");
+                Err(e)
+            }
         }
     }
 

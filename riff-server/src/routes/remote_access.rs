@@ -78,8 +78,11 @@ pub async fn disable(
     Ok(Json(status_json(&status, https_port)))
 }
 
+const VALID_METHODS: &[&str] = &["upnp", "port_forwarding", "external_url"];
+
 #[derive(Deserialize)]
 pub struct ConfigureRequest {
+    pub method: Option<String>,
     pub external_url: Option<String>,
 }
 
@@ -87,10 +90,26 @@ pub async fn configure(
     State(state): State<Arc<AppState>>,
     Json(body): Json<ConfigureRequest>,
 ) -> Result<Json<Value>, AppError> {
-    // Save external URL to config
+    // Validate method if provided
+    if let Some(ref method) = body.method {
+        if !VALID_METHODS.contains(&method.as_str()) {
+            return Err(AppError::BadRequest(format!(
+                "invalid method '{}': must be one of {}",
+                method,
+                VALID_METHODS.join(", ")
+            )));
+        }
+    }
+
+    // Save to config
     {
         let mut config = state.config.write().await;
-        config.remote_access.external_url = body.external_url.clone();
+        if let Some(ref method) = body.method {
+            config.remote_access.method = method.clone();
+        }
+        if body.external_url.is_some() {
+            config.remote_access.external_url = body.external_url.clone();
+        }
         if let Err(e) = config.save() {
             tracing::warn!("failed to save config: {e}");
         }
@@ -100,8 +119,11 @@ pub async fn configure(
     let is_enabled = state.remote_access.status.read().await.enabled;
     if is_enabled {
         state.remote_access.stop().await;
-        let method = state.config.read().await.remote_access.method.clone();
-        let _ = state.remote_access.start(body.external_url, &method).await;
+        let config = state.config.read().await;
+        let method = config.remote_access.method.clone();
+        let external_url = config.remote_access.external_url.clone();
+        drop(config);
+        let _ = state.remote_access.start(external_url, &method).await;
 
         // Re-persist enabled state
         let mut config = state.config.write().await;
