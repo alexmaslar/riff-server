@@ -5,7 +5,7 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::config::DiscogsConfig;
-use crate::lastfm;
+use crate::deezer;
 use super::client::DiscogsClient;
 use super::matching;
 
@@ -358,10 +358,9 @@ async fn enrich_one_artist(
     Ok(())
 }
 
-/// Fetch Last.fm top tracks for artists that haven't been enriched yet (or stale > 30 days).
+/// Fetch Deezer top tracks for artists that haven't been enriched yet (or stale > 30 days).
 pub async fn enrich_artist_top_tracks(
     pool: &SqlitePool,
-    api_key: &str,
 ) -> anyhow::Result<u32> {
     let rows: Vec<(String, String)> = sqlx::query_as(
         "SELECT a.id, a.name FROM artists a \
@@ -376,17 +375,17 @@ pub async fn enrich_artist_top_tracks(
     .await?;
 
     if rows.is_empty() {
-        info!("no artists need Last.fm top tracks enrichment");
+        info!("no artists need top tracks enrichment");
         return Ok(0);
     }
 
-    info!("enriching {} artists with Last.fm top tracks", rows.len());
+    info!("enriching {} artists with Deezer top tracks", rows.len());
 
     let client = reqwest::Client::new();
     let mut enriched = 0u32;
 
     for (artist_id, artist_name) in &rows {
-        match lastfm::fetch_top_tracks(&client, api_key, artist_name, 10).await {
+        match deezer::fetch_top_tracks(&client, artist_name, 10).await {
             Ok(tracks) if !tracks.is_empty() => {
                 // Delete existing rows then insert fresh
                 sqlx::query("DELETE FROM artist_top_tracks WHERE artist_id = ?")
@@ -397,19 +396,18 @@ pub async fn enrich_artist_top_tracks(
                 for track in &tracks {
                     sqlx::query(
                         "INSERT INTO artist_top_tracks (artist_id, track_name, rank, playcount, listeners, updated_at) \
-                         VALUES (?, ?, ?, ?, ?, datetime('now'))"
+                         VALUES (?, ?, ?, ?, 0, datetime('now'))"
                     )
                     .bind(artist_id)
                     .bind(&track.name)
                     .bind(track.rank)
-                    .bind(track.playcount)
-                    .bind(track.listeners)
+                    .bind(track.popularity)
                     .execute(pool)
                     .await?;
                 }
 
                 enriched += 1;
-                debug!("Last.fm: {} top tracks for '{}'", tracks.len(), artist_name);
+                debug!("Deezer: {} top tracks for '{}'", tracks.len(), artist_name);
             }
             Ok(_) => {
                 // No tracks returned — insert a sentinel so we don't re-query immediately
@@ -422,15 +420,15 @@ pub async fn enrich_artist_top_tracks(
                 .await?;
             }
             Err(e) => {
-                warn!("Last.fm error for '{}': {}", artist_name, e);
+                warn!("Deezer error for '{}': {}", artist_name, e);
             }
         }
 
-        // Rate limit: ~1 request/second
+        // Rate limit: ~1 request/second (Deezer allows ~30/min)
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
 
-    info!("Last.fm top tracks enrichment complete: {} artists", enriched);
+    info!("Deezer top tracks enrichment complete: {} artists", enriched);
     Ok(enriched)
 }
 

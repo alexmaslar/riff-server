@@ -121,19 +121,12 @@ async fn run_background_pipeline(state: Arc<AppState>) {
         }
     }
 
-    // Step 3: Last.fm top tracks (if configured)
-    {
-        let config = state.config.read().await;
-        if let Some(ref api_key) = config.metadata.lastfm.api_key {
-            let api_key = api_key.clone();
-            let db = state.db.clone();
-            drop(config);
-            run_stage(&state.top_tracks_running, "Last.fm top tracks", async move {
-                discogs::enrich_artist_top_tracks(&db, &api_key).await
-            })
-            .await;
-        }
-    }
+    // Step 3: Deezer top tracks (always — no API key needed)
+    run_stage(&state.top_tracks_running, "top tracks", {
+        let db = state.db.clone();
+        async move { discogs::enrich_artist_top_tracks(&db).await }
+    })
+    .await;
 
     // Step 4: Analysis (always)
     run_stage(&state.analysis_running, "analysis", {

@@ -52,14 +52,6 @@ pub struct MetadataConfig {
     pub discogs: DiscogsConfig,
     #[serde(default)]
     pub ai: AiConfig,
-    #[serde(default)]
-    pub lastfm: LastfmConfig,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct LastfmConfig {
-    #[serde(default)]
-    pub api_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -191,7 +183,6 @@ impl Default for MetadataConfig {
         Self {
             discogs: DiscogsConfig::default(),
             ai: AiConfig::default(),
-            lastfm: LastfmConfig::default(),
         }
     }
 }
