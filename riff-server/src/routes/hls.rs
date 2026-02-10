@@ -1,9 +1,10 @@
 use axum::{
     body::Body,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::header,
     response::Response,
 };
+use serde::Deserialize;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -11,6 +12,11 @@ use tokio::fs::File;
 
 use crate::error::AppError;
 use crate::AppState;
+
+#[derive(Debug, Deserialize)]
+pub struct StreamParams {
+    pub quality: Option<String>,
+}
 
 /// Low-bitrate tier (kbps) — always 64 for poor connections.
 const LO_BITRATE: u32 = 64;
@@ -24,6 +30,33 @@ fn hls_base_dir() -> Result<PathBuf, AppError> {
 
 fn valid_variant(v: &str) -> bool {
     v == "hi" || v == "lo"
+}
+
+/// Find a segment file in either bitrate-keyed (e.g. `hi_256/`) or legacy (`hi/`) dirs.
+fn find_segment(
+    track_dir: &std::path::Path,
+    variant: &str,
+    segment: &str,
+) -> Result<PathBuf, AppError> {
+    // Check bitrate-keyed dirs (hi_256, hi_128, lo_64, etc.)
+    if let Ok(entries) = std::fs::read_dir(track_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if name_str.starts_with(&format!("{variant}_")) && entry.path().is_dir() {
+                let candidate = entry.path().join(segment);
+                if candidate.exists() {
+                    return Ok(candidate);
+                }
+            }
+        }
+    }
+    // Fall back to legacy plain variant dir
+    let legacy = track_dir.join(variant).join(segment);
+    if legacy.exists() {
+        return Ok(legacy);
+    }
+    Err(AppError::NotFound("segment not found".into()))
 }
 
 fn variant_bitrate(variant: &str, config_bitrate: u32) -> u32 {
@@ -41,6 +74,7 @@ fn variant_bitrate(variant: &str, config_bitrate: u32) -> u32 {
 pub async fn master_playlist(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    Query(params): Query<StreamParams>,
 ) -> Result<Response, AppError> {
     if !state.ffmpeg_available {
         return Err(AppError::Internal("ffmpeg not available".into()));
@@ -54,8 +88,23 @@ pub async fn master_playlist(
         .ok_or_else(|| AppError::NotFound("track not found".into()))?;
 
     let config = state.config.read().await;
-    let hi_bitrate = config.streaming.remote_bitrate;
+    let config_bitrate = config.streaming.remote_bitrate;
     drop(config);
+
+    // Map quality param to hi-tier bitrate
+    let hi_bitrate = match params.quality.as_deref() {
+        Some("lossless") => config_bitrate, // Can't serve raw via HLS, best-effort
+        Some("high") => 256,
+        Some("normal") => 128,
+        _ => config_bitrate, // Legacy behavior
+    };
+
+    // Propagate quality param to variant URLs
+    let quality_param = params
+        .quality
+        .as_ref()
+        .map(|q| format!("?quality={q}"))
+        .unwrap_or_default();
 
     // BANDWIDTH in bits/sec with ~12% overhead for framing
     let hi_bw = (hi_bitrate as u64) * 1120;
@@ -64,9 +113,9 @@ pub async fn master_playlist(
     let master = format!(
         "#EXTM3U\n\
          #EXT-X-STREAM-INF:BANDWIDTH={hi_bw},CODECS=\"mp4a.40.2\"\n\
-         hi/playlist.m3u8\n\
+         hi/playlist.m3u8{quality_param}\n\
          #EXT-X-STREAM-INF:BANDWIDTH={lo_bw},CODECS=\"mp4a.40.2\"\n\
-         lo/playlist.m3u8\n"
+         lo/playlist.m3u8{quality_param}\n"
     );
 
     Ok(Response::builder()
@@ -84,6 +133,7 @@ pub async fn master_playlist(
 pub async fn variant_playlist(
     State(state): State<Arc<AppState>>,
     Path((id, variant)): Path<(String, String)>,
+    Query(params): Query<StreamParams>,
 ) -> Result<Response, AppError> {
     if !state.ffmpeg_available {
         return Err(AppError::Internal("ffmpeg not available".into()));
@@ -100,17 +150,24 @@ pub async fn variant_playlist(
     .await?
     .ok_or_else(|| AppError::NotFound("track not found".into()))?;
 
+    let config = state.config.read().await;
+    let config_bitrate = config.streaming.remote_bitrate;
+    drop(config);
+
+    // Derive bitrate from quality param or fall back to config
+    let bitrate = match params.quality.as_deref() {
+        Some("high") => variant_bitrate(&variant, 256),
+        Some("normal") => variant_bitrate(&variant, 128),
+        _ => variant_bitrate(&variant, config_bitrate),
+    };
+
+    // Include bitrate in cache path to separate different quality levels
     let track_dir = hls_base_dir()?.join(&id);
-    let variant_dir = track_dir.join(&variant);
+    let variant_dir = track_dir.join(format!("{}_{}", variant, bitrate));
     let playlist_path = variant_dir.join("playlist.m3u8");
 
-    let config = state.config.read().await;
-    let hi_bitrate = config.streaming.remote_bitrate;
-    drop(config);
-    let bitrate = variant_bitrate(&variant, hi_bitrate);
-
-    // Key includes track_id + variant to allow concurrent generation of different variants
-    let gen_key = format!("{id}/{variant}");
+    // Key includes track_id + variant + bitrate to allow concurrent generation
+    let gen_key = format!("{id}/{}_{}", variant, bitrate);
 
     enum Action {
         Cached,
@@ -194,7 +251,9 @@ pub async fn serve_segment(
         return Err(AppError::BadRequest("invalid segment name".into()));
     }
 
-    let segment_path = hls_base_dir()?.join(&id).join(&variant).join(&segment);
+    // Try bitrate-keyed dirs first, then fall back to legacy plain variant dirs
+    let base = hls_base_dir()?.join(&id);
+    let segment_path = find_segment(&base, &variant, &segment)?;
 
     let file = File::open(&segment_path)
         .await

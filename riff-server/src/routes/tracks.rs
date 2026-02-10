@@ -1,9 +1,10 @@
 use axum::{
     body::Body,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{header, StatusCode},
     response::Response,
 };
+use serde::Deserialize;
 use std::sync::Arc;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
@@ -12,6 +13,11 @@ use crate::error::AppError;
 use crate::middleware::IsRemote;
 use crate::transcode;
 use crate::AppState;
+
+#[derive(Debug, Deserialize)]
+pub struct StreamParams {
+    pub quality: Option<String>,
+}
 
 fn mime_for_format(format: &str) -> &'static str {
     match format {
@@ -36,6 +42,7 @@ fn ext_for_format(format: &str) -> &'static str {
 pub async fn stream_track(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    Query(params): Query<StreamParams>,
     request: axum::extract::Request,
 ) -> Result<Response, AppError> {
     let is_remote = request
@@ -53,86 +60,109 @@ pub async fn stream_track(
     .await?
     .ok_or_else(|| AppError::NotFound("track not found".into()))?;
 
-    // Remote + FFmpeg + lossless → transcode to AAC
-    if is_remote && state.ffmpeg_available && transcode::is_lossless(&format) {
-        let config = state.config.read().await;
-        let bitrate = config.streaming.remote_bitrate;
-        drop(config);
+    // Determine transcode bitrate from ?quality param or legacy behavior
+    let quality = params.quality.as_deref();
+    let transcode_bitrate: Option<u32> = match quality {
+        Some("lossless") => None, // No transcoding
+        Some("high") => Some(256),
+        Some("normal") => Some(128),
+        None if is_remote => {
+            // Legacy: remote without ?quality → use config bitrate
+            let config = state.config.read().await;
+            Some(config.streaming.remote_bitrate)
+        }
+        None => None, // Local without ?quality → no transcoding
+        Some(_) => None, // Unknown quality value → no transcoding
+    };
 
-        let opts = transcode::TranscodeOptions {
-            file_path: file_path.clone(),
-            track_id: id.clone(),
-            bitrate_kbps: bitrate,
-            use_fdk_aac: state.ffmpeg_has_fdk_aac,
-            semaphore: state.transcode_semaphore.clone(),
-        };
+    let effective_quality = quality.unwrap_or(if transcode_bitrate.is_some() {
+        "high"
+    } else {
+        "lossless"
+    });
 
-        match transcode::transcode_to_aac(opts).await {
-            Ok(transcode::TranscodeResult::Cached { path, size }) => {
-                // Serve cached transcode with full HTTP semantics
-                let tc_etag = format!("\"tc-{}-{}\"", id, bitrate);
-                let range = headers
-                    .get(header::RANGE)
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|s| parse_range(s, size));
+    // Transcode if bitrate requested, source is lossless, and ffmpeg available
+    if let Some(bitrate) = transcode_bitrate {
+        if state.ffmpeg_available && transcode::is_lossless(&format) {
+            let opts = transcode::TranscodeOptions {
+                file_path: file_path.clone(),
+                track_id: id.clone(),
+                bitrate_kbps: bitrate,
+                use_fdk_aac: state.ffmpeg_has_fdk_aac,
+                semaphore: state.transcode_semaphore.clone(),
+            };
 
-                return match range {
-                    Some((start, end)) => {
-                        let length = end - start + 1;
-                        let mut f = File::open(&path)
-                            .await
-                            .map_err(|e| AppError::Internal(format!("cache open: {e}")))?;
-                        f.seek(std::io::SeekFrom::Start(start))
-                            .await
-                            .map_err(|e| AppError::Internal(format!("cache seek: {e}")))?;
-                        let stream = tokio_util::io::ReaderStream::with_capacity(
-                            f.take(length),
-                            256 * 1024,
-                        );
-                        Ok(Response::builder()
-                            .status(StatusCode::PARTIAL_CONTENT)
-                            .header(header::CONTENT_TYPE, "audio/aac")
-                            .header(header::CONTENT_LENGTH, length.to_string())
-                            .header(
-                                header::CONTENT_RANGE,
-                                format!("bytes {start}-{end}/{size}"),
-                            )
-                            .header(header::ACCEPT_RANGES, "bytes")
-                            .header(header::ETAG, &tc_etag)
-                            .header("X-Riff-Transcoded", "cached")
-                            .body(Body::from_stream(stream))
-                            .unwrap())
-                    }
-                    None => {
-                        let f = File::open(&path)
-                            .await
-                            .map_err(|e| AppError::Internal(format!("cache open: {e}")))?;
-                        let stream =
-                            tokio_util::io::ReaderStream::with_capacity(f, 256 * 1024);
-                        Ok(Response::builder()
-                            .status(StatusCode::OK)
-                            .header(header::CONTENT_TYPE, "audio/aac")
-                            .header(header::CONTENT_LENGTH, size.to_string())
-                            .header(header::ACCEPT_RANGES, "bytes")
-                            .header(header::ETAG, &tc_etag)
-                            .header("X-Riff-Transcoded", "cached")
-                            .body(Body::from_stream(stream))
-                            .unwrap())
-                    }
-                };
-            }
-            Ok(transcode::TranscodeResult::Streaming { body }) => {
-                return Ok(Response::builder()
-                    .status(StatusCode::OK)
-                    .header(header::CONTENT_TYPE, "audio/aac")
-                    .header("X-Riff-Transcoded", "true")
-                    // No Accept-Ranges, Content-Length, or ETag — stream is not seekable
-                    .body(body)
-                    .unwrap());
-            }
-            Err(e) => {
-                tracing::warn!("transcode failed, falling back to raw: {e}");
-                // fall through to serve raw file
+            match transcode::transcode_to_aac(opts).await {
+                Ok(transcode::TranscodeResult::Cached { path, size }) => {
+                    let tc_etag = format!("\"tc-{}-{}\"", id, bitrate);
+                    let range = headers
+                        .get(header::RANGE)
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|s| parse_range(s, size));
+
+                    return match range {
+                        Some((start, end)) => {
+                            let length = end - start + 1;
+                            let mut f = File::open(&path)
+                                .await
+                                .map_err(|e| AppError::Internal(format!("cache open: {e}")))?;
+                            f.seek(std::io::SeekFrom::Start(start))
+                                .await
+                                .map_err(|e| AppError::Internal(format!("cache seek: {e}")))?;
+                            let stream = tokio_util::io::ReaderStream::with_capacity(
+                                f.take(length),
+                                256 * 1024,
+                            );
+                            Ok(Response::builder()
+                                .status(StatusCode::PARTIAL_CONTENT)
+                                .header(header::CONTENT_TYPE, "audio/aac")
+                                .header(header::CONTENT_LENGTH, length.to_string())
+                                .header(
+                                    header::CONTENT_RANGE,
+                                    format!("bytes {start}-{end}/{size}"),
+                                )
+                                .header(header::ACCEPT_RANGES, "bytes")
+                                .header(header::ETAG, &tc_etag)
+                                .header("X-Riff-Transcoded", "cached")
+                                .header("X-Riff-Quality", effective_quality)
+                                .header("X-Riff-Original-Format", &format)
+                                .body(Body::from_stream(stream))
+                                .unwrap())
+                        }
+                        None => {
+                            let f = File::open(&path)
+                                .await
+                                .map_err(|e| AppError::Internal(format!("cache open: {e}")))?;
+                            let stream =
+                                tokio_util::io::ReaderStream::with_capacity(f, 256 * 1024);
+                            Ok(Response::builder()
+                                .status(StatusCode::OK)
+                                .header(header::CONTENT_TYPE, "audio/aac")
+                                .header(header::CONTENT_LENGTH, size.to_string())
+                                .header(header::ACCEPT_RANGES, "bytes")
+                                .header(header::ETAG, &tc_etag)
+                                .header("X-Riff-Transcoded", "cached")
+                                .header("X-Riff-Quality", effective_quality)
+                                .header("X-Riff-Original-Format", &format)
+                                .body(Body::from_stream(stream))
+                                .unwrap())
+                        }
+                    };
+                }
+                Ok(transcode::TranscodeResult::Streaming { body }) => {
+                    return Ok(Response::builder()
+                        .status(StatusCode::OK)
+                        .header(header::CONTENT_TYPE, "audio/aac")
+                        .header("X-Riff-Transcoded", "true")
+                        .header("X-Riff-Quality", effective_quality)
+                        .header("X-Riff-Original-Format", &format)
+                        .body(body)
+                        .unwrap());
+                }
+                Err(e) => {
+                    tracing::warn!("transcode failed, falling back to raw: {e}");
+                    // fall through to serve raw file
+                }
             }
         }
     }
@@ -197,6 +227,7 @@ pub async fn stream_track(
                 )
                 .header(header::ACCEPT_RANGES, "bytes")
                 .header(header::ETAG, &etag)
+                .header("X-Riff-Quality", "lossless")
                 .body(Body::from_stream(stream))
                 .unwrap())
         }
@@ -214,6 +245,7 @@ pub async fn stream_track(
                 .header(header::CONTENT_LENGTH, file_size.to_string())
                 .header(header::ACCEPT_RANGES, "bytes")
                 .header(header::ETAG, &etag)
+                .header("X-Riff-Quality", "lossless")
                 .body(Body::from_stream(stream))
                 .unwrap())
         }
