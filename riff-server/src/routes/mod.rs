@@ -3,6 +3,7 @@ pub mod artists;
 pub mod auth;
 pub mod config;
 pub mod daily_mixes;
+pub mod diagnostics;
 pub mod favorites;
 pub mod featured;
 pub mod history;
