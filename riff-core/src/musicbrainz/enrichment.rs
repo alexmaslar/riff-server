@@ -205,7 +205,7 @@ async fn enrich_one_album(
         .unwrap_or(false);
 
     sqlx::query(
-        "UPDATE albums SET discogs_id = ?, label = ?, catalog_number = ?, style = ?, genre = ?, country = ?, release_notes = ?, all_labels = ?, is_compilation = ?, metadata_status = 'matched' WHERE id = ?"
+        "UPDATE albums SET external_id = ?, label = ?, catalog_number = ?, style = ?, genre = ?, country = ?, release_notes = ?, all_labels = ?, is_compilation = ?, metadata_status = 'matched' WHERE id = ?"
     )
     .bind(&release.id)
     .bind(&label)
@@ -223,7 +223,7 @@ async fn enrich_one_album(
     // Set MBID on the artist
     if let Some(ac) = release.artist_credit.first() {
         sqlx::query(
-            "UPDATE artists SET discogs_id = ? WHERE id = (SELECT artist_id FROM albums WHERE id = ?) AND discogs_id IS NULL"
+            "UPDATE artists SET external_id = ? WHERE id = (SELECT artist_id FROM albums WHERE id = ?) AND external_id IS NULL"
         )
         .bind(&ac.artist.id)
         .bind(album_id)
@@ -244,7 +244,7 @@ async fn enrich_one_album(
             // Capitalize first letter of role
             let role = capitalize_first(&rel.relation_type);
             sqlx::query(
-                "INSERT INTO album_credits (id, album_id, artist_name, role, discogs_artist_id, sort_order) \
+                "INSERT INTO album_credits (id, album_id, artist_name, role, external_artist_id, sort_order) \
                  VALUES (?, ?, ?, ?, ?, ?)"
             )
             .bind(&id)

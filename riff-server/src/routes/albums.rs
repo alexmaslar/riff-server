@@ -86,7 +86,7 @@ pub struct SimilarAlbum {
 pub struct CreditSummary {
     pub artist_name: String,
     pub role: String,
-    pub discogs_artist_id: Option<String>,
+    pub external_artist_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -327,7 +327,7 @@ pub async fn build_album_detail(
         .bind(album_id)
         .fetch_all(db),
         sqlx::query_as::<_, (String, String, Option<String>)>(
-            "SELECT artist_name, role, discogs_artist_id
+            "SELECT artist_name, role, external_artist_id
              FROM album_credits WHERE album_id = ? ORDER BY sort_order",
         )
         .bind(album_id)
@@ -380,10 +380,10 @@ pub async fn build_album_detail(
 
     let credit_summaries: Vec<CreditSummary> = credits
         .into_iter()
-        .map(|(artist_name, role, discogs_artist_id)| CreditSummary {
+        .map(|(artist_name, role, external_artist_id)| CreditSummary {
             artist_name,
             role,
-            discogs_artist_id,
+            external_artist_id,
         })
         .collect();
 

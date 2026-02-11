@@ -17,7 +17,7 @@ pub struct User {
 pub struct Artist {
     pub id: Uuid,
     pub name: String,
-    pub discogs_id: Option<String>,
+    pub external_id: Option<String>,
     pub bio: Option<String>,
     pub image_url: Option<String>,
 }
@@ -28,7 +28,7 @@ pub struct Album {
     pub title: String,
     pub artist_id: Uuid,
     pub year: Option<i32>,
-    pub discogs_id: Option<String>,
+    pub external_id: Option<String>,
     pub genre: Vec<String>,
     pub style: Vec<String>,
     pub label: Option<String>,
