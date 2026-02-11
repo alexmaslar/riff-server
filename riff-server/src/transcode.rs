@@ -123,18 +123,28 @@ async fn transcode_to_file(
         .to_str()
         .ok_or_else(|| AppError::Internal("invalid cache path".into()))?;
 
-    let result = Command::new("ffmpeg")
-        .args([
-            "-i", input, "-vn", "-codec:a", codec, "-b:a",
-            &format!("{}k", bitrate_kbps),
-            "-f", "adts", "-y", tmp_str,
-        ])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        .output()
-        .await
-        .map_err(|e| AppError::Internal(format!("ffmpeg spawn failed: {e}")))?;
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(300), // 5 min max for single-track transcode
+        Command::new("ffmpeg")
+            .args([
+                "-i", input, "-vn", "-codec:a", codec, "-b:a",
+                &format!("{}k", bitrate_kbps),
+                "-f", "adts", "-y", tmp_str,
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .map_err(|_| {
+        // Timeout expired — kill_on_drop will terminate FFmpeg.
+        // Clean up the partial tmp file.
+        let tmp_path = tmp.clone();
+        tokio::spawn(async move { let _ = tokio::fs::remove_file(&tmp_path).await; });
+        AppError::Internal("ffmpeg transcode timed out after 5 minutes".into())
+    })?
+    .map_err(|e| AppError::Internal(format!("ffmpeg spawn failed: {e}")))?;
 
     if !result.status.success() {
         let stderr = String::from_utf8_lossy(&result.stderr);
@@ -222,6 +232,7 @@ async fn stream_transcode(
 }
 
 /// Remove cached transcode files older than `max_age`.
+/// Also removes orphaned `.tmp` files from cancelled/interrupted transcodes.
 pub async fn cleanup_cache(max_age: std::time::Duration) {
     let Some(dir) = cache_dir() else { return };
     let Ok(mut entries) = tokio::fs::read_dir(&dir).await else {
@@ -232,15 +243,26 @@ pub async fn cleanup_cache(max_age: std::time::Duration) {
     let mut removed = 0u32;
 
     while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        let is_orphaned_tmp = path
+            .to_str()
+            .map(|s| s.contains(".tmp"))
+            .unwrap_or(false);
+
         let Ok(meta) = entry.metadata().await else {
             continue;
         };
         let Ok(modified) = meta.modified() else {
             continue;
         };
-        if now.duration_since(modified).unwrap_or_default() > max_age
-            && tokio::fs::remove_file(entry.path()).await.is_ok()
-        {
+        let age = now.duration_since(modified).unwrap_or_default();
+
+        // Remove stale cache files by max_age, and orphaned .tmp files after 1 hour
+        // (.tmp files are left behind when transcodes are cancelled mid-flight)
+        let should_remove =
+            if is_orphaned_tmp { age > std::time::Duration::from_secs(3600) } else { age > max_age };
+
+        if should_remove && tokio::fs::remove_file(&path).await.is_ok() {
             removed += 1;
         }
     }

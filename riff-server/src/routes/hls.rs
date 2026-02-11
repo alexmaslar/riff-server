@@ -255,6 +255,11 @@ pub async fn serve_segment(
     let base = hls_base_dir()?.join(&id);
     let segment_path = find_segment(&base, &variant, &segment)?;
 
+    // Touch track dir mtime so cleanup_hls_cache knows it's still in use.
+    // Without this, only variant_playlist touches mtime — during long playback
+    // the 24h TTL could expire before all segments are served.
+    let _ = filetime::set_file_mtime(&base, filetime::FileTime::now());
+
     let file = File::open(&segment_path)
         .await
         .map_err(|_| AppError::NotFound("segment not found".into()))?;
@@ -290,30 +295,35 @@ async fn generate_segments(
     let seg_pattern = variant_dir.join("seg%05d.ts");
     let playlist_path = variant_dir.join("playlist.m3u8");
 
-    let result = tokio::process::Command::new("ffmpeg")
-        .args([
-            "-i",
-            file_path,
-            "-vn",
-            "-codec:a",
-            codec,
-            "-b:a",
-            &format!("{}k", bitrate_kbps),
-            "-f",
-            "hls",
-            "-hls_time",
-            "10",
-            "-hls_list_size",
-            "0",
-            "-hls_segment_filename",
-            seg_pattern.to_str().unwrap_or("seg%05d.ts"),
-            playlist_path.to_str().unwrap_or("playlist.m3u8"),
-        ])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .output()
-        .await
-        .map_err(|e| AppError::Internal(format!("ffmpeg spawn failed: {e}")))?;
+    let result = tokio::time::timeout(
+        Duration::from_secs(600), // 10 min max for HLS segment generation
+        tokio::process::Command::new("ffmpeg")
+            .args([
+                "-i",
+                file_path,
+                "-vn",
+                "-codec:a",
+                codec,
+                "-b:a",
+                &format!("{}k", bitrate_kbps),
+                "-f",
+                "hls",
+                "-hls_time",
+                "10",
+                "-hls_list_size",
+                "0",
+                "-hls_segment_filename",
+                seg_pattern.to_str().unwrap_or("seg%05d.ts"),
+                playlist_path.to_str().unwrap_or("playlist.m3u8"),
+            ])
+            .kill_on_drop(true)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .output(),
+    )
+    .await
+    .map_err(|_| AppError::Internal("ffmpeg HLS timed out after 10 minutes".into()))?
+    .map_err(|e| AppError::Internal(format!("ffmpeg spawn failed: {e}")))?;
 
     if !result.status.success() {
         let stderr = String::from_utf8_lossy(&result.stderr);

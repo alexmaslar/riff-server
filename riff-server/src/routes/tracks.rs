@@ -256,8 +256,8 @@ pub async fn download_track(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Response, AppError> {
-    let (file_path, format, title, file_size) = sqlx::query_as::<_, (String, String, String, i64)>(
-        "SELECT file_path, format, title, file_size_bytes FROM tracks WHERE id = ?",
+    let (file_path, format, title) = sqlx::query_as::<_, (String, String, String)>(
+        "SELECT file_path, format, title FROM tracks WHERE id = ?",
     )
     .bind(&id)
     .fetch_optional(&state.db)
@@ -267,6 +267,12 @@ pub async fn download_track(
     let mime = mime_for_format(&format);
     let ext = ext_for_format(&format);
     let filename = format!("{}.{}", title, ext);
+
+    // Use filesystem metadata for authoritative file size (prevents stale DB values)
+    let file_size = tokio::fs::metadata(&file_path)
+        .await
+        .map_err(|e| AppError::Internal(format!("metadata failed: {e}")))?
+        .len();
 
     let file = File::open(&file_path)
         .await
