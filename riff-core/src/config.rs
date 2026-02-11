@@ -48,8 +48,8 @@ pub struct AuthConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MetadataConfig {
-    #[serde(default)]
-    pub discogs: DiscogsConfig,
+    #[serde(default, alias = "discogs")]
+    pub enrichment: EnrichmentConfig,
     #[serde(default)]
     pub ai: AiConfig,
 }
@@ -91,9 +91,7 @@ pub struct AiConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DiscogsConfig {
-    #[serde(default)]
-    pub api_token: Option<String>,
+pub struct EnrichmentConfig {
     #[serde(default = "default_true")]
     pub auto_enrich: bool,
     #[serde(default = "default_true")]
@@ -181,16 +179,15 @@ impl Default for AiConfig {
 impl Default for MetadataConfig {
     fn default() -> Self {
         Self {
-            discogs: DiscogsConfig::default(),
+            enrichment: EnrichmentConfig::default(),
             ai: AiConfig::default(),
         }
     }
 }
 
-impl Default for DiscogsConfig {
+impl Default for EnrichmentConfig {
     fn default() -> Self {
         Self {
-            api_token: None,
             auto_enrich: true,
             download_covers: true,
         }

@@ -1,5 +1,5 @@
 use axum::{extract::{Path, State}, Json};
-use riff_core::{ai, analysis, discogs, scanner};
+use riff_core::{ai, analysis, musicbrainz, scanner};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::atomic::Ordering;
@@ -18,7 +18,7 @@ pub async fn trigger_scan(State(state): State<Arc<AppState>>) -> Json<Value> {
         Ok(result) => {
             let enrichment_triggered = maybe_spawn_enrichment(&state).await;
             let analysis_triggered = if !enrichment_triggered {
-                // No Discogs configured — spawn summarization (which chains analysis)
+                // Enrichment already running — spawn summarization (which chains analysis)
                 maybe_spawn_summarization(&state).await
             } else {
                 false // Summarization + analysis will be chained after enrichment completes
@@ -38,10 +38,6 @@ pub async fn trigger_scan(State(state): State<Arc<AppState>>) -> Json<Value> {
 }
 
 pub async fn trigger_enrichment(State(state): State<Arc<AppState>>) -> Json<Value> {
-    if state.config.read().await.metadata.discogs.api_token.is_none() {
-        return Json(json!({ "error": "no discogs api_token configured" }));
-    }
-
     if maybe_spawn_enrichment(&state).await {
         Json(json!({ "status": "started" }))
     } else {
@@ -49,17 +45,8 @@ pub async fn trigger_enrichment(State(state): State<Arc<AppState>>) -> Json<Valu
     }
 }
 
-/// Spawn background enrichment if Discogs is configured and no enrichment is already running.
-/// Returns true if enrichment was started.
+/// Spawn background enrichment if not already running. Returns true if started.
 async fn maybe_spawn_enrichment(state: &Arc<AppState>) -> bool {
-    let discogs_config = {
-        let config = state.config.read().await;
-        if config.metadata.discogs.api_token.is_none() {
-            return false;
-        }
-        config.metadata.discogs.clone()
-    };
-
     if state.enrichment_running.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
         tracing::debug!("enrichment already running, skipping");
         return false;
@@ -67,12 +54,11 @@ async fn maybe_spawn_enrichment(state: &Arc<AppState>) -> bool {
 
     let enrich_state = state.clone();
     tokio::spawn(async move {
-        match discogs::enrich_library(&enrich_state.db, &discogs_config).await {
+        match musicbrainz::enrich_library(&enrich_state.db).await {
             Ok(result) => {
                 tracing::info!(
-                    "enrichment complete: {} albums, {} artists, {} covers",
+                    "enrichment complete: {} albums, {} covers",
                     result.albums_enriched,
-                    result.artists_enriched,
                     result.covers_downloaded,
                 );
             }
@@ -179,15 +165,7 @@ pub async fn enrich_album(
     State(state): State<Arc<AppState>>,
     Path(album_id): Path<String>,
 ) -> Json<Value> {
-    let discogs_config = {
-        let config = state.config.read().await;
-        if config.metadata.discogs.api_token.is_none() {
-            return Json(json!({ "error": "no discogs api_token configured" }));
-        }
-        config.metadata.discogs.clone()
-    };
-
-    match discogs::enrich_album(&state.db, &discogs_config, &album_id).await {
+    match musicbrainz::enrich_album(&state.db, &album_id).await {
         Ok(matched) => Json(json!({
             "status": "complete",
             "matched": matched,

@@ -39,10 +39,9 @@ pub async fn get_config(
                 "scan_interval": config.library.scan_interval,
             },
             "metadata": {
-                "discogs": {
-                    "api_token": config.metadata.discogs.api_token.as_deref().map(mask_secret),
-                    "auto_enrich": config.metadata.discogs.auto_enrich,
-                    "download_covers": config.metadata.discogs.download_covers,
+                "enrichment": {
+                    "auto_enrich": config.metadata.enrichment.auto_enrich,
+                    "download_covers": config.metadata.enrichment.download_covers,
                 },
                 "ai": {
                     "enabled": config.metadata.ai.enabled,
@@ -95,13 +94,12 @@ pub struct LibraryUpdate {
 
 #[derive(Debug, Deserialize)]
 pub struct MetadataUpdate {
-    pub discogs: Option<DiscogsUpdate>,
+    pub enrichment: Option<EnrichmentUpdate>,
     pub ai: Option<AiUpdate>,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct DiscogsUpdate {
-    pub api_token: Option<String>,
+pub struct EnrichmentUpdate {
     pub auto_enrich: Option<bool>,
     pub download_covers: Option<bool>,
 }
@@ -158,19 +156,12 @@ pub async fn update_config(
         }
 
         if let Some(meta) = update.metadata {
-            if let Some(discogs) = meta.discogs {
-                if let Some(token) = discogs.api_token {
-                    config.metadata.discogs.api_token = if token.is_empty() {
-                        None
-                    } else {
-                        Some(token)
-                    };
+            if let Some(enrichment) = meta.enrichment {
+                if let Some(auto_enrich) = enrichment.auto_enrich {
+                    config.metadata.enrichment.auto_enrich = auto_enrich;
                 }
-                if let Some(auto_enrich) = discogs.auto_enrich {
-                    config.metadata.discogs.auto_enrich = auto_enrich;
-                }
-                if let Some(download_covers) = discogs.download_covers {
-                    config.metadata.discogs.download_covers = download_covers;
+                if let Some(download_covers) = enrichment.download_covers {
+                    config.metadata.enrichment.download_covers = download_covers;
                 }
             }
 
@@ -279,10 +270,9 @@ pub async fn update_config(
             "scan_interval": config_snapshot.library.scan_interval,
         },
         "metadata": {
-            "discogs": {
-                "api_token": config_snapshot.metadata.discogs.api_token.as_deref().map(mask_secret),
-                "auto_enrich": config_snapshot.metadata.discogs.auto_enrich,
-                "download_covers": config_snapshot.metadata.discogs.download_covers,
+            "enrichment": {
+                "auto_enrich": config_snapshot.metadata.enrichment.auto_enrich,
+                "download_covers": config_snapshot.metadata.enrichment.download_covers,
             },
             "ai": {
                 "enabled": config_snapshot.metadata.ai.enabled,

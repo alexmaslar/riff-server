@@ -118,6 +118,7 @@ pub async fn generate(
                 "musicalKey": t.musical_key,
                 "loudnessLufs": t.loudness_lufs,
                 "mood": t.mood,
+                "albumPlayCount": t.album_play_count,
             })
         })
         .collect();
@@ -185,6 +186,7 @@ pub async fn refine(
                 "musicalKey": t.musical_key,
                 "loudnessLufs": t.loudness_lufs,
                 "mood": t.mood,
+                "albumPlayCount": t.album_play_count,
             })
         })
         .collect();

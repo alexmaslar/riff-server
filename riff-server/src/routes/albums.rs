@@ -79,6 +79,7 @@ pub struct SimilarAlbum {
     pub year: Option<i32>,
     pub cover_art_path: Option<String>,
     pub reason: String,
+    pub play_count: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -106,6 +107,7 @@ pub struct TrackSummary {
     pub loudness_lufs: Option<f64>,
     pub mood: Option<String>,
     pub file_size_bytes: Option<i64>,
+    pub album_play_count: Option<i64>,
 }
 
 pub async fn list_albums(
@@ -316,7 +318,7 @@ pub async fn build_album_detail(
                     t.album_id, ar.name as artist_name, t.sample_rate, t.bit_depth,
                     t.composer, COALESCE(t.bpm_tag, t.bpm_analyzed) as bpm,
                     COALESCE(t.musical_key, t.key_analyzed) as resolved_key, t.loudness_lufs, t.mood,
-                    t.file_size_bytes
+                    t.file_size_bytes, a.play_count as album_play_count
              FROM tracks t
              JOIN albums a ON t.album_id = a.id
              JOIN artists ar ON a.artist_id = ar.id
@@ -336,8 +338,8 @@ pub async fn build_album_detail(
         .bind(user_id)
         .bind(album_id)
         .fetch_one(db),
-        sqlx::query_as::<_, (String, String, String, Option<i32>, Option<String>, String)>(
-            "SELECT a.id, a.title, ar.name, a.year, a.cover_art_path, r.reason \
+        sqlx::query_as::<_, (String, String, String, Option<i32>, Option<String>, String, i64)>(
+            "SELECT a.id, a.title, ar.name, a.year, a.cover_art_path, r.reason, a.play_count \
              FROM album_recommendations r \
              JOIN albums a ON r.recommended_album_id = a.id \
              JOIN artists ar ON a.artist_id = ar.id \
@@ -372,6 +374,7 @@ pub async fn build_album_detail(
             loudness_lufs: row.get(13),
             mood: row.get(14),
             file_size_bytes: row.get(15),
+            album_play_count: row.get(16),
         })
         .collect();
 
@@ -386,13 +389,14 @@ pub async fn build_album_detail(
 
     let similar_albums: Vec<SimilarAlbum> = similar_rows
         .into_iter()
-        .map(|(id, title, artist_name, year, cover_art_path, reason)| SimilarAlbum {
+        .map(|(id, title, artist_name, year, cover_art_path, reason, play_count)| SimilarAlbum {
             id,
             title,
             artist_name,
             year,
             cover_art_path,
             reason,
+            play_count,
         })
         .collect();
 

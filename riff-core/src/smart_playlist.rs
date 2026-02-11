@@ -242,6 +242,7 @@ pub struct SelectedTrack {
     pub musical_key: Option<String>,
     pub loudness_lufs: Option<f64>,
     pub mood: Option<String>,
+    pub album_play_count: Option<i64>,
 }
 
 pub async fn generate_smart_playlist(
@@ -965,7 +966,7 @@ async fn fetch_track_details(pool: &SqlitePool, ids: &[String]) -> Result<Vec<Se
                 t.sample_rate, t.bit_depth, t.composer,
                 COALESCE(t.bpm_analyzed, t.bpm_tag) as bpm,
                 COALESCE(t.key_analyzed, t.musical_key) as musical_key,
-                t.loudness_lufs, t.mood
+                t.loudness_lufs, t.mood, a.play_count as album_play_count
          FROM tracks t
          JOIN albums a ON t.album_id = a.id
          JOIN artists ar ON a.artist_id = ar.id
@@ -1002,6 +1003,7 @@ async fn fetch_track_details(pool: &SqlitePool, ids: &[String]) -> Result<Vec<Se
                 musical_key: row.try_get("musical_key").ok().flatten(),
                 loudness_lufs: row.try_get("loudness_lufs").ok().flatten(),
                 mood: row.try_get("mood").ok().flatten(),
+                album_play_count: row.try_get("album_play_count").ok().flatten(),
             },
         );
     }

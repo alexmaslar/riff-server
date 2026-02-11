@@ -5,7 +5,7 @@ pub mod config;
 pub mod daily_mixes;
 pub mod db;
 pub mod featured;
-pub mod discogs;
+pub mod musicbrainz;
 pub mod deezer;
 pub mod mix_collage;
 pub mod models;

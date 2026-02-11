@@ -40,12 +40,12 @@ pub struct PopularTrack {
     pub rank: i32,
     pub name: String,
     pub playcount: i64,
-    pub track_id: Option<String>,
-    pub title: Option<String>,
+    pub track_id: String,
+    pub title: String,
     pub duration_seconds: Option<i32>,
     pub format: Option<String>,
-    pub album_id: Option<String>,
-    pub album_title: Option<String>,
+    pub album_id: String,
+    pub album_title: String,
     pub cover_art_path: Option<String>,
 }
 
@@ -159,13 +159,13 @@ pub async fn build_artist_detail(
         )
         .bind(artist_id)
         .fetch_all(db),
-        sqlx::query_as::<_, (String, i32, i64, Option<String>, Option<String>, Option<i32>, Option<String>, Option<String>, Option<String>, Option<String>)>(
+        sqlx::query_as::<_, (String, i32, i64, String, String, Option<i32>, Option<String>, String, String, Option<String>)>(
             "SELECT att.track_name, att.rank, att.playcount, \
                     t.id, t.title, t.duration_seconds, t.format, \
                     al.id, al.title, al.cover_art_path \
              FROM artist_top_tracks att \
-             LEFT JOIN albums al ON al.artist_id = att.artist_id \
-             LEFT JOIN tracks t ON t.album_id = al.id \
+             JOIN albums al ON al.artist_id = att.artist_id \
+             JOIN tracks t ON t.album_id = al.id \
                  AND LOWER(TRIM(t.title)) = LOWER(TRIM(att.track_name)) \
              WHERE att.artist_id = ? AND att.track_name != '' \
              ORDER BY att.rank \

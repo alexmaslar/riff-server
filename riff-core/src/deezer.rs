@@ -15,6 +15,7 @@ struct ArtistSearchResponse {
 #[derive(Deserialize)]
 struct ArtistResult {
     id: u64,
+    picture_xl: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -28,11 +29,13 @@ struct TrackResult {
     rank: i64,
 }
 
+/// Fetch top tracks for an artist from Deezer.
+/// Returns `(tracks, artist_image_url)`.
 pub async fn fetch_top_tracks(
     client: &reqwest::Client,
     artist_name: &str,
     limit: u32,
-) -> anyhow::Result<Vec<DeezerTopTrack>> {
+) -> anyhow::Result<(Vec<DeezerTopTrack>, Option<String>)> {
     debug!("Deezer: searching for artist '{}'", artist_name);
 
     let search_resp = client
@@ -46,10 +49,13 @@ pub async fn fetch_top_tracks(
     }
 
     let search_body: ArtistSearchResponse = search_resp.json().await?;
-    let artist_id = match search_body.data.first() {
-        Some(a) => a.id,
-        None => return Ok(Vec::new()),
+    let artist = match search_body.data.first() {
+        Some(a) => a,
+        None => return Ok((Vec::new(), None)),
     };
+
+    let artist_id = artist.id;
+    let image_url = artist.picture_xl.clone();
 
     debug!("Deezer: found artist id {} for '{}'", artist_id, artist_name);
 
@@ -76,5 +82,5 @@ pub async fn fetch_top_tracks(
         })
         .collect();
 
-    Ok(tracks)
+    Ok((tracks, image_url))
 }
