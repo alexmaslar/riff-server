@@ -113,7 +113,12 @@ async fn transcode_to_file(
             .map_err(|e| AppError::Internal(format!("create cache dir failed: {e}")))?;
     }
 
-    let tmp = output.with_extension("aac.tmp");
+    let unique_suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64
+        ^ (std::process::id() as u64);
+    let tmp = output.with_extension(format!("aac.{unique_suffix}.tmp"));
     let tmp_str = tmp
         .to_str()
         .ok_or_else(|| AppError::Internal("invalid cache path".into()))?;
