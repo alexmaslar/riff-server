@@ -88,7 +88,13 @@ pub async fn transcode_to_aac(opts: TranscodeOptions) -> Result<TranscodeResult,
         }
     }
 
-    // 4. Fallback: stream via pipe (permit transfers to background task)
+    // 4. Fallback: stream via pipe (permit transfers to background task).
+    // Warning: streaming has no Content-Length or Range support — iOS client
+    // can't reliably detect duration or seek within the stream.
+    tracing::warn!(
+        "transcode falling back to pipe streaming for track {} — no Content-Length will be sent",
+        opts.track_id
+    );
     let body = stream_transcode(&opts.file_path, opts.bitrate_kbps, codec, permit).await?;
     Ok(TranscodeResult::Streaming { body })
 }
