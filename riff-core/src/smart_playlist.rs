@@ -880,7 +880,7 @@ async fn extract_intent_with_ai(config: &AiConfig, prompt: &str) -> Result<Candi
     };
 
     let user_prompt = format!(
-        "Parse this playlist description into search criteria:\n\"{}\"",
+        "Parse this playlist description into search criteria. Respond with JSON only.\n\"{}\"",
         prompt
     );
 
