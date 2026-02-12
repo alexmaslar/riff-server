@@ -1,6 +1,7 @@
 pub mod albums;
 pub mod artists;
 pub mod auth;
+pub mod autoqueue;
 pub mod config;
 pub mod daily_mixes;
 pub mod favorites;

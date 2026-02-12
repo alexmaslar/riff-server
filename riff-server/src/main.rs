@@ -399,6 +399,8 @@ async fn main() -> Result<()> {
         .route("/featured-artists", get(routes::featured::get_featured_artists))
         // Podcast Backup
         .route("/podcasts/backup", get(routes::podcasts::get_backup).put(routes::podcasts::save_backup))
+        // Autoqueue
+        .route("/autoqueue", get(routes::autoqueue::get_autoqueue))
         // Daily Mixes
         .route("/mixes/daily", get(routes::daily_mixes::list_daily_mixes))
         .route("/mixes/daily/{id}", get(routes::daily_mixes::get_daily_mix))

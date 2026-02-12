@@ -43,7 +43,7 @@ pub struct MixTrack {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-fn parse_bliss(row: &sqlx::sqlite::SqliteRow) -> Option<Vec<f64>> {
+pub fn parse_bliss(row: &sqlx::sqlite::SqliteRow) -> Option<Vec<f64>> {
     let json_str: Option<String> = row.try_get("bliss_features").ok().flatten();
     json_str.and_then(|s| serde_json::from_str(&s).ok())
 }
@@ -686,23 +686,23 @@ struct ScoredTrack {
     is_compilation: bool,
 }
 
-struct ScoringContext<'a> {
-    pool: &'a SqlitePool,
-    user_id: &'a str,
-    date_str: &'a str,
-    used_track_ids: &'a [String],
-    compilation_penalty: f64,
-    bliss_centroid: Option<&'a [f64]>,
+pub struct ScoringContext<'a> {
+    pub pool: &'a SqlitePool,
+    pub user_id: &'a str,
+    pub date_str: &'a str,
+    pub used_track_ids: &'a [String],
+    pub compilation_penalty: f64,
+    pub bliss_centroid: Option<&'a [f64]>,
 }
 
 /// Per-track play statistics from play_history.
-struct PlayStats {
-    completed_plays: u32,
-    total_plays: u32,
-    last_played: Option<NaiveDateTime>,
+pub struct PlayStats {
+    pub completed_plays: u32,
+    pub total_plays: u32,
+    pub last_played: Option<NaiveDateTime>,
 }
 
-async fn score_and_select(
+pub async fn score_and_select(
     candidate_rows: &[sqlx::sqlite::SqliteRow],
     ctx: &ScoringContext<'_>,
 ) -> Result<Vec<MixTrack>> {
@@ -952,7 +952,7 @@ async fn score_and_select(
 // ─── Bliss Centroid Functions ─────────────────────────────────────────────────
 
 /// Mean bliss vector for all analyzed tracks by a given artist.
-async fn compute_artist_bliss_centroid(
+pub async fn compute_artist_bliss_centroid(
     pool: &SqlitePool,
     artist_id: &str,
 ) -> Result<Option<Vec<f64>>> {
@@ -977,7 +977,7 @@ async fn compute_artist_bliss_centroid(
 }
 
 /// Mean bliss vector of a user's top 50 most-completed tracks.
-async fn compute_user_bliss_centroid(
+pub async fn compute_user_bliss_centroid(
     pool: &SqlitePool,
     user_id: &str,
 ) -> Result<Option<Vec<f64>>> {
@@ -1009,7 +1009,7 @@ async fn compute_user_bliss_centroid(
 
 // ─── Flow Ordering (greedy nearest-neighbor) ─────────────────────────────────
 
-fn order_for_flow(tracks: &mut Vec<MixTrack>) {
+pub fn order_for_flow(tracks: &mut Vec<MixTrack>) {
     if tracks.len() < 2 {
         return;
     }
