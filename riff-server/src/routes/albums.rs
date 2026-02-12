@@ -624,39 +624,211 @@ pub async fn serve_thumbnail(original_path: &str, entity_id: &str, width: u32) -
         .unwrap()
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ListFiltersParams {
+    pub focus: Option<String>,
+}
+
+struct ParsedFilter {
+    category: String,
+    value: String,
+}
+
+fn parse_focus_filters(focus: &str) -> Vec<ParsedFilter> {
+    focus
+        .split(',')
+        .filter_map(|part| {
+            let (key, value) = part.split_once(':')?;
+            Some(ParsedFilter {
+                category: key.to_string(),
+                value: value.to_string(),
+            })
+        })
+        .collect()
+}
+
+/// Append focus filter conditions to a QueryBuilder, excluding one category.
+/// All base queries already have a WHERE clause, so this always appends " AND ...".
+fn append_focus_conditions(
+    builder: &mut QueryBuilder<Sqlite>,
+    filters: &[ParsedFilter],
+    exclude_category: &str,
+    user_id: &str,
+) {
+    for f in filters {
+        if f.category == exclude_category {
+            continue;
+        }
+        builder.push(" AND ");
+        match f.category.as_str() {
+            "genre" => {
+                builder.push("a.genre LIKE ");
+                builder.push_bind(format!("%\"{}\"%" , f.value));
+            }
+            "style" => {
+                builder.push("a.style LIKE ");
+                builder.push_bind(format!("%\"{}\"%" , f.value));
+            }
+            "decade" => {
+                if let Some(start_year) =
+                    f.value.strip_suffix('s').and_then(|y| y.parse::<i32>().ok())
+                {
+                    builder.push("(a.year >= ");
+                    builder.push_bind(start_year);
+                    builder.push(" AND a.year < ");
+                    builder.push_bind(start_year + 10);
+                    builder.push(")");
+                } else {
+                    builder.push("1=1");
+                }
+            }
+            "format" => {
+                builder.push(
+                    "EXISTS (SELECT 1 FROM tracks t2 WHERE t2.album_id = a.id AND t2.format = ",
+                );
+                builder.push_bind(f.value.clone());
+                builder.push(")");
+            }
+            "label" => {
+                builder.push("a.label = ");
+                builder.push_bind(f.value.clone());
+            }
+            "added" => {
+                let interval = match f.value.as_str() {
+                    "last_day" | "Last day" => Some("-1 day"),
+                    "last_week" | "Last week" => Some("-7 days"),
+                    "last_month" | "Last month" => Some("-1 month"),
+                    "last_year" | "Last year" => Some("-1 year"),
+                    _ => None,
+                };
+                if let Some(interval) = interval {
+                    builder.push(format!(
+                        "a.added_at >= datetime('now', '{interval}')"
+                    ));
+                } else {
+                    builder.push("1=1");
+                }
+            }
+            "favorited" => {
+                if f.value == "true" {
+                    builder.push(
+                        "EXISTS (SELECT 1 FROM favorites fav WHERE fav.entity_id = a.id AND fav.entity_type = 'album' AND fav.user_id = ",
+                    );
+                    builder.push_bind(user_id.to_string());
+                    builder.push(")");
+                } else {
+                    builder.push("1=1");
+                }
+            }
+            "played" => {
+                if f.value == "true" {
+                    builder.push(
+                        "EXISTS (SELECT 1 FROM play_history ph2 JOIN tracks t2 ON ph2.track_id = t2.id WHERE t2.album_id = a.id AND ph2.user_id = ",
+                    );
+                    builder.push_bind(user_id.to_string());
+                    builder.push(")");
+                } else {
+                    builder.push("1=1");
+                }
+            }
+            "country" => {
+                builder.push("a.country = ");
+                builder.push_bind(f.value.clone());
+            }
+            _ => {
+                builder.push("1=1");
+            }
+        }
+    }
+}
+
 pub async fn list_filters(
     State(state): State<Arc<AppState>>,
-    Extension(_claims): Extension<Claims>,
+    Extension(claims): Extension<Claims>,
+    Query(params): Query<ListFiltersParams>,
 ) -> Result<Json<Value>, AppError> {
-    let (genre_rows, style_rows, label_rows, format_rows) = tokio::join!(
-        sqlx::query_as::<_, (String,)>(
-            "SELECT DISTINCT j.value FROM albums a, json_each(a.genre) j WHERE j.value IS NOT NULL ORDER BY j.value"
-        )
-        .fetch_all(&state.db),
-        sqlx::query_as::<_, (String,)>(
-            "SELECT DISTINCT j.value FROM albums a, json_each(a.style) j WHERE j.value IS NOT NULL ORDER BY j.value"
-        )
-        .fetch_all(&state.db),
-        sqlx::query_as::<_, (String,)>(
-            "SELECT DISTINCT a.label FROM albums a WHERE a.label IS NOT NULL AND a.label != '' ORDER BY a.label"
-        )
-        .fetch_all(&state.db),
-        sqlx::query_as::<_, (String,)>(
-            "SELECT DISTINCT t.format FROM tracks t WHERE t.format IS NOT NULL ORDER BY t.format"
-        )
-        .fetch_all(&state.db),
-    );
+    let filters = params
+        .focus
+        .as_deref()
+        .map(parse_focus_filters)
+        .unwrap_or_default();
 
-    let genres: Vec<String> = genre_rows?.into_iter().map(|(v,)| v).collect();
-    let styles: Vec<String> = style_rows?.into_iter().map(|(v,)| v).collect();
-    let labels: Vec<String> = label_rows?.into_iter().map(|(v,)| v).collect();
-    let formats: Vec<String> = format_rows?.into_iter().map(|(v,)| v).collect();
+    // Each category query applies all filters EXCEPT its own category,
+    // so the user can still switch within a category while cross-category
+    // options narrow to only what would return results.
+
+    let genres: Vec<String> = {
+        let mut qb = QueryBuilder::<Sqlite>::new(
+            "SELECT DISTINCT j.value FROM albums a \
+             JOIN artists ar ON a.artist_id = ar.id, json_each(a.genre) j \
+             WHERE j.value IS NOT NULL",
+        );
+        append_focus_conditions(&mut qb, &filters, "genre", &claims.sub);
+        qb.push(" ORDER BY j.value");
+        let rows = qb.build().fetch_all(&state.db).await?;
+        rows.iter().map(|r| r.get(0)).collect()
+    };
+
+    let styles: Vec<String> = {
+        let mut qb = QueryBuilder::<Sqlite>::new(
+            "SELECT DISTINCT j.value FROM albums a \
+             JOIN artists ar ON a.artist_id = ar.id, json_each(a.style) j \
+             WHERE j.value IS NOT NULL",
+        );
+        append_focus_conditions(&mut qb, &filters, "style", &claims.sub);
+        qb.push(" ORDER BY j.value");
+        let rows = qb.build().fetch_all(&state.db).await?;
+        rows.iter().map(|r| r.get(0)).collect()
+    };
+
+    let labels: Vec<String> = {
+        let mut qb = QueryBuilder::<Sqlite>::new(
+            "SELECT DISTINCT a.label FROM albums a \
+             JOIN artists ar ON a.artist_id = ar.id \
+             WHERE a.label IS NOT NULL AND a.label != ''",
+        );
+        append_focus_conditions(&mut qb, &filters, "label", &claims.sub);
+        qb.push(" ORDER BY a.label");
+        let rows = qb.build().fetch_all(&state.db).await?;
+        rows.iter().map(|r| r.get(0)).collect()
+    };
+
+    let formats: Vec<String> = {
+        let mut qb = QueryBuilder::<Sqlite>::new(
+            "SELECT DISTINCT t.format FROM tracks t \
+             JOIN albums a ON t.album_id = a.id \
+             JOIN artists ar ON a.artist_id = ar.id \
+             WHERE t.format IS NOT NULL",
+        );
+        append_focus_conditions(&mut qb, &filters, "format", &claims.sub);
+        qb.push(" ORDER BY t.format");
+        let rows = qb.build().fetch_all(&state.db).await?;
+        rows.iter().map(|r| r.get(0)).collect()
+    };
+
+    let decades: Vec<String> = {
+        let mut qb = QueryBuilder::<Sqlite>::new(
+            "SELECT DISTINCT (a.year / 10 * 10) as decade_start FROM albums a \
+             JOIN artists ar ON a.artist_id = ar.id \
+             WHERE a.year IS NOT NULL",
+        );
+        append_focus_conditions(&mut qb, &filters, "decade", &claims.sub);
+        qb.push(" ORDER BY decade_start");
+        let rows = qb.build().fetch_all(&state.db).await?;
+        rows.iter()
+            .map(|r| {
+                let year: i32 = r.get(0);
+                format!("{year}s")
+            })
+            .collect()
+    };
 
     Ok(Json(json!({
         "genres": genres,
         "styles": styles,
         "labels": labels,
         "formats": formats,
+        "decades": decades,
     })))
 }
 
