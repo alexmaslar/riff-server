@@ -179,108 +179,59 @@ pub async fn listening_stats(
     Extension(claims): Extension<Claims>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, AppError> {
-    let is_weekly = params.get("period").map(|s| s.as_str()) == Some("week");
+    let date_filter = match params.get("period").map(|s| s.as_str()) {
+        Some("week") => "AND ph.played_at >= datetime('now', '-7 days')",
+        Some("month") => "AND ph.played_at >= datetime('now', '-30 days')",
+        Some("year") => "AND ph.played_at >= datetime('now', '-1 year')",
+        _ => "", // "all" or missing = no date filter
+    };
 
     // Run all stats queries concurrently
-    let (top_artists, top_albums, genre_rows, totals) = if is_weekly {
-        tokio::join!(
-            sqlx::query(
-                "SELECT ar.id, ar.name, ar.image_url, COUNT(*) as plays, SUM(t.duration_seconds) as listening_seconds
-                 FROM play_history ph
-                 JOIN tracks t ON ph.track_id = t.id
-                 JOIN albums a ON t.album_id = a.id
-                 JOIN artists ar ON a.artist_id = ar.id
-                 WHERE ph.user_id = ? AND ph.completed = 1 AND ph.played_at >= datetime('now', '-7 days')
-                 GROUP BY ar.id
-                 ORDER BY plays DESC
-                 LIMIT 5",
-            )
-            .bind(&claims.sub)
-            .fetch_all(&state.db),
-            sqlx::query(
-                "SELECT a.id, a.title, ar.name as artist_name, a.cover_art_path, COUNT(*) as plays
-                 FROM play_history ph
-                 JOIN tracks t ON ph.track_id = t.id
-                 JOIN albums a ON t.album_id = a.id
-                 JOIN artists ar ON a.artist_id = ar.id
-                 WHERE ph.user_id = ? AND ph.completed = 1 AND ph.played_at >= datetime('now', '-7 days')
-                 GROUP BY a.id
-                 ORDER BY plays DESC
-                 LIMIT 5",
-            )
-            .bind(&claims.sub)
-            .fetch_all(&state.db),
-            sqlx::query(
-                "SELECT j.value as genre_name, SUM(t.duration_seconds) as genre_seconds
-                 FROM play_history ph
-                 JOIN tracks t ON ph.track_id = t.id
-                 JOIN albums a ON t.album_id = a.id,
-                 json_each(CASE WHEN a.genre = '[]' OR a.genre IS NULL THEN '[\"Unknown\"]' ELSE a.genre END) j
-                 WHERE ph.user_id = ? AND ph.completed = 1 AND ph.played_at >= datetime('now', '-7 days')
-                 GROUP BY j.value
-                 ORDER BY genre_seconds DESC",
-            )
-            .bind(&claims.sub)
-            .fetch_all(&state.db),
-            sqlx::query(
-                "SELECT COUNT(*) as total_plays, COALESCE(SUM(t.duration_seconds), 0) as total_seconds
-                 FROM play_history ph
-                 JOIN tracks t ON ph.track_id = t.id
-                 WHERE ph.user_id = ? AND ph.completed = 1 AND ph.played_at >= datetime('now', '-7 days')",
-            )
-            .bind(&claims.sub)
-            .fetch_one(&state.db),
-        )
-    } else {
-        tokio::join!(
-            sqlx::query(
-                "SELECT ar.id, ar.name, ar.image_url, COUNT(*) as plays, SUM(t.duration_seconds) as listening_seconds
-                 FROM play_history ph
-                 JOIN tracks t ON ph.track_id = t.id
-                 JOIN albums a ON t.album_id = a.id
-                 JOIN artists ar ON a.artist_id = ar.id
-                 WHERE ph.user_id = ? AND ph.completed = 1
-                 GROUP BY ar.id
-                 ORDER BY plays DESC
-                 LIMIT 5",
-            )
-            .bind(&claims.sub)
-            .fetch_all(&state.db),
-            sqlx::query(
-                "SELECT a.id, a.title, ar.name as artist_name, a.cover_art_path, COUNT(*) as plays
-                 FROM play_history ph
-                 JOIN tracks t ON ph.track_id = t.id
-                 JOIN albums a ON t.album_id = a.id
-                 JOIN artists ar ON a.artist_id = ar.id
-                 WHERE ph.user_id = ? AND ph.completed = 1
-                 GROUP BY a.id
-                 ORDER BY plays DESC
-                 LIMIT 5",
-            )
-            .bind(&claims.sub)
-            .fetch_all(&state.db),
-            sqlx::query(
-                "SELECT j.value as genre_name, SUM(t.duration_seconds) as genre_seconds
-                 FROM play_history ph
-                 JOIN tracks t ON ph.track_id = t.id
-                 JOIN albums a ON t.album_id = a.id,
-                 json_each(CASE WHEN a.genre = '[]' OR a.genre IS NULL THEN '[\"Unknown\"]' ELSE a.genre END) j
-                 WHERE ph.user_id = ? AND ph.completed = 1
-                 GROUP BY j.value
-                 ORDER BY genre_seconds DESC",
-            )
-            .bind(&claims.sub)
-            .fetch_all(&state.db),
-            sqlx::query(
-                "SELECT COUNT(*) as total_plays, COALESCE(SUM(t.duration_seconds), 0) as total_seconds
-                 FROM play_history ph
-                 JOIN tracks t ON ph.track_id = t.id
-                 WHERE ph.user_id = ? AND ph.completed = 1",
-            )
-            .bind(&claims.sub)
-            .fetch_one(&state.db),
-        )
-    };
+    let artists_sql = format!(
+        "SELECT ar.id, ar.name, ar.image_url, COUNT(*) as plays, SUM(t.duration_seconds) as listening_seconds
+         FROM play_history ph
+         JOIN tracks t ON ph.track_id = t.id
+         JOIN albums a ON t.album_id = a.id
+         JOIN artists ar ON a.artist_id = ar.id
+         WHERE ph.user_id = ? AND ph.completed = 1 {date_filter}
+         GROUP BY ar.id
+         ORDER BY listening_seconds DESC
+         LIMIT 5"
+    );
+    let albums_sql = format!(
+        "SELECT a.id, a.title, ar.name as artist_name, a.cover_art_path, COUNT(*) as plays, SUM(t.duration_seconds) as listening_seconds
+         FROM play_history ph
+         JOIN tracks t ON ph.track_id = t.id
+         JOIN albums a ON t.album_id = a.id
+         JOIN artists ar ON a.artist_id = ar.id
+         WHERE ph.user_id = ? AND ph.completed = 1 {date_filter}
+         GROUP BY a.id
+         ORDER BY listening_seconds DESC
+         LIMIT 5"
+    );
+    let genres_sql = format!(
+        "SELECT j.value as genre_name, SUM(t.duration_seconds) as genre_seconds
+         FROM play_history ph
+         JOIN tracks t ON ph.track_id = t.id
+         JOIN albums a ON t.album_id = a.id,
+         json_each(CASE WHEN a.genre = '[]' OR a.genre IS NULL THEN '[\"Unknown\"]' ELSE a.genre END) j
+         WHERE ph.user_id = ? AND ph.completed = 1 {date_filter}
+         GROUP BY j.value
+         ORDER BY genre_seconds DESC"
+    );
+    let totals_sql = format!(
+        "SELECT COUNT(*) as total_plays, COALESCE(SUM(t.duration_seconds), 0) as total_seconds
+         FROM play_history ph
+         JOIN tracks t ON ph.track_id = t.id
+         WHERE ph.user_id = ? AND ph.completed = 1 {date_filter}"
+    );
+
+    let (top_artists, top_albums, genre_rows, totals) = tokio::join!(
+        sqlx::query(&artists_sql).bind(&claims.sub).fetch_all(&state.db),
+        sqlx::query(&albums_sql).bind(&claims.sub).fetch_all(&state.db),
+        sqlx::query(&genres_sql).bind(&claims.sub).fetch_all(&state.db),
+        sqlx::query(&totals_sql).bind(&claims.sub).fetch_one(&state.db),
+    );
 
     let top_artists = top_artists?;
     let top_albums = top_albums?;
@@ -309,6 +260,7 @@ pub async fn listening_stats(
                 "artistName": row.get::<String, _>("artist_name"),
                 "coverArtPath": row.get::<Option<String>, _>("cover_art_path"),
                 "plays": row.get::<i64, _>("plays"),
+                "listeningSeconds": row.get::<i64, _>("listening_seconds"),
             })
         })
         .collect();
