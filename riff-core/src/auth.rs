@@ -104,3 +104,104 @@ pub async fn bootstrap_admin(pool: &SqlitePool, config: &Config) -> anyhow::Resu
     tracing::info!("created admin user '{}'", username);
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_hash_and_verify_password() {
+        let password = "test_password_123";
+        let hash = hash_password(password).unwrap();
+
+        assert!(hash.starts_with("$argon2"));
+        assert!(verify_password(password, &hash).unwrap());
+    }
+
+    #[test]
+    fn test_wrong_password_fails_verification() {
+        let hash = hash_password("correct_password").unwrap();
+        assert!(!verify_password("wrong_password", &hash).unwrap());
+    }
+
+    #[test]
+    fn test_different_hashes_for_same_password() {
+        let password = "same_password";
+        let hash1 = hash_password(password).unwrap();
+        let hash2 = hash_password(password).unwrap();
+
+        // Different salts should produce different hashes
+        assert_ne!(hash1, hash2);
+        // But both should verify
+        assert!(verify_password(password, &hash1).unwrap());
+        assert!(verify_password(password, &hash2).unwrap());
+    }
+
+    #[test]
+    fn test_create_and_validate_token() {
+        let user_id = Uuid::new_v4();
+        let secret = "test_jwt_secret_key";
+
+        let token = create_token(&user_id, "testuser", "admin", secret).unwrap();
+        assert!(!token.is_empty());
+
+        let claims = validate_token(&token, secret).unwrap();
+        assert_eq!(claims.sub, user_id.to_string());
+        assert_eq!(claims.username, "testuser");
+        assert_eq!(claims.role, "admin");
+    }
+
+    #[test]
+    fn test_token_with_wrong_secret_fails() {
+        let user_id = Uuid::new_v4();
+        let token = create_token(&user_id, "user", "user", "secret1").unwrap();
+
+        let result = validate_token(&token, "secret2");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_token_expiration_is_future() {
+        let user_id = Uuid::new_v4();
+        let secret = "test_secret";
+        let token = create_token(&user_id, "user", "user", secret).unwrap();
+
+        let claims = validate_token(&token, secret).unwrap();
+        let now = Utc::now().timestamp() as usize;
+        assert!(claims.exp > now);
+    }
+
+    #[test]
+    fn test_token_contains_correct_role() {
+        let user_id = Uuid::new_v4();
+        let secret = "test_secret";
+
+        let admin_token = create_token(&user_id, "admin", "admin", secret).unwrap();
+        let user_token = create_token(&user_id, "user", "user", secret).unwrap();
+
+        let admin_claims = validate_token(&admin_token, secret).unwrap();
+        let user_claims = validate_token(&user_token, secret).unwrap();
+
+        assert_eq!(admin_claims.role, "admin");
+        assert_eq!(user_claims.role, "user");
+    }
+
+    #[test]
+    fn test_invalid_token_string_fails() {
+        let result = validate_token("not.a.valid.token", "secret");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_empty_password_hashes() {
+        let hash = hash_password("").unwrap();
+        assert!(verify_password("", &hash).unwrap());
+        assert!(!verify_password("notempty", &hash).unwrap());
+    }
+
+    #[test]
+    fn test_invalid_hash_returns_error() {
+        let result = verify_password("password", "not_a_valid_hash");
+        assert!(result.is_err());
+    }
+}

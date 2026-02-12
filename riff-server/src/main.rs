@@ -387,6 +387,8 @@ async fn main() -> Result<()> {
         .route("/history/albums", get(routes::history::recently_played_albums))
         .route("/history/continue", get(routes::history::continue_listening))
         .route("/history/stats", get(routes::history::listening_stats))
+        // Download recommendations
+        .route("/recommendations/downloads", get(routes::history::download_recommendations))
         // Favorites
         .route("/favorites", post(routes::favorites::toggle_favorite).get(routes::favorites::list_favorites))
         .route("/favorites/check", get(routes::favorites::check_favorite))

@@ -383,3 +383,225 @@ fn parse_track_filename(filename: &str) -> String {
 
     trimmed.to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    // -- detect_format --
+
+    #[test]
+    fn test_detect_format_flac() {
+        assert_eq!(detect_format(Path::new("song.flac")), "FLAC");
+    }
+
+    #[test]
+    fn test_detect_format_m4a() {
+        assert_eq!(detect_format(Path::new("song.m4a")), "ALAC");
+    }
+
+    #[test]
+    fn test_detect_format_wav() {
+        assert_eq!(detect_format(Path::new("song.wav")), "WAV");
+    }
+
+    #[test]
+    fn test_detect_format_aiff() {
+        assert_eq!(detect_format(Path::new("song.aiff")), "AIFF");
+        assert_eq!(detect_format(Path::new("song.aif")), "AIFF");
+    }
+
+    #[test]
+    fn test_detect_format_case_insensitive() {
+        assert_eq!(detect_format(Path::new("song.FLAC")), "FLAC");
+        assert_eq!(detect_format(Path::new("song.Wav")), "WAV");
+    }
+
+    #[test]
+    fn test_detect_format_unknown_extension() {
+        assert_eq!(detect_format(Path::new("song.mp3")), "MP3");
+        assert_eq!(detect_format(Path::new("song.ogg")), "OGG");
+    }
+
+    #[test]
+    fn test_detect_format_no_extension() {
+        assert_eq!(detect_format(Path::new("song")), "UNKNOWN");
+    }
+
+    // -- filename_without_ext --
+
+    #[test]
+    fn test_filename_without_ext() {
+        assert_eq!(filename_without_ext(Path::new("/music/01 - Song.flac")), "01 - Song");
+        assert_eq!(filename_without_ext(Path::new("track.wav")), "track");
+    }
+
+    #[test]
+    fn test_filename_without_ext_no_ext() {
+        assert_eq!(filename_without_ext(Path::new("noext")), "noext");
+    }
+
+    // -- parse_track_filename --
+
+    #[test]
+    fn test_parse_track_filename_dash_pattern() {
+        assert_eq!(parse_track_filename("01 - Paranoid Android"), "Paranoid Android");
+        assert_eq!(parse_track_filename("2 - Lucky"), "Lucky");
+        assert_eq!(parse_track_filename("12 - The Tourist"), "The Tourist");
+    }
+
+    #[test]
+    fn test_parse_track_filename_dot_pattern() {
+        assert_eq!(parse_track_filename("01. Paranoid Android"), "Paranoid Android");
+        assert_eq!(parse_track_filename("3. Subterranean Homesick Alien"), "Subterranean Homesick Alien");
+    }
+
+    #[test]
+    fn test_parse_track_filename_no_number_prefix() {
+        assert_eq!(parse_track_filename("Paranoid Android"), "Paranoid Android");
+        assert_eq!(parse_track_filename("Song Title"), "Song Title");
+    }
+
+    #[test]
+    fn test_parse_track_filename_artist_dash_title() {
+        // "Artist - Title" should NOT strip because "Artist" is not all digits
+        assert_eq!(parse_track_filename("Radiohead - Creep"), "Radiohead - Creep");
+    }
+
+    // -- parse_disc_folder --
+
+    #[test]
+    fn test_parse_disc_folder_cd() {
+        assert_eq!(parse_disc_folder("CD1"), Some(1));
+        assert_eq!(parse_disc_folder("CD 2"), Some(2));
+        assert_eq!(parse_disc_folder("cd3"), Some(3));
+    }
+
+    #[test]
+    fn test_parse_disc_folder_disc() {
+        assert_eq!(parse_disc_folder("Disc 1"), Some(1));
+        assert_eq!(parse_disc_folder("Disc1"), Some(1));
+        assert_eq!(parse_disc_folder("disc 2"), Some(2));
+    }
+
+    #[test]
+    fn test_parse_disc_folder_non_disc() {
+        assert_eq!(parse_disc_folder("Extras"), None);
+        assert_eq!(parse_disc_folder("Bonus"), None);
+        assert_eq!(parse_disc_folder(""), None);
+    }
+
+    // -- parse_album_dir --
+
+    #[test]
+    fn test_parse_album_dir_with_year() {
+        let (album, year) = parse_album_dir("OK Computer (1997)");
+        assert_eq!(album, "OK Computer");
+        assert_eq!(year, Some(1997));
+    }
+
+    #[test]
+    fn test_parse_album_dir_without_year() {
+        let (album, year) = parse_album_dir("OK Computer");
+        assert_eq!(album, "OK Computer");
+        assert_eq!(year, None);
+    }
+
+    #[test]
+    fn test_parse_album_dir_invalid_year() {
+        let (album, year) = parse_album_dir("Album (abc)");
+        assert_eq!(album, "Album (abc)");
+        assert_eq!(year, None);
+    }
+
+    #[test]
+    fn test_parse_album_dir_year_out_of_range() {
+        let (album, year) = parse_album_dir("Album (1800)");
+        assert_eq!(album, "Album (1800)");
+        assert_eq!(year, None);
+    }
+
+    // -- parse_artist_album_dir --
+
+    #[test]
+    fn test_parse_artist_album_dir() {
+        let result = parse_artist_album_dir("Radiohead - OK Computer (1997)");
+        assert!(result.is_some());
+        let (artist, album, year) = result.unwrap();
+        assert_eq!(artist, "Radiohead");
+        assert_eq!(album, "OK Computer");
+        assert_eq!(year, Some(1997));
+    }
+
+    #[test]
+    fn test_parse_artist_album_dir_no_year() {
+        let result = parse_artist_album_dir("Radiohead - OK Computer");
+        assert!(result.is_some());
+        let (artist, album, year) = result.unwrap();
+        assert_eq!(artist, "Radiohead");
+        assert_eq!(album, "OK Computer");
+        assert_eq!(year, None);
+    }
+
+    #[test]
+    fn test_parse_artist_album_dir_no_separator() {
+        assert!(parse_artist_album_dir("Just An Album Name").is_none());
+    }
+
+    #[test]
+    fn test_parse_artist_album_dir_empty_parts() {
+        assert!(parse_artist_album_dir(" - Album").is_none());
+        assert!(parse_artist_album_dir("Artist - ").is_none());
+    }
+
+    // -- metadata_from_path --
+
+    #[test]
+    fn test_metadata_from_path_flat_structure() {
+        let library = PathBuf::from("/music");
+        let path = PathBuf::from("/music/Radiohead - OK Computer (1997)/01 - Airbag.flac");
+
+        let meta = metadata_from_path(&path, &library).unwrap();
+        assert_eq!(meta.artist, "Radiohead");
+        assert_eq!(meta.album, "OK Computer");
+        assert_eq!(meta.year, Some(1997));
+        assert_eq!(meta.title, "Airbag");
+        assert_eq!(meta.track_number, 1);
+        assert_eq!(meta.format, "FLAC");
+    }
+
+    #[test]
+    fn test_metadata_from_path_two_level_structure() {
+        let library = PathBuf::from("/music");
+        let path = PathBuf::from("/music/Radiohead/OK Computer (1997)/02 - Paranoid Android.flac");
+
+        let meta = metadata_from_path(&path, &library).unwrap();
+        assert_eq!(meta.artist, "Radiohead");
+        assert_eq!(meta.album, "OK Computer");
+        assert_eq!(meta.year, Some(1997));
+        assert_eq!(meta.title, "Paranoid Android");
+        assert_eq!(meta.track_number, 2);
+    }
+
+    #[test]
+    fn test_metadata_from_path_with_disc_subfolder() {
+        let library = PathBuf::from("/music");
+        let path = PathBuf::from("/music/Radiohead/OK Computer (1997)/CD1/01 - Airbag.flac");
+
+        let meta = metadata_from_path(&path, &library).unwrap();
+        assert_eq!(meta.artist, "Radiohead");
+        assert_eq!(meta.album, "OK Computer");
+        assert_eq!(meta.disc_number, 1);
+    }
+
+    #[test]
+    fn test_metadata_from_path_disc2() {
+        let library = PathBuf::from("/music");
+        let path = PathBuf::from("/music/Artist/Album (2020)/Disc 2/05 - Track.flac");
+
+        let meta = metadata_from_path(&path, &library).unwrap();
+        assert_eq!(meta.disc_number, 2);
+        assert_eq!(meta.track_number, 5);
+    }
+}

@@ -277,6 +277,11 @@ impl Config {
         }
     }
 
+    pub fn load_from_str(yaml: &str) -> anyhow::Result<Self> {
+        let config: Config = serde_yaml_ng::from_str(yaml)?;
+        Ok(config)
+    }
+
     pub fn save(&self) -> anyhow::Result<()> {
         let config_dir = dirs::config_dir()
             .ok_or_else(|| anyhow::anyhow!("could not determine config directory"))?
@@ -286,5 +291,149 @@ impl Config {
         let yaml = serde_yaml_ng::to_string(self)?;
         std::fs::write(config_dir.join("config.yaml"), yaml)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_config() {
+        let config = Config::default();
+        assert_eq!(config.server.port, 8080);
+        assert_eq!(config.server.https_port, 8443);
+        assert!(config.server.cors_origins.is_none());
+        assert!(config.library.path.is_none());
+        assert_eq!(config.library.scan_interval, 3600);
+        assert_eq!(config.auth.admin_username, "admin");
+        assert!(config.auth.admin_password.is_none());
+        assert_eq!(config.auth.session_duration, "30d");
+        assert!(!config.auth.jwt_secret.is_empty());
+    }
+
+    #[test]
+    fn test_default_streaming_config() {
+        let config = StreamingConfig::default();
+        assert_eq!(config.remote_bitrate, 256);
+        assert_eq!(config.remote_format, "aac");
+        assert_eq!(config.max_transcode_processes, 2);
+    }
+
+    #[test]
+    fn test_default_ai_config() {
+        let config = AiConfig::default();
+        assert!(!config.enabled);
+        assert!(config.api_key.is_none());
+        assert!(config.album_summaries);
+        assert!(config.album_ratings);
+        assert!(config.album_recommendations);
+        assert!(config.artist_bios);
+        assert!(config.artist_recommendations);
+        assert!(config.playlist_generation);
+    }
+
+    #[test]
+    fn test_default_enrichment_config() {
+        let config = EnrichmentConfig::default();
+        assert!(config.auto_enrich);
+        assert!(config.download_covers);
+    }
+
+    #[test]
+    fn test_default_remote_access_config() {
+        let config = RemoteAccessConfig::default();
+        assert!(!config.enabled);
+        assert!(config.external_url.is_none());
+    }
+
+    #[test]
+    fn test_remote_access_serde_default_method() {
+        // When remote_access section exists but method is omitted,
+        // serde uses the default_remote_method function
+        let yaml = "remote_access:\n  enabled: false\n";
+        let config = Config::load_from_str(yaml).unwrap();
+        assert_eq!(config.remote_access.method, "upnp");
+    }
+
+    #[test]
+    fn test_load_from_yaml_string() {
+        let yaml = r#"
+server:
+  port: 9090
+  https_port: 9443
+library:
+  path: /music
+  scan_interval: 7200
+auth:
+  admin_username: testadmin
+  session_duration: 7d
+"#;
+        let config = Config::load_from_str(yaml).unwrap();
+        assert_eq!(config.server.port, 9090);
+        assert_eq!(config.server.https_port, 9443);
+        assert_eq!(config.library.path.as_deref(), Some("/music"));
+        assert_eq!(config.library.scan_interval, 7200);
+        assert_eq!(config.auth.admin_username, "testadmin");
+        assert_eq!(config.auth.session_duration, "7d");
+    }
+
+    #[test]
+    fn test_load_empty_yaml_uses_defaults() {
+        let config = Config::load_from_str("{}").unwrap();
+        assert_eq!(config.server.port, 8080);
+        assert_eq!(config.library.scan_interval, 3600);
+        assert_eq!(config.auth.admin_username, "admin");
+    }
+
+    #[test]
+    fn test_load_partial_yaml() {
+        let yaml = r#"
+server:
+  port: 3000
+"#;
+        let config = Config::load_from_str(yaml).unwrap();
+        assert_eq!(config.server.port, 3000);
+        // Other fields should use defaults
+        assert_eq!(config.server.https_port, 8443);
+        assert_eq!(config.library.scan_interval, 3600);
+    }
+
+    #[test]
+    fn test_ai_provider_deserialize() {
+        let yaml = r#"
+metadata:
+  ai:
+    enabled: true
+    provider: anthropic
+"#;
+        let config = Config::load_from_str(yaml).unwrap();
+        assert!(config.metadata.ai.enabled);
+        assert!(matches!(config.metadata.ai.provider, AiProvider::Anthropic));
+    }
+
+    #[test]
+    fn test_streaming_config_custom() {
+        let yaml = r#"
+streaming:
+  remote_bitrate: 128
+  remote_format: opus
+  max_transcode_processes: 4
+"#;
+        let config = Config::load_from_str(yaml).unwrap();
+        assert_eq!(config.streaming.remote_bitrate, 128);
+        assert_eq!(config.streaming.remote_format, "opus");
+        assert_eq!(config.streaming.max_transcode_processes, 4);
+    }
+
+    #[test]
+    fn test_config_serialize_roundtrip() {
+        let config = Config::default();
+        let yaml = serde_yaml_ng::to_string(&config).unwrap();
+        let roundtripped = Config::load_from_str(&yaml).unwrap();
+        assert_eq!(config.server.port, roundtripped.server.port);
+        assert_eq!(config.server.https_port, roundtripped.server.https_port);
+        assert_eq!(config.library.scan_interval, roundtripped.library.scan_interval);
+        assert_eq!(config.streaming.remote_bitrate, roundtripped.streaming.remote_bitrate);
     }
 }
