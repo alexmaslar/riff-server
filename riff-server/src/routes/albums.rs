@@ -190,10 +190,10 @@ pub async fn list_albums(
                 }
                 "added" => {
                     let interval = match value {
-                        "last_day" => Some("-1 day"),
-                        "last_week" => Some("-7 days"),
-                        "last_month" => Some("-1 month"),
-                        "last_year" => Some("-1 year"),
+                        "last_day" | "Last day" => Some("-1 day"),
+                        "last_week" | "Last week" => Some("-7 days"),
+                        "last_month" | "Last month" => Some("-1 month"),
+                        "last_year" | "Last year" => Some("-1 year"),
                         _ => None,
                     };
                     if let Some(interval) = interval {
@@ -622,6 +622,42 @@ pub async fn serve_thumbnail(original_path: &str, entity_id: &str, width: u32) -
         .header(header::CACHE_CONTROL, "public, max-age=86400")
         .body(Body::from_stream(stream))
         .unwrap()
+}
+
+pub async fn list_filters(
+    State(state): State<Arc<AppState>>,
+    Extension(_claims): Extension<Claims>,
+) -> Result<Json<Value>, AppError> {
+    let (genre_rows, style_rows, label_rows, format_rows) = tokio::join!(
+        sqlx::query_as::<_, (String,)>(
+            "SELECT DISTINCT j.value FROM albums a, json_each(a.genre) j WHERE j.value IS NOT NULL ORDER BY j.value"
+        )
+        .fetch_all(&state.db),
+        sqlx::query_as::<_, (String,)>(
+            "SELECT DISTINCT j.value FROM albums a, json_each(a.style) j WHERE j.value IS NOT NULL ORDER BY j.value"
+        )
+        .fetch_all(&state.db),
+        sqlx::query_as::<_, (String,)>(
+            "SELECT DISTINCT a.label FROM albums a WHERE a.label IS NOT NULL AND a.label != '' ORDER BY a.label"
+        )
+        .fetch_all(&state.db),
+        sqlx::query_as::<_, (String,)>(
+            "SELECT DISTINCT t.format FROM tracks t WHERE t.format IS NOT NULL ORDER BY t.format"
+        )
+        .fetch_all(&state.db),
+    );
+
+    let genres: Vec<String> = genre_rows?.into_iter().map(|(v,)| v).collect();
+    let styles: Vec<String> = style_rows?.into_iter().map(|(v,)| v).collect();
+    let labels: Vec<String> = label_rows?.into_iter().map(|(v,)| v).collect();
+    let formats: Vec<String> = format_rows?.into_iter().map(|(v,)| v).collect();
+
+    Ok(Json(json!({
+        "genres": genres,
+        "styles": styles,
+        "labels": labels,
+        "formats": formats,
+    })))
 }
 
 pub async fn increment_play_count(

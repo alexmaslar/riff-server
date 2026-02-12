@@ -371,6 +371,7 @@ async fn main() -> Result<()> {
         .route("/artists", get(routes::artists::list_artists))
         .route("/artists/{id}", get(routes::artists::get_artist))
         .route("/albums", get(routes::albums::list_albums))
+        .route("/albums/filters", get(routes::albums::list_filters))
         .route("/albums/{id}", get(routes::albums::get_album))
         .route("/albums/{id}/play", post(routes::albums::increment_play_count))
         .route("/playlists", get(routes::playlists::list_playlists).post(routes::playlists::create_playlist))
