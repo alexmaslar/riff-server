@@ -81,6 +81,7 @@ pub async fn disable(
 const VALID_METHODS: &[&str] = &["upnp", "port_forwarding", "external_url"];
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ConfigureRequest {
     pub method: Option<String>,
     pub external_url: Option<String>,

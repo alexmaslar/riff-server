@@ -11,12 +11,14 @@ use crate::error::AppError;
 use crate::AppState;
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GenerateBody {
     pub prompt: String,
     pub track_count: Option<u32>,
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RefineBody {
     pub prompt: String,
     pub current_track_ids: Vec<String>,
@@ -24,6 +26,7 @@ pub struct RefineBody {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SaveBody {
     pub title: String,
     pub description: Option<String>,

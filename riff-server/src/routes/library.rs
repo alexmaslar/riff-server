@@ -510,6 +510,7 @@ async fn maybe_spawn_artist_recommendations(state: &Arc<AppState>) -> bool {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ClearAiDataRequest {
     pub album_summaries: Option<bool>,
     pub album_ratings: Option<bool>,
