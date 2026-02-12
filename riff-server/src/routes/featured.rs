@@ -14,11 +14,11 @@ type CachedJson = ([(header::HeaderName, String); 1], Json<Value>);
 
 fn daily_cache_header() -> [(header::HeaderName, String); 1] {
     let now = Utc::now();
-    let end_of_day = (now + chrono::Duration::days(1))
+    let remaining = (now + chrono::Duration::days(1))
         .date_naive()
         .and_hms_opt(0, 0, 0)
-        .unwrap();
-    let remaining = (end_of_day - now.naive_utc()).num_seconds().max(60);
+        .map(|end_of_day| (end_of_day - now.naive_utc()).num_seconds().max(60))
+        .unwrap_or(3600);
     [(header::CACHE_CONTROL, format!("private, max-age={remaining}"))]
 }
 

@@ -178,7 +178,7 @@ pub async fn build_artist_detail(
     let albums = albums_result?;
     let is_favorited = fav_result.map(|(count,)| count > 0).unwrap_or(false);
     let similar_rows = similar_result?;
-    let top_tracks_rows = top_tracks_result.unwrap_or_default();
+    let top_tracks_rows = top_tracks_result?;
 
     let album_summaries: Vec<AlbumSummary> = albums
         .into_iter()

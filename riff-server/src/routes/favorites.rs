@@ -32,33 +32,27 @@ pub struct CheckFavoriteParams {
     pub entity_id: String,
 }
 
-/// POST /favorites — Toggle favorite (check exists -> DELETE or INSERT)
+/// POST /favorites — Toggle favorite (atomic: try DELETE first, INSERT if nothing was removed)
 pub async fn toggle_favorite(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<Claims>,
     Json(body): Json<ToggleFavoriteBody>,
 ) -> Result<Json<Value>, AppError> {
-    let (count,) = sqlx::query_as::<_, (i64,)>(
-        "SELECT COUNT(*) FROM favorites WHERE user_id = ? AND entity_type = ? AND entity_id = ?",
+    // Atomic per-statement in SQLite WAL mode: try to delete first.
+    let result = sqlx::query(
+        "DELETE FROM favorites WHERE user_id = ? AND entity_type = ? AND entity_id = ?",
     )
     .bind(&claims.sub)
     .bind(&body.entity_type)
     .bind(&body.entity_id)
-    .fetch_one(&state.db)
+    .execute(&state.db)
     .await?;
 
-    if count > 0 {
-        sqlx::query(
-            "DELETE FROM favorites WHERE user_id = ? AND entity_type = ? AND entity_id = ?",
-        )
-        .bind(&claims.sub)
-        .bind(&body.entity_type)
-        .bind(&body.entity_id)
-        .execute(&state.db)
-        .await?;
-
+    if result.rows_affected() > 0 {
+        // Was favorited, now removed
         Ok(Json(json!({ "favorited": false })))
     } else {
+        // Wasn't favorited, add it
         sqlx::query(
             "INSERT INTO favorites (user_id, entity_type, entity_id) VALUES (?, ?, ?)",
         )

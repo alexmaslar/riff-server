@@ -118,7 +118,9 @@ pub async fn list_daily_mixes(
         }));
     }
 
-    let end_of_day = today.and_hms_opt(23, 59, 59).unwrap();
+    let end_of_day = today
+        .and_hms_opt(23, 59, 59)
+        .ok_or_else(|| AppError::Internal("failed to compute end of day".into()))?;
     let remaining = (end_of_day - chrono::Utc::now().naive_utc()).num_seconds().max(60);
     Ok((
         [(header::CACHE_CONTROL, format!("private, max-age={remaining}"))],

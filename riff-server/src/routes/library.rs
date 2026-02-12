@@ -8,40 +8,35 @@ use std::sync::Arc;
 use crate::error::AppError;
 use crate::AppState;
 
-pub async fn trigger_scan(State(state): State<Arc<AppState>>) -> Json<Value> {
-    let library_path = match &state.config.read().await.library.path {
-        Some(path) => path.clone(),
-        None => return Json(json!({ "error": "no library path configured" })),
-    };
+pub async fn trigger_scan(State(state): State<Arc<AppState>>) -> Result<Json<Value>, AppError> {
+    let library_path = state.config.read().await.library.path.clone()
+        .ok_or_else(|| AppError::BadRequest("no library path configured".into()))?;
 
-    match scanner::scan_library(&state.db, &library_path).await {
-        Ok(result) => {
-            let enrichment_triggered = maybe_spawn_enrichment(&state).await;
-            let analysis_triggered = if !enrichment_triggered {
-                // Enrichment already running — spawn summarization (which chains analysis)
-                maybe_spawn_summarization(&state).await
-            } else {
-                false // Summarization + analysis will be chained after enrichment completes
-            };
-            Json(json!({
-                "status": "complete",
-                "artists_added": result.artists_added,
-                "albums_added": result.albums_added,
-                "tracks_added": result.tracks_added,
-                "errors": result.errors,
-                "enrichment_triggered": enrichment_triggered,
-                "analysis_triggered": analysis_triggered,
-            }))
-        }
-        Err(e) => Json(json!({ "error": e.to_string() })),
-    }
+    let result = scanner::scan_library(&state.db, &library_path).await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+    let enrichment_triggered = maybe_spawn_enrichment(&state).await;
+    let analysis_triggered = if !enrichment_triggered {
+        maybe_spawn_summarization(&state).await
+    } else {
+        false
+    };
+    Ok(Json(json!({
+        "status": "complete",
+        "artists_added": result.artists_added,
+        "albums_added": result.albums_added,
+        "tracks_added": result.tracks_added,
+        "errors": result.errors,
+        "enrichment_triggered": enrichment_triggered,
+        "analysis_triggered": analysis_triggered,
+    })))
 }
 
-pub async fn trigger_enrichment(State(state): State<Arc<AppState>>) -> Json<Value> {
+pub async fn trigger_enrichment(State(state): State<Arc<AppState>>) -> Result<Json<Value>, AppError> {
     if maybe_spawn_enrichment(&state).await {
-        Json(json!({ "status": "started" }))
+        Ok(Json(json!({ "status": "started" })))
     } else {
-        Json(json!({ "status": "already_running" }))
+        Ok(Json(json!({ "status": "already_running" })))
     }
 }
 
@@ -73,16 +68,16 @@ async fn maybe_spawn_enrichment(state: &Arc<AppState>) -> bool {
     true
 }
 
-pub async fn library_stats(State(state): State<Arc<AppState>>) -> Json<Value> {
-    let artists: Result<(i64,), _> =
+pub async fn library_stats(State(state): State<Arc<AppState>>) -> Result<Json<Value>, AppError> {
+    let (artist_count,): (i64,) =
         sqlx::query_as("SELECT COUNT(*) FROM artists")
             .fetch_one(&state.db)
-            .await;
-    let albums: Result<(i64,), _> =
+            .await?;
+    let (album_count,): (i64,) =
         sqlx::query_as("SELECT COUNT(*) FROM albums")
             .fetch_one(&state.db)
-            .await;
-    let tracks: Result<(i64, i64, i64, i64), _> =
+            .await?;
+    let (track_count, total_size, analyzed, pending_analysis): (i64, i64, i64, i64) =
         sqlx::query_as(
             "SELECT COUNT(*), COALESCE(SUM(file_size_bytes), 0), \
              SUM(CASE WHEN analysis_status = 'complete' THEN 1 ELSE 0 END), \
@@ -90,9 +85,9 @@ pub async fn library_stats(State(state): State<Arc<AppState>>) -> Json<Value> {
              FROM tracks"
         )
             .fetch_one(&state.db)
-            .await;
+            .await?;
 
-    let summaries: Result<(i64, i64), _> =
+    let (summarized, pending_summaries): (i64, i64) =
         sqlx::query_as(
             "SELECT \
              SUM(CASE WHEN ai_summary IS NOT NULL THEN 1 ELSE 0 END), \
@@ -100,38 +95,33 @@ pub async fn library_stats(State(state): State<Arc<AppState>>) -> Json<Value> {
              FROM albums"
         )
             .fetch_one(&state.db)
-            .await;
+            .await?;
 
-    let pending_ratings: Result<(i64,), _> =
+    let (pending_rate,): (i64,) =
         sqlx::query_as(
             "SELECT COUNT(*) FROM albums WHERE ai_summary IS NOT NULL AND ai_rating IS NULL"
         )
             .fetch_one(&state.db)
-            .await;
+            .await?;
 
-    match (artists, albums, tracks, summaries, pending_ratings) {
-        (Ok((artist_count,)), Ok((album_count,)), Ok((track_count, total_size, analyzed, pending_analysis)), Ok((summarized, pending_summaries)), Ok((pending_rate,))) => {
-            Json(json!({
-                "artists": artist_count,
-                "albums": album_count,
-                "tracks": track_count,
-                "totalSize": total_size,
-                "analyzed": analyzed,
-                "pendingAnalysis": pending_analysis,
-                "summarized": summarized,
-                "pendingSummaries": pending_summaries,
-                "pendingRatings": pending_rate,
-            }))
-        }
-        _ => Json(json!({ "error": "failed to query library stats" })),
-    }
+    Ok(Json(json!({
+        "artists": artist_count,
+        "albums": album_count,
+        "tracks": track_count,
+        "totalSize": total_size,
+        "analyzed": analyzed,
+        "pendingAnalysis": pending_analysis,
+        "summarized": summarized,
+        "pendingSummaries": pending_summaries,
+        "pendingRatings": pending_rate,
+    })))
 }
 
-pub async fn trigger_analysis(State(state): State<Arc<AppState>>) -> Json<Value> {
+pub async fn trigger_analysis(State(state): State<Arc<AppState>>) -> Result<Json<Value>, AppError> {
     if maybe_spawn_analysis(&state) {
-        Json(json!({ "status": "started" }))
+        Ok(Json(json!({ "status": "started" })))
     } else {
-        Json(json!({ "status": "already_running" }))
+        Ok(Json(json!({ "status": "already_running" })))
     }
 }
 
@@ -164,52 +154,50 @@ fn maybe_spawn_analysis(state: &Arc<AppState>) -> bool {
 pub async fn enrich_album(
     State(state): State<Arc<AppState>>,
     Path(album_id): Path<String>,
-) -> Json<Value> {
-    match musicbrainz::enrich_album(&state.db, &album_id).await {
-        Ok(matched) => Json(json!({
-            "status": "complete",
-            "matched": matched,
-        })),
-        Err(e) => Json(json!({ "error": e.to_string() })),
-    }
+) -> Result<Json<Value>, AppError> {
+    let matched = musicbrainz::enrich_album(&state.db, &album_id).await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    Ok(Json(json!({
+        "status": "complete",
+        "matched": matched,
+    })))
 }
 
-pub async fn trigger_summarization(State(state): State<Arc<AppState>>) -> Json<Value> {
+pub async fn trigger_summarization(State(state): State<Arc<AppState>>) -> Result<Json<Value>, AppError> {
     let config = state.config.read().await;
     if !config.metadata.ai.enabled {
-        return Json(json!({ "error": "AI summarization not enabled in config" }));
+        return Err(AppError::BadRequest("AI summarization not enabled in config".into()));
     }
     if !config.metadata.ai.album_summaries {
-        return Json(json!({ "error": "Album summaries disabled in config" }));
+        return Err(AppError::BadRequest("Album summaries disabled in config".into()));
     }
     drop(config);
 
     if maybe_spawn_summarization(&state).await {
-        Json(json!({ "status": "started" }))
+        Ok(Json(json!({ "status": "started" })))
     } else {
-        Json(json!({ "status": "already_running" }))
+        Ok(Json(json!({ "status": "already_running" })))
     }
 }
 
 pub async fn summarize_album(
     State(state): State<Arc<AppState>>,
     Path(album_id): Path<String>,
-) -> Json<Value> {
+) -> Result<Json<Value>, AppError> {
     let ai_config = {
         let config = state.config.read().await;
         if !config.metadata.ai.enabled {
-            return Json(json!({ "error": "AI summarization not enabled in config" }));
+            return Err(AppError::BadRequest("AI summarization not enabled in config".into()));
         }
         if !config.metadata.ai.album_summaries {
-            return Json(json!({ "error": "Album summaries disabled in config" }));
+            return Err(AppError::BadRequest("Album summaries disabled in config".into()));
         }
         config.metadata.ai.clone()
     };
 
-    match ai::summarize_album(&state.db, &ai_config, &album_id).await {
-        Ok(_) => Json(json!({ "status": "complete" })),
-        Err(e) => Json(json!({ "error": e.to_string() })),
-    }
+    ai::summarize_album(&state.db, &ai_config, &album_id).await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    Ok(Json(json!({ "status": "complete" })))
 }
 
 pub(crate) async fn maybe_spawn_summarization(state: &Arc<AppState>) -> bool {
@@ -251,42 +239,41 @@ pub(crate) async fn maybe_spawn_summarization(state: &Arc<AppState>) -> bool {
     true
 }
 
-pub async fn trigger_rating(State(state): State<Arc<AppState>>) -> Json<Value> {
+pub async fn trigger_rating(State(state): State<Arc<AppState>>) -> Result<Json<Value>, AppError> {
     let config = state.config.read().await;
     if !config.metadata.ai.enabled {
-        return Json(json!({ "error": "AI not enabled in config" }));
+        return Err(AppError::BadRequest("AI not enabled in config".into()));
     }
     if !config.metadata.ai.album_ratings {
-        return Json(json!({ "error": "Album ratings disabled in config" }));
+        return Err(AppError::BadRequest("Album ratings disabled in config".into()));
     }
     drop(config);
 
     if maybe_spawn_rating(&state).await {
-        Json(json!({ "status": "started" }))
+        Ok(Json(json!({ "status": "started" })))
     } else {
-        Json(json!({ "status": "already_running" }))
+        Ok(Json(json!({ "status": "already_running" })))
     }
 }
 
 pub async fn rate_album(
     State(state): State<Arc<AppState>>,
     Path(album_id): Path<String>,
-) -> Json<Value> {
+) -> Result<Json<Value>, AppError> {
     let ai_config = {
         let config = state.config.read().await;
         if !config.metadata.ai.enabled {
-            return Json(json!({ "error": "AI not enabled in config" }));
+            return Err(AppError::BadRequest("AI not enabled in config".into()));
         }
         if !config.metadata.ai.album_ratings {
-            return Json(json!({ "error": "Album ratings disabled in config" }));
+            return Err(AppError::BadRequest("Album ratings disabled in config".into()));
         }
         config.metadata.ai.clone()
     };
 
-    match ai::rate_album(&state.db, &ai_config, &album_id).await {
-        Ok(_) => Json(json!({ "status": "complete" })),
-        Err(e) => Json(json!({ "error": e.to_string() })),
-    }
+    ai::rate_album(&state.db, &ai_config, &album_id).await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    Ok(Json(json!({ "status": "complete" })))
 }
 
 async fn maybe_spawn_rating(state: &Arc<AppState>) -> bool {
@@ -328,20 +315,20 @@ async fn maybe_spawn_rating(state: &Arc<AppState>) -> bool {
     true
 }
 
-pub async fn trigger_recommendations(State(state): State<Arc<AppState>>) -> Json<Value> {
+pub async fn trigger_recommendations(State(state): State<Arc<AppState>>) -> Result<Json<Value>, AppError> {
     let ai_config = {
         let config = state.config.read().await;
         if !config.metadata.ai.enabled {
-            return Json(json!({ "error": "AI not enabled in config" }));
+            return Err(AppError::BadRequest("AI not enabled in config".into()));
         }
         if !config.metadata.ai.album_recommendations {
-            return Json(json!({ "error": "Album recommendations disabled in config" }));
+            return Err(AppError::BadRequest("Album recommendations disabled in config".into()));
         }
         config.metadata.ai.clone()
     };
 
     if state.recommendation_running.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
-        return Json(json!({ "status": "already_running" }));
+        return Ok(Json(json!({ "status": "already_running" })));
     }
 
     let rec_state = state.clone();
@@ -359,23 +346,23 @@ pub async fn trigger_recommendations(State(state): State<Arc<AppState>>) -> Json
         rec_state.recommendation_running.store(false, Ordering::SeqCst);
     });
 
-    Json(json!({ "status": "started" }))
+    Ok(Json(json!({ "status": "started" })))
 }
 
-pub async fn trigger_artist_recommendations(State(state): State<Arc<AppState>>) -> Json<Value> {
+pub async fn trigger_artist_recommendations(State(state): State<Arc<AppState>>) -> Result<Json<Value>, AppError> {
     let ai_config = {
         let config = state.config.read().await;
         if !config.metadata.ai.enabled {
-            return Json(json!({ "error": "AI not enabled in config" }));
+            return Err(AppError::BadRequest("AI not enabled in config".into()));
         }
         if !config.metadata.ai.artist_recommendations {
-            return Json(json!({ "error": "Artist recommendations disabled in config" }));
+            return Err(AppError::BadRequest("Artist recommendations disabled in config".into()));
         }
         config.metadata.ai.clone()
     };
 
     if state.artist_recommendation_running.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
-        return Json(json!({ "status": "already_running" }));
+        return Ok(Json(json!({ "status": "already_running" })));
     }
 
     let rec_state = state.clone();
@@ -393,23 +380,23 @@ pub async fn trigger_artist_recommendations(State(state): State<Arc<AppState>>) 
         rec_state.artist_recommendation_running.store(false, Ordering::SeqCst);
     });
 
-    Json(json!({ "status": "started" }))
+    Ok(Json(json!({ "status": "started" })))
 }
 
-pub async fn trigger_artist_bios(State(state): State<Arc<AppState>>) -> Json<Value> {
+pub async fn trigger_artist_bios(State(state): State<Arc<AppState>>) -> Result<Json<Value>, AppError> {
     let ai_config = {
         let config = state.config.read().await;
         if !config.metadata.ai.enabled {
-            return Json(json!({ "error": "AI not enabled in config" }));
+            return Err(AppError::BadRequest("AI not enabled in config".into()));
         }
         if !config.metadata.ai.artist_bios {
-            return Json(json!({ "error": "Artist bios disabled in config" }));
+            return Err(AppError::BadRequest("Artist bios disabled in config".into()));
         }
         config.metadata.ai.clone()
     };
 
     if state.artist_bio_running.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
-        return Json(json!({ "status": "already_running" }));
+        return Ok(Json(json!({ "status": "already_running" })));
     }
 
     let bio_state = state.clone();
@@ -427,7 +414,7 @@ pub async fn trigger_artist_bios(State(state): State<Arc<AppState>>) -> Json<Val
         bio_state.artist_bio_running.store(false, Ordering::SeqCst);
     });
 
-    Json(json!({ "status": "started" }))
+    Ok(Json(json!({ "status": "started" })))
 }
 
 async fn maybe_spawn_recommendations(state: &Arc<AppState>) -> bool {
