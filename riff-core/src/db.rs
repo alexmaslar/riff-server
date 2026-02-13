@@ -1,8 +1,10 @@
+use crate::config::LibraryEntry;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::SqlitePool;
 use std::str::FromStr;
 use std::time::Duration;
 use tracing::info;
+use uuid::Uuid;
 
 pub async fn init_pool() -> anyhow::Result<SqlitePool> {
     let data_dir = dirs::data_dir()
@@ -30,52 +32,240 @@ pub async fn init_pool() -> anyhow::Result<SqlitePool> {
     Ok(pool)
 }
 
-/// Check if the library path changed since last run.
-/// If it changed, wipe all content tables so the next scan starts fresh.
-pub async fn check_library_path(pool: &SqlitePool, library_path: &str) -> anyhow::Result<()> {
-    let stored: Option<(String,)> =
-        sqlx::query_as("SELECT value FROM settings WHERE key = 'library_path'")
-            .fetch_optional(pool)
-            .await?;
+/// Sync the `libraries` table with the config entries.
+/// - Matches by `path`: updates name/isolated if changed, inserts new rows.
+/// - Removes DB rows whose path is no longer in config (wipes their data first).
+/// - Backfills `library_id` on existing content that has NULL library_id.
+pub async fn sync_libraries(pool: &SqlitePool, libraries: &[LibraryEntry]) -> anyhow::Result<()> {
+    // Fetch all existing rows
+    let existing: Vec<(String, String, String, bool)> = sqlx::query_as(
+        "SELECT id, name, path, isolated FROM libraries",
+    )
+    .fetch_all(pool)
+    .await?;
 
-    match stored {
-        Some((stored_path,)) if stored_path == library_path => {
-            // Path unchanged, nothing to do
-        }
-        Some((stored_path,)) => {
-            info!(
-                "library path changed from {:?} to {:?}, wiping library data",
-                stored_path, library_path
-            );
-            wipe_library_data(pool).await?;
-            sqlx::query("UPDATE settings SET value = ? WHERE key = 'library_path'")
-                .bind(library_path)
+    let config_paths: std::collections::HashSet<&str> =
+        libraries.iter().map(|l| l.path.as_str()).collect();
+
+    // Remove DB rows whose path is no longer in config
+    for (db_id, _name, db_path, _isolated) in &existing {
+        if !config_paths.contains(db_path.as_str()) {
+            info!("library path {:?} removed from config, wiping data", db_path);
+            wipe_library_data(pool, db_id).await?;
+            sqlx::query("DELETE FROM libraries WHERE id = ?")
+                .bind(db_id)
                 .execute(pool)
                 .await?;
         }
-        None => {
-            // First run with this feature — just store the path
-            sqlx::query("INSERT INTO settings (key, value) VALUES ('library_path', ?)")
-                .bind(library_path)
+    }
+
+    let db_by_path: std::collections::HashMap<&str, &(String, String, String, bool)> = existing
+        .iter()
+        .map(|row| (row.2.as_str(), row))
+        .collect();
+
+    // Upsert config entries
+    for (i, entry) in libraries.iter().enumerate() {
+        if let Some(row) = db_by_path.get(entry.path.as_str()) {
+            let db_id = &row.0;
+            // Update name/isolated/display_order and per-library config if changed
+            sqlx::query(
+                "UPDATE libraries SET name = ?, isolated = ?, display_order = ?, \
+                 auto_enrich = ?, album_summaries = ?, album_ratings = ?, \
+                 album_recommendations = ?, artist_bios = ?, artist_recommendations = ? \
+                 WHERE id = ?",
+            )
+            .bind(&entry.name)
+            .bind(entry.isolated)
+            .bind(i as i64)
+            .bind(entry.auto_enrich)
+            .bind(entry.album_summaries)
+            .bind(entry.album_ratings)
+            .bind(entry.album_recommendations)
+            .bind(entry.artist_bios)
+            .bind(entry.artist_recommendations)
+            .bind(db_id)
+            .execute(pool)
+            .await?;
+        } else {
+            // Insert new library
+            let id = Uuid::new_v4().to_string();
+            sqlx::query(
+                "INSERT INTO libraries (id, name, path, isolated, display_order, \
+                 auto_enrich, album_summaries, album_ratings, \
+                 album_recommendations, artist_bios, artist_recommendations) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(&id)
+            .bind(&entry.name)
+            .bind(&entry.path)
+            .bind(entry.isolated)
+            .bind(i as i64)
+            .bind(entry.auto_enrich)
+            .bind(entry.album_summaries)
+            .bind(entry.album_ratings)
+            .bind(entry.album_recommendations)
+            .bind(entry.artist_bios)
+            .bind(entry.artist_recommendations)
+            .execute(pool)
+            .await?;
+            info!("registered new library {:?} at {:?} (id={})", entry.name, entry.path, id);
+        }
+    }
+
+    // Backfill: assign NULL library_id rows to the first library (migration from single-library)
+    let first_lib: Option<(String,)> = sqlx::query_as(
+        "SELECT id FROM libraries ORDER BY display_order LIMIT 1",
+    )
+    .fetch_optional(pool)
+    .await?;
+
+    if let Some((first_id,)) = first_lib {
+        for table in &["artists", "albums", "tracks", "daily_mixes", "playlists"] {
+            let sql = format!("UPDATE {table} SET library_id = ? WHERE library_id IS NULL");
+            let result = sqlx::query(&sql)
+                .bind(&first_id)
                 .execute(pool)
                 .await?;
+            if result.rows_affected() > 0 {
+                info!(
+                    "backfilled {} rows in {} with library_id={}",
+                    result.rows_affected(),
+                    table,
+                    first_id
+                );
+            }
         }
     }
 
     Ok(())
 }
 
-/// Delete all library content, preserving users and settings.
-async fn wipe_library_data(pool: &SqlitePool) -> anyhow::Result<()> {
+/// Resolve a library query param into a JSON array of library IDs for use with `json_each()`.
+/// - `None` → all non-isolated library IDs (the default "All Music" context)
+/// - `Some(id)` → validates that library exists, returns `["id"]`
+pub async fn resolve_library_ids(
+    pool: &SqlitePool,
+    library_id: Option<&str>,
+) -> anyhow::Result<String> {
+    match library_id {
+        None => {
+            let rows: Vec<(String,)> =
+                sqlx::query_as("SELECT id FROM libraries WHERE isolated = 0")
+                    .fetch_all(pool)
+                    .await?;
+            let ids: Vec<&str> = rows.iter().map(|(id,)| id.as_str()).collect();
+            Ok(serde_json::to_string(&ids)?)
+        }
+        Some(id) => {
+            let exists: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM libraries WHERE id = ?)",
+            )
+            .bind(id)
+            .fetch_one(pool)
+            .await?;
+            if !exists {
+                anyhow::bail!("library not found: {}", id);
+            }
+            Ok(serde_json::to_string(&[id])?)
+        }
+    }
+}
+
+/// Delete all content belonging to a specific library, preserving users and settings.
+pub async fn wipe_library_data(pool: &SqlitePool, library_id: &str) -> anyhow::Result<()> {
     // Order matters: delete children before parents
-    sqlx::query("DELETE FROM playlist_tracks").execute(pool).await?;
-    sqlx::query("DELETE FROM play_history").execute(pool).await?;
-    sqlx::query("DELETE FROM favorites").execute(pool).await?;
-    sqlx::query("DELETE FROM playlists").execute(pool).await?;
-    sqlx::query("DELETE FROM album_credits").execute(pool).await?;
-    sqlx::query("DELETE FROM tracks").execute(pool).await?;
-    sqlx::query("DELETE FROM albums").execute(pool).await?;
-    sqlx::query("DELETE FROM artists").execute(pool).await?;
-    info!("library data wiped");
+    sqlx::query(
+        "DELETE FROM daily_mix_tracks WHERE mix_id IN (SELECT id FROM daily_mixes WHERE library_id = ?)",
+    )
+    .bind(library_id)
+    .execute(pool)
+    .await?;
+    sqlx::query("DELETE FROM daily_mixes WHERE library_id = ?")
+        .bind(library_id)
+        .execute(pool)
+        .await?;
+
+    sqlx::query(
+        "DELETE FROM playlist_tracks WHERE playlist_id IN (SELECT id FROM playlists WHERE library_id = ?)",
+    )
+    .bind(library_id)
+    .execute(pool)
+    .await?;
+    sqlx::query("DELETE FROM playlists WHERE library_id = ?")
+        .bind(library_id)
+        .execute(pool)
+        .await?;
+
+    // play_history references tracks — delete via join
+    sqlx::query(
+        "DELETE FROM play_history WHERE track_id IN (SELECT id FROM tracks WHERE library_id = ?)",
+    )
+    .bind(library_id)
+    .execute(pool)
+    .await?;
+
+    // favorites can reference albums, artists, or tracks — delete those in library
+    sqlx::query(
+        "DELETE FROM favorites WHERE (entity_type = 'album' AND entity_id IN (SELECT id FROM albums WHERE library_id = ?))
+         OR (entity_type = 'artist' AND entity_id IN (SELECT id FROM artists WHERE library_id = ?))
+         OR (entity_type = 'track' AND entity_id IN (SELECT id FROM tracks WHERE library_id = ?))",
+    )
+    .bind(library_id)
+    .bind(library_id)
+    .bind(library_id)
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "DELETE FROM album_credits WHERE album_id IN (SELECT id FROM albums WHERE library_id = ?)",
+    )
+    .bind(library_id)
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "DELETE FROM album_recommendations WHERE album_id IN (SELECT id FROM albums WHERE library_id = ?)
+         OR recommended_album_id IN (SELECT id FROM albums WHERE library_id = ?)",
+    )
+    .bind(library_id)
+    .bind(library_id)
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "DELETE FROM artist_recommendations WHERE artist_id IN (SELECT id FROM artists WHERE library_id = ?)
+         OR recommended_artist_id IN (SELECT id FROM artists WHERE library_id = ?)",
+    )
+    .bind(library_id)
+    .bind(library_id)
+    .execute(pool)
+    .await?;
+
+    sqlx::query("DELETE FROM tracks WHERE library_id = ?")
+        .bind(library_id)
+        .execute(pool)
+        .await?;
+    sqlx::query("DELETE FROM albums WHERE library_id = ?")
+        .bind(library_id)
+        .execute(pool)
+        .await?;
+    sqlx::query("DELETE FROM artists WHERE library_id = ?")
+        .bind(library_id)
+        .execute(pool)
+        .await?;
+
+    info!("library data wiped for library_id={}", library_id);
     Ok(())
+}
+
+/// Get the library_id for a given library path.
+pub async fn get_library_id_by_path(pool: &SqlitePool, path: &str) -> anyhow::Result<Option<String>> {
+    let row: Option<(String,)> = sqlx::query_as(
+        "SELECT id FROM libraries WHERE path = ?",
+    )
+    .bind(path)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|(id,)| id))
 }

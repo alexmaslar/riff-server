@@ -1,6 +1,7 @@
 use axum::{extract::{Query, State}, http::header, Extension, Json};
 use chrono::Utc;
 use riff_core::auth::Claims;
+use riff_core::db;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -25,13 +26,16 @@ fn daily_cache_header() -> [(header::HeaderName, String); 1] {
 pub async fn get_featured_album(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<Claims>,
+    Query(params): Query<FeaturedParams>,
 ) -> Result<CachedJson, AppError> {
     let date_str = Utc::now().format("%Y-%m-%d").to_string();
+    let library_ids = db::resolve_library_ids(&state.db, params.library.as_deref()).await?;
 
     let album_id = riff_core::featured::pick_featured_album_id(
         &state.db,
         &claims.sub,
         &date_str,
+        &library_ids,
     )
     .await
     .map_err(|e| AppError::Internal(e.to_string()))?;
@@ -45,13 +49,16 @@ pub async fn get_featured_album(
 pub async fn get_featured_artist(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<Claims>,
+    Query(params): Query<FeaturedParams>,
 ) -> Result<CachedJson, AppError> {
     let date_str = Utc::now().format("%Y-%m-%d").to_string();
+    let library_ids = db::resolve_library_ids(&state.db, params.library.as_deref()).await?;
 
     let artist_id = riff_core::featured::pick_featured_artist_id(
         &state.db,
         &claims.sub,
         &date_str,
+        &library_ids,
     )
     .await
     .map_err(|e| AppError::Internal(e.to_string()))?;
@@ -65,6 +72,7 @@ pub async fn get_featured_artist(
 #[derive(Deserialize)]
 pub struct FeaturedParams {
     pub count: Option<u8>,
+    pub library: Option<String>,
 }
 
 pub async fn get_featured_albums(
@@ -79,12 +87,14 @@ pub async fn get_featured_albums(
     }
 
     let date_str = Utc::now().format("%Y-%m-%d").to_string();
+    let library_ids = db::resolve_library_ids(&state.db, params.library.as_deref()).await?;
 
     let album_ids = riff_core::featured::pick_featured_album_ids(
         &state.db,
         &claims.sub,
         &date_str,
         count,
+        &library_ids,
     )
     .await
     .map_err(|e| AppError::Internal(e.to_string()))?;
@@ -110,12 +120,14 @@ pub async fn get_featured_artists(
     }
 
     let date_str = Utc::now().format("%Y-%m-%d").to_string();
+    let library_ids = db::resolve_library_ids(&state.db, params.library.as_deref()).await?;
 
     let artist_ids = riff_core::featured::pick_featured_artist_ids(
         &state.db,
         &claims.sub,
         &date_str,
         count,
+        &library_ids,
     )
     .await
     .map_err(|e| AppError::Internal(e.to_string()))?;

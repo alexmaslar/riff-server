@@ -18,7 +18,8 @@ const SCORE_DEFAULT_RATING: f64 = 5.0;
 const TOP_N: usize = 10;
 
 /// Score all albums for a user, returning (album_id, score) sorted descending, truncated to TOP_N.
-async fn score_albums(pool: &SqlitePool, user_id: &str) -> Result<Vec<(String, f64)>> {
+/// `library_ids_json` is a JSON array of library IDs to scope the query (from `resolve_library_ids`).
+async fn score_albums(pool: &SqlitePool, user_id: &str, library_ids_json: &str) -> Result<Vec<(String, f64)>> {
     let rows = sqlx::query(
         "SELECT
             a.id,
@@ -46,10 +47,12 @@ async fn score_albums(pool: &SqlitePool, user_id: &str) -> Result<Vec<(String, f
              JOIN tracks t ON ph.track_id = t.id
              WHERE ph.user_id = ?
              GROUP BY t.album_id
-         ) ph ON ph.album_id = a.id",
+         ) ph ON ph.album_id = a.id
+         WHERE a.library_id IN (SELECT value FROM json_each(?))",
     )
     .bind(user_id)
     .bind(user_id)
+    .bind(library_ids_json)
     .fetch_all(pool)
     .await?;
 
@@ -125,7 +128,8 @@ const ARTIST_SCORE_ALBUM_DEPTH: f64 = 0.5;
 const ARTIST_ALBUM_DEPTH_MIN: i64 = 3;
 
 /// Score all artists for a user, returning (artist_id, score) sorted descending, truncated to TOP_N.
-async fn score_artists(pool: &SqlitePool, user_id: &str) -> Result<Vec<(String, f64)>> {
+/// `library_ids_json` is a JSON array of library IDs to scope the query.
+async fn score_artists(pool: &SqlitePool, user_id: &str, library_ids_json: &str) -> Result<Vec<(String, f64)>> {
     let rows = sqlx::query(
         "SELECT
             ar.id,
@@ -156,10 +160,12 @@ async fn score_artists(pool: &SqlitePool, user_id: &str) -> Result<Vec<(String, 
              WHERE ph.user_id = ?
              GROUP BY ar2.id
          ) ph ON ph.artist_id = ar.id
+         WHERE ar.library_id IN (SELECT value FROM json_each(?))
          GROUP BY ar.id",
     )
     .bind(user_id)
     .bind(user_id)
+    .bind(library_ids_json)
     .fetch_all(pool)
     .await?;
 
@@ -248,16 +254,18 @@ fn pick_n_from_candidates(
 }
 
 /// Pick N featured album IDs for a user on a given date.
+/// `library_ids_json` scopes which libraries to consider.
 pub async fn pick_featured_album_ids(
     pool: &SqlitePool,
     user_id: &str,
     date_str: &str,
     count: usize,
+    library_ids_json: &str,
 ) -> Result<Vec<String>> {
     if count == 0 {
         return Ok(vec![]);
     }
-    let candidates = score_albums(pool, user_id).await?;
+    let candidates = score_albums(pool, user_id, library_ids_json).await?;
     if candidates.is_empty() {
         return Ok(vec![]);
     }
@@ -270,22 +278,25 @@ pub async fn pick_featured_album_id(
     pool: &SqlitePool,
     user_id: &str,
     date_str: &str,
+    library_ids_json: &str,
 ) -> Result<Option<String>> {
-    let ids = pick_featured_album_ids(pool, user_id, date_str, 1).await?;
+    let ids = pick_featured_album_ids(pool, user_id, date_str, 1, library_ids_json).await?;
     Ok(ids.into_iter().next())
 }
 
 /// Pick N featured artist IDs for a user on a given date.
+/// `library_ids_json` scopes which libraries to consider.
 pub async fn pick_featured_artist_ids(
     pool: &SqlitePool,
     user_id: &str,
     date_str: &str,
     count: usize,
+    library_ids_json: &str,
 ) -> Result<Vec<String>> {
     if count == 0 {
         return Ok(vec![]);
     }
-    let candidates = score_artists(pool, user_id).await?;
+    let candidates = score_artists(pool, user_id, library_ids_json).await?;
     if candidates.is_empty() {
         return Ok(vec![]);
     }
@@ -298,8 +309,9 @@ pub async fn pick_featured_artist_id(
     pool: &SqlitePool,
     user_id: &str,
     date_str: &str,
+    library_ids_json: &str,
 ) -> Result<Option<String>> {
-    let ids = pick_featured_artist_ids(pool, user_id, date_str, 1).await?;
+    let ids = pick_featured_artist_ids(pool, user_id, date_str, 1, library_ids_json).await?;
     Ok(ids.into_iter().next())
 }
 

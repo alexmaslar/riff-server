@@ -99,18 +99,35 @@ fn compute_centroid(vectors: &[&[f64]]) -> Option<Vec<f64>> {
     Some(centroid)
 }
 
-/// Generate all 4 daily mixes for a single user.
-pub async fn generate_daily_mixes(pool: &SqlitePool, user_id: &str, date: NaiveDate) -> Result<()> {
+/// Generate all 4 daily mixes for a single user within a library context.
+pub async fn generate_daily_mixes(
+    pool: &SqlitePool,
+    user_id: &str,
+    date: NaiveDate,
+    library_ids_json: &str,
+    library_id: Option<&str>,
+) -> Result<()> {
     let date_str = date.format("%Y-%m-%d").to_string();
 
-    // Clean up old cover files before deleting mixes
-    let old_covers = sqlx::query_as::<_, (Option<String>,)>(
-        "SELECT cover_path FROM daily_mixes WHERE user_id = ? AND mix_date = ?",
-    )
-    .bind(user_id)
-    .bind(&date_str)
-    .fetch_all(pool)
-    .await?;
+    // Clean up old cover files before deleting mixes (scoped by library context)
+    let old_covers = if let Some(lib_id) = library_id {
+        sqlx::query_as::<_, (Option<String>,)>(
+            "SELECT cover_path FROM daily_mixes WHERE user_id = ? AND mix_date = ? AND library_id = ?",
+        )
+        .bind(user_id)
+        .bind(&date_str)
+        .bind(lib_id)
+        .fetch_all(pool)
+        .await?
+    } else {
+        sqlx::query_as::<_, (Option<String>,)>(
+            "SELECT cover_path FROM daily_mixes WHERE user_id = ? AND mix_date = ? AND library_id IS NULL",
+        )
+        .bind(user_id)
+        .bind(&date_str)
+        .fetch_all(pool)
+        .await?
+    };
 
     for (cover_path,) in old_covers {
         if let Some(path) = cover_path {
@@ -118,81 +135,159 @@ pub async fn generate_daily_mixes(pool: &SqlitePool, user_id: &str, date: NaiveD
         }
     }
 
-    // Delete any existing mixes for this user+date
-    sqlx::query("DELETE FROM daily_mixes WHERE user_id = ? AND mix_date = ?")
-        .bind(user_id)
-        .bind(&date_str)
-        .execute(pool)
-        .await?;
+    // Delete any existing mixes for this user+date+library context
+    if let Some(lib_id) = library_id {
+        sqlx::query("DELETE FROM daily_mixes WHERE user_id = ? AND mix_date = ? AND library_id = ?")
+            .bind(user_id)
+            .bind(&date_str)
+            .bind(lib_id)
+            .execute(pool)
+            .await?;
+    } else {
+        sqlx::query("DELETE FROM daily_mixes WHERE user_id = ? AND mix_date = ? AND library_id IS NULL")
+            .bind(user_id)
+            .bind(&date_str)
+            .execute(pool)
+            .await?;
+    }
 
     // Collect IDs already used across mixes today (for cross-mix dedup)
     let mut used_track_ids: Vec<String> = Vec::new();
 
     // Mix 1: Artist Mix
-    if let Err(e) = generate_artist_mix(pool, user_id, &date_str, &mut used_track_ids).await {
+    if let Err(e) = generate_artist_mix(pool, user_id, &date_str, &mut used_track_ids, library_ids_json, library_id).await {
         warn!("artist mix generation failed for {user_id}: {e}");
     }
 
     // Mix 2: Genre Mix
-    if let Err(e) = generate_genre_mix(pool, user_id, &date_str, &mut used_track_ids).await {
+    if let Err(e) = generate_genre_mix(pool, user_id, &date_str, &mut used_track_ids, library_ids_json, library_id).await {
         warn!("genre mix generation failed for {user_id}: {e}");
     }
 
     // Mix 3: Deep Cuts
-    if let Err(e) = generate_deep_cuts_mix(pool, user_id, &date_str, &mut used_track_ids).await {
+    if let Err(e) = generate_deep_cuts_mix(pool, user_id, &date_str, &mut used_track_ids, library_ids_json, library_id).await {
         warn!("deep cuts mix generation failed for {user_id}: {e}");
     }
 
     // Mix 4: Decade Mix
-    if let Err(e) = generate_decade_mix(pool, user_id, &date_str, &mut used_track_ids).await {
+    if let Err(e) = generate_decade_mix(pool, user_id, &date_str, &mut used_track_ids, library_ids_json, library_id).await {
         warn!("decade mix generation failed for {user_id}: {e}");
     }
 
     Ok(())
 }
 
-/// Generate daily mixes for all users.
+/// Generate daily mixes for all users across all library contexts.
 pub async fn generate_all_daily_mixes(pool: &SqlitePool) -> Result<()> {
     let date = Utc::now().date_naive();
+    let date_str = date.format("%Y-%m-%d").to_string();
 
     let users = sqlx::query_as::<_, (String,)>("SELECT id FROM users")
         .fetch_all(pool)
         .await?;
 
-    info!("generating daily mixes for {} users", users.len());
+    // Build library contexts: default (non-isolated) + each isolated library
+    let default_ids: Vec<String> = sqlx::query_as::<_, (String,)>(
+        "SELECT id FROM libraries WHERE isolated = 0",
+    )
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .map(|r| r.0)
+    .collect();
+
+    let isolated_ids: Vec<String> = sqlx::query_as::<_, (String,)>(
+        "SELECT id FROM libraries WHERE isolated = 1",
+    )
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .map(|r| r.0)
+    .collect();
+
+    // Build contexts: (library_ids_json, library_id_for_mix)
+    // For default context: library_id_for_mix = None (null in DB)
+    // For isolated: library_id_for_mix = Some(id)
+    let mut contexts: Vec<(String, Option<String>)> = Vec::new();
+    if !default_ids.is_empty() {
+        let json = serde_json::to_string(&default_ids).unwrap_or_else(|_| "[]".to_string());
+        contexts.push((json, None));
+    }
+    for id in &isolated_ids {
+        let json = serde_json::to_string(&[id]).unwrap_or_else(|_| "[]".to_string());
+        contexts.push((json, Some(id.clone())));
+    }
+
+    info!(
+        "generating daily mixes for {} users across {} library contexts",
+        users.len(),
+        contexts.len()
+    );
 
     for (user_id,) in &users {
-        // Skip if mixes already exist for today
-        let existing = sqlx::query_as::<_, (i64,)>(
-            "SELECT COUNT(*) FROM daily_mixes WHERE user_id = ? AND mix_date = ?",
-        )
-        .bind(user_id)
-        .bind(date.format("%Y-%m-%d").to_string())
-        .fetch_one(pool)
-        .await?;
+        for (library_ids_json, library_id) in &contexts {
+            // Skip if 4 mixes already exist for this user+date+library context
+            let existing = if let Some(lib_id) = library_id {
+                sqlx::query_as::<_, (i64,)>(
+                    "SELECT COUNT(*) FROM daily_mixes WHERE user_id = ? AND mix_date = ? AND library_id = ?",
+                )
+                .bind(user_id)
+                .bind(&date_str)
+                .bind(lib_id)
+                .fetch_one(pool)
+                .await?
+            } else {
+                sqlx::query_as::<_, (i64,)>(
+                    "SELECT COUNT(*) FROM daily_mixes WHERE user_id = ? AND mix_date = ? AND library_id IS NULL",
+                )
+                .bind(user_id)
+                .bind(&date_str)
+                .fetch_one(pool)
+                .await?
+            };
 
-        if existing.0 >= 4 {
-            debug!("daily mixes: all 4 mixes exist for {user_id}, skipping generation");
-            // Backfill covers for mixes missing artwork
-            let uncovered = sqlx::query_as::<_, (String,)>(
-                "SELECT id FROM daily_mixes WHERE user_id = ? AND mix_date = ? AND cover_path IS NULL",
-            )
-            .bind(user_id)
-            .bind(date.format("%Y-%m-%d").to_string())
-            .fetch_all(pool)
-            .await?;
+            if existing.0 >= 4 {
+                debug!(
+                    "daily mixes: all 4 mixes exist for {user_id} (library={:?}), skipping",
+                    library_id
+                );
+                // Backfill covers for mixes missing artwork
+                let uncovered = if let Some(lib_id) = library_id {
+                    sqlx::query_as::<_, (String,)>(
+                        "SELECT id FROM daily_mixes WHERE user_id = ? AND mix_date = ? AND library_id = ? AND cover_path IS NULL",
+                    )
+                    .bind(user_id)
+                    .bind(&date_str)
+                    .bind(lib_id)
+                    .fetch_all(pool)
+                    .await?
+                } else {
+                    sqlx::query_as::<_, (String,)>(
+                        "SELECT id FROM daily_mixes WHERE user_id = ? AND mix_date = ? AND library_id IS NULL AND cover_path IS NULL",
+                    )
+                    .bind(user_id)
+                    .bind(&date_str)
+                    .fetch_all(pool)
+                    .await?
+                };
 
-            for (mix_id,) in uncovered {
-                if let Err(e) = generate_mix_cover(pool, &mix_id).await {
-                    warn!("backfill cover failed for mix {mix_id}: {e}");
+                for (mix_id,) in uncovered {
+                    if let Err(e) = generate_mix_cover(pool, &mix_id).await {
+                        warn!("backfill cover failed for mix {mix_id}: {e}");
+                    }
                 }
+                continue;
             }
-            continue;
-        }
 
-        info!("daily mixes: {user_id} has {}/4 mixes, regenerating", existing.0);
-        if let Err(e) = generate_daily_mixes(pool, user_id, date).await {
-            warn!("daily mix generation failed for user {user_id}: {e}");
+            if let Err(e) =
+                generate_daily_mixes(pool, user_id, date, library_ids_json, library_id.as_deref())
+                    .await
+            {
+                warn!(
+                    "daily mix generation failed for user {user_id} (library={:?}): {e}",
+                    library_id
+                );
+            }
         }
     }
 
@@ -207,8 +302,10 @@ async fn generate_artist_mix(
     user_id: &str,
     date_str: &str,
     used_track_ids: &mut Vec<String>,
+    library_ids_json: &str,
+    library_id: Option<&str>,
 ) -> Result<()> {
-    // Find top-played artists for this user
+    // Find top-played artists for this user (scoped by library)
     let top_artists = sqlx::query(
         "SELECT ar.id, ar.name, COUNT(*) as plays
          FROM play_history ph
@@ -216,11 +313,13 @@ async fn generate_artist_mix(
          JOIN albums a ON t.album_id = a.id
          JOIN artists ar ON a.artist_id = ar.id
          WHERE ph.user_id = ? AND ph.completed = 1
+           AND ar.library_id IN (SELECT value FROM json_each(?))
          GROUP BY ar.id
          ORDER BY plays DESC
          LIMIT 20",
     )
     .bind(user_id)
+    .bind(library_ids_json)
     .fetch_all(pool)
     .await?;
 
@@ -231,9 +330,11 @@ async fn generate_artist_mix(
              FROM artists ar
              JOIN albums a ON a.artist_id = ar.id
              WHERE a.ai_rating IS NOT NULL
+               AND ar.library_id IN (SELECT value FROM json_each(?))
              ORDER BY a.ai_rating DESC
              LIMIT 20",
         )
+        .bind(library_ids_json)
         .fetch_all(pool)
         .await?;
 
@@ -246,14 +347,14 @@ async fn generate_artist_mix(
         let artist_id: String = fallback_artists[idx].get("id");
         let artist_name: String = fallback_artists[idx].get("name");
 
-        return build_artist_mix(pool, user_id, date_str, &artist_id, &artist_name, used_track_ids).await;
+        return build_artist_mix(pool, user_id, date_str, &artist_id, &artist_name, used_track_ids, library_ids_json, library_id).await;
     }
 
     let idx = seed_index(user_id, date_str, top_artists.len());
     let artist_id: String = top_artists[idx].get("id");
     let artist_name: String = top_artists[idx].get("name");
 
-    build_artist_mix(pool, user_id, date_str, &artist_id, &artist_name, used_track_ids).await
+    build_artist_mix(pool, user_id, date_str, &artist_id, &artist_name, used_track_ids, library_ids_json, library_id).await
 }
 
 async fn build_artist_mix(
@@ -263,25 +364,29 @@ async fn build_artist_mix(
     seed_artist_id: &str,
     seed_artist_name: &str,
     used_track_ids: &mut Vec<String>,
+    library_ids_json: &str,
+    library_id: Option<&str>,
 ) -> Result<()> {
-    // Get the seed artist's genres/styles
+    // Get the seed artist's genres/styles (scoped by library)
     let artist_genres = sqlx::query(
         "SELECT DISTINCT j.value as genre
          FROM albums a, json_each(a.genre) j
-         WHERE a.artist_id = ?
+         WHERE a.artist_id = ? AND a.library_id IN (SELECT value FROM json_each(?))
          UNION
          SELECT DISTINCT j.value as genre
          FROM albums a, json_each(a.style) j
-         WHERE a.artist_id = ?",
+         WHERE a.artist_id = ? AND a.library_id IN (SELECT value FROM json_each(?))",
     )
     .bind(seed_artist_id)
+    .bind(library_ids_json)
     .bind(seed_artist_id)
+    .bind(library_ids_json)
     .fetch_all(pool)
     .await?;
 
     let genres: Vec<String> = artist_genres.iter().map(|r| r.get("genre")).collect();
 
-    // Find tracks from the same genre/style family
+    // Find tracks from the same genre/style family (scoped by library)
     let candidate_tracks = if genres.is_empty() {
         // Fallback: all tracks from this artist + random others
         sqlx::query(
@@ -294,15 +399,17 @@ async fn build_artist_mix(
              FROM tracks t
              JOIN albums a ON t.album_id = a.id
              JOIN artists ar ON a.artist_id = ar.id
+             WHERE t.library_id IN (SELECT value FROM json_each(?))
              ORDER BY CASE WHEN a.artist_id = ? THEN 0 ELSE 1 END, rating DESC
              LIMIT 100",
         )
+        .bind(library_ids_json)
         .bind(seed_artist_id)
         .fetch_all(pool)
         .await?
     } else {
         // Build genre match condition
-        let placeholders: Vec<String> = genres.iter().enumerate().map(|(i, _)| format!("?{}", i + 2)).collect();
+        let placeholders: Vec<String> = genres.iter().enumerate().map(|(i, _)| format!("?{}", i + 3)).collect();
         let genre_list = placeholders.join(", ");
 
         let query = format!(
@@ -315,7 +422,8 @@ async fn build_artist_mix(
              FROM tracks t
              JOIN albums a ON t.album_id = a.id
              JOIN artists ar ON a.artist_id = ar.id
-             WHERE a.id IN (
+             WHERE t.library_id IN (SELECT value FROM json_each(?1))
+               AND a.id IN (
                  SELECT DISTINCT a2.id FROM albums a2, json_each(a2.genre) jg
                  WHERE jg.value IN ({genre_list})
                  UNION
@@ -326,7 +434,9 @@ async fn build_artist_mix(
              LIMIT 200"
         );
 
-        let mut q = sqlx::query(&query).bind(seed_artist_id);
+        let mut q = sqlx::query(&query)
+            .bind(library_ids_json)
+            .bind(seed_artist_id);
         for genre in &genres {
             q = q.bind(genre);
         }
@@ -366,6 +476,7 @@ async fn build_artist_mix(
         &description,
         &format!("artist:{seed_artist_id}"),
         &selected,
+        library_id,
     )
     .await?;
 
@@ -380,8 +491,10 @@ async fn generate_genre_mix(
     user_id: &str,
     date_str: &str,
     used_track_ids: &mut Vec<String>,
+    library_ids_json: &str,
+    library_id: Option<&str>,
 ) -> Result<()> {
-    // Find most-played genres
+    // Find most-played genres (scoped by library)
     let genre_rows = sqlx::query(
         "SELECT j.value as genre_name, COUNT(*) as plays
          FROM play_history ph
@@ -389,23 +502,27 @@ async fn generate_genre_mix(
          JOIN albums a ON t.album_id = a.id,
          json_each(CASE WHEN a.genre = '[]' OR a.genre IS NULL THEN '[\"Unknown\"]' ELSE a.genre END) j
          WHERE ph.user_id = ? AND ph.completed = 1
+           AND t.library_id IN (SELECT value FROM json_each(?))
          GROUP BY j.value
          ORDER BY plays DESC
          LIMIT 20",
     )
     .bind(user_id)
+    .bind(library_ids_json)
     .fetch_all(pool)
     .await?;
 
     let genres: Vec<String> = if genre_rows.is_empty() {
-        // Fallback: most common genres in library
+        // Fallback: most common genres in library (scoped)
         let lib_genres = sqlx::query(
             "SELECT j.value as genre_name, COUNT(*) as cnt
              FROM albums a, json_each(a.genre) j
+             WHERE a.library_id IN (SELECT value FROM json_each(?))
              GROUP BY j.value
              ORDER BY cnt DESC
              LIMIT 20",
         )
+        .bind(library_ids_json)
         .fetch_all(pool)
         .await?;
         lib_genres.iter().map(|r| r.get("genre_name")).collect()
@@ -421,7 +538,7 @@ async fn generate_genre_mix(
     let idx = seed_index(user_id, date_str, genres.len());
     let seed_genre = &genres[idx];
 
-    // Get tracks from this genre, diverse artists
+    // Get tracks from this genre, diverse artists (scoped by library)
     let candidate_tracks = sqlx::query(
         "SELECT t.id, t.title, t.album_id, a.artist_id, ar.name as artist_name,
                 t.duration_seconds, t.bpm_analyzed, t.bpm_tag,
@@ -432,7 +549,8 @@ async fn generate_genre_mix(
          FROM tracks t
          JOIN albums a ON t.album_id = a.id
          JOIN artists ar ON a.artist_id = ar.id
-         WHERE a.id IN (
+         WHERE t.library_id IN (SELECT value FROM json_each(?))
+           AND a.id IN (
              SELECT DISTINCT a2.id FROM albums a2, json_each(a2.genre) jg
              WHERE jg.value = ?
              UNION
@@ -442,6 +560,7 @@ async fn generate_genre_mix(
          ORDER BY rating DESC
          LIMIT 200",
     )
+    .bind(library_ids_json)
     .bind(seed_genre)
     .bind(seed_genre)
     .fetch_all(pool)
@@ -467,7 +586,7 @@ async fn generate_genre_mix(
 
     insert_mix(
         pool, user_id, date_str, "genre", &title, &description,
-        &format!("genre:{seed_genre}"), &selected,
+        &format!("genre:{seed_genre}"), &selected, library_id,
     )
     .await?;
 
@@ -482,8 +601,10 @@ async fn generate_deep_cuts_mix(
     user_id: &str,
     date_str: &str,
     used_track_ids: &mut Vec<String>,
+    library_ids_json: &str,
+    library_id: Option<&str>,
 ) -> Result<()> {
-    // Tracks from well-rated albums that have never been played by this user
+    // Tracks from well-rated albums that have never been played by this user (scoped by library)
     let candidate_tracks = sqlx::query(
         "SELECT t.id, t.title, t.album_id, a.artist_id, ar.name as artist_name,
                 t.duration_seconds, t.bpm_analyzed, t.bpm_tag,
@@ -499,17 +620,19 @@ async fn generate_deep_cuts_mix(
          )
          AND a.ai_rating IS NOT NULL
          AND a.ai_rating >= 6.0
+         AND t.library_id IN (SELECT value FROM json_each(?))
          ORDER BY a.ai_rating DESC, RANDOM()
          LIMIT 200",
     )
     .bind(user_id)
+    .bind(library_ids_json)
     .fetch_all(pool)
     .await?;
 
     let user_centroid = compute_user_bliss_centroid(pool, user_id).await?;
 
     if candidate_tracks.is_empty() {
-        // Fallback: rarely played tracks
+        // Fallback: rarely played tracks (scoped by library)
         let fallback = sqlx::query(
             "SELECT t.id, t.title, t.album_id, a.artist_id, ar.name as artist_name,
                     t.duration_seconds, t.bpm_analyzed, t.bpm_tag,
@@ -521,9 +644,11 @@ async fn generate_deep_cuts_mix(
              JOIN albums a ON t.album_id = a.id
              JOIN artists ar ON a.artist_id = ar.id
              WHERE a.play_count <= 1
+               AND t.library_id IN (SELECT value FROM json_each(?))
              ORDER BY COALESCE(a.ai_rating, 5.0) DESC, RANDOM()
              LIMIT 200",
         )
+        .bind(library_ids_json)
         .fetch_all(pool)
         .await?;
 
@@ -543,7 +668,7 @@ async fn generate_deep_cuts_mix(
 
         insert_mix(
             pool, user_id, date_str, "deep_cuts", "Deep Cuts",
-            "Hidden gems from your library", "deep_cuts:", &selected,
+            "Hidden gems from your library", "deep_cuts:", &selected, library_id,
         )
         .await?;
 
@@ -567,7 +692,7 @@ async fn generate_deep_cuts_mix(
 
     insert_mix(
         pool, user_id, date_str, "deep_cuts", "Deep Cuts",
-        "Hidden gems from your library", "deep_cuts:", &selected,
+        "Hidden gems from your library", "deep_cuts:", &selected, library_id,
     )
     .await?;
 
@@ -582,32 +707,38 @@ async fn generate_decade_mix(
     user_id: &str,
     date_str: &str,
     used_track_ids: &mut Vec<String>,
+    library_ids_json: &str,
+    library_id: Option<&str>,
 ) -> Result<()> {
-    // Find most-played decades
+    // Find most-played decades (scoped by library)
     let decade_rows = sqlx::query(
         "SELECT (a.year / 10 * 10) as decade, COUNT(*) as plays
          FROM play_history ph
          JOIN tracks t ON ph.track_id = t.id
          JOIN albums a ON t.album_id = a.id
          WHERE ph.user_id = ? AND ph.completed = 1 AND a.year IS NOT NULL
+           AND t.library_id IN (SELECT value FROM json_each(?))
          GROUP BY decade
          ORDER BY plays DESC
          LIMIT 10",
     )
     .bind(user_id)
+    .bind(library_ids_json)
     .fetch_all(pool)
     .await?;
 
     let decades: Vec<i32> = if decade_rows.is_empty() {
-        // Fallback: most common decades in library
+        // Fallback: most common decades in library (scoped)
         let lib_decades = sqlx::query(
             "SELECT (year / 10 * 10) as decade, COUNT(*) as cnt
              FROM albums
              WHERE year IS NOT NULL
+               AND library_id IN (SELECT value FROM json_each(?))
              GROUP BY decade
              ORDER BY cnt DESC
              LIMIT 10",
         )
+        .bind(library_ids_json)
         .fetch_all(pool)
         .await?;
         lib_decades.iter().map(|r| r.get("decade")).collect()
@@ -624,6 +755,7 @@ async fn generate_decade_mix(
     let seed_decade = decades[idx];
     let decade_end = seed_decade + 9;
 
+    // Get tracks from this decade (scoped by library)
     let candidate_tracks = sqlx::query(
         "SELECT t.id, t.title, t.album_id, a.artist_id, ar.name as artist_name,
                 t.duration_seconds, t.bpm_analyzed, t.bpm_tag,
@@ -635,11 +767,13 @@ async fn generate_decade_mix(
          JOIN albums a ON t.album_id = a.id
          JOIN artists ar ON a.artist_id = ar.id
          WHERE a.year >= ? AND a.year <= ?
+           AND t.library_id IN (SELECT value FROM json_each(?))
          ORDER BY rating DESC
          LIMIT 200",
     )
     .bind(seed_decade)
     .bind(decade_end)
+    .bind(library_ids_json)
     .fetch_all(pool)
     .await?;
 
@@ -662,7 +796,7 @@ async fn generate_decade_mix(
 
     insert_mix(
         pool, user_id, date_str, "decade", &title, &description,
-        &format!("decade:{seed_decade}s"), &selected,
+        &format!("decade:{seed_decade}s"), &selected, library_id,
     )
     .await?;
 
@@ -1314,12 +1448,13 @@ async fn insert_mix(
     description: &str,
     seed_value: &str,
     tracks: &[MixTrack],
+    library_id: Option<&str>,
 ) -> Result<()> {
     let mix_id = Uuid::new_v4().to_string();
 
     sqlx::query(
-        "INSERT INTO daily_mixes (id, user_id, mix_date, mix_type, title, description, seed_value)
-         VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO daily_mixes (id, user_id, mix_date, mix_type, title, description, seed_value, library_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&mix_id)
     .bind(user_id)
@@ -1328,6 +1463,7 @@ async fn insert_mix(
     .bind(title)
     .bind(description)
     .bind(seed_value)
+    .bind(library_id)
     .execute(pool)
     .await?;
 

@@ -13,29 +13,51 @@ use std::sync::Arc;
 use tokio::fs::File;
 use uuid::Uuid;
 
+use serde::Deserialize;
+
 use crate::error::AppError;
 use crate::routes::albums::CoverParams;
 use crate::AppState;
+
+#[derive(Debug, Deserialize)]
+pub struct DailyMixListParams {
+    pub library: Option<String>,
+}
 
 /// GET /mixes/daily — Get today's mixes for the authenticated user
 pub async fn list_daily_mixes(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<Claims>,
+    Query(params): Query<DailyMixListParams>,
 ) -> Result<([(header::HeaderName, String); 1], Json<Value>), AppError> {
     let today = chrono::Utc::now().date_naive();
     let today_str = today.format("%Y-%m-%d").to_string();
 
-    // Generate mixes on-demand if none exist for today
-    let count = sqlx::query_as::<_, (i64,)>(
-        "SELECT COUNT(*) FROM daily_mixes WHERE user_id = ? AND mix_date = ?",
-    )
-    .bind(&claims.sub)
-    .bind(&today_str)
-    .fetch_one(&state.db)
-    .await?;
+    let library_ids = riff_core::db::resolve_library_ids(&state.db, params.library.as_deref()).await?;
+    let library_id = params.library.as_deref();
+
+    // Generate mixes on-demand if none exist for today (scoped by library context)
+    let count = if let Some(lib_id) = library_id {
+        sqlx::query_as::<_, (i64,)>(
+            "SELECT COUNT(*) FROM daily_mixes WHERE user_id = ? AND mix_date = ? AND library_id = ?",
+        )
+        .bind(&claims.sub)
+        .bind(&today_str)
+        .bind(lib_id)
+        .fetch_one(&state.db)
+        .await?
+    } else {
+        sqlx::query_as::<_, (i64,)>(
+            "SELECT COUNT(*) FROM daily_mixes WHERE user_id = ? AND mix_date = ? AND library_id IS NULL",
+        )
+        .bind(&claims.sub)
+        .bind(&today_str)
+        .fetch_one(&state.db)
+        .await?
+    };
 
     if count.0 == 0 {
-        if let Err(e) = daily_mixes::generate_daily_mixes(&state.db, &claims.sub, today).await {
+        if let Err(e) = daily_mixes::generate_daily_mixes(&state.db, &claims.sub, today, &library_ids, library_id).await {
             tracing::warn!("on-demand daily mix generation failed for {}: {e}", claims.sub);
         }
     }
@@ -48,6 +70,7 @@ pub async fn list_daily_mixes(
          LEFT JOIN daily_mix_tracks dmt ON dm.id = dmt.mix_id
          LEFT JOIN tracks t ON dmt.track_id = t.id
          WHERE dm.user_id = ? AND dm.mix_date = ?
+         AND dm.library_id IN (SELECT value FROM json_each(?))
          GROUP BY dm.id
          ORDER BY CASE dm.mix_type
              WHEN 'artist' THEN 1
@@ -58,6 +81,7 @@ pub async fn list_daily_mixes(
     )
     .bind(&claims.sub)
     .bind(&today_str)
+    .bind(&library_ids)
     .fetch_all(&state.db)
     .await?;
 

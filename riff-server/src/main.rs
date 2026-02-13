@@ -205,27 +205,36 @@ async fn main() -> Result<()> {
     let pool = db::init_pool().await?;
     tracing::info!("database initialized");
 
-    // Detect library path changes and wipe stale data
-    if let Some(library_path) = &config.library.path {
-        db::check_library_path(&pool, library_path).await?;
+    // Sync libraries from config to DB
+    let resolved_libs = config.resolved_libraries();
+    if !resolved_libs.is_empty() {
+        db::sync_libraries(&pool, &resolved_libs).await?;
     }
 
     // Bootstrap admin user on first run
     auth::bootstrap_admin(&pool, &config).await?;
 
-    // Scan library on startup
-    if let Some(library_path) = &config.library.path {
-        tracing::info!("scanning library: {}", library_path);
-        match scanner::scan_library(&pool, library_path).await {
+    // Scan all libraries on startup
+    for lib_entry in &resolved_libs {
+        let library_id = db::get_library_id_by_path(&pool, &lib_entry.path)
+            .await?
+            .unwrap_or_default();
+        if library_id.is_empty() {
+            tracing::warn!("no library_id found for path {:?}, skipping scan", lib_entry.path);
+            continue;
+        }
+        tracing::info!("scanning library {:?}: {}", lib_entry.name, lib_entry.path);
+        match scanner::scan_library(&pool, &lib_entry.path, &library_id).await {
             Ok(result) => {
                 tracing::info!(
-                    "scan complete: {} artists, {} albums, {} tracks",
+                    "scan complete for {:?}: {} artists, {} albums, {} tracks",
+                    lib_entry.name,
                     result.artists_added,
                     result.albums_added,
                     result.tracks_added,
                 );
             }
-            Err(e) => tracing::warn!("library scan failed: {}", e),
+            Err(e) => tracing::warn!("library scan failed for {:?}: {}", lib_entry.name, e),
         }
     }
 
@@ -406,6 +415,8 @@ async fn main() -> Result<()> {
         .route("/mixes/daily", get(routes::daily_mixes::list_daily_mixes))
         .route("/mixes/daily/{id}", get(routes::daily_mixes::get_daily_mix))
         .route("/mixes/daily/{id}/save", post(routes::daily_mixes::save_mix_as_playlist))
+        // Libraries (read-only for non-admin)
+        .route("/libraries", get(routes::libraries::list_libraries))
         .route_layer(axum_mw::from_fn_with_state(
             state.clone(),
             middleware::require_auth,
@@ -429,6 +440,10 @@ async fn main() -> Result<()> {
         .route("/library/artist-bios", post(routes::library::trigger_artist_bios))
         .route("/library/stats", get(routes::library::library_stats))
         .route("/library/ai/clear", post(routes::library::clear_ai_data))
+        // Libraries (admin CRUD)
+        .route("/libraries", post(routes::libraries::add_library))
+        .route("/libraries/{id}", put(routes::libraries::update_library).delete(routes::libraries::remove_library))
+        .route("/libraries/{id}/scan", post(routes::libraries::scan_single_library))
         .route("/config", get(routes::config::get_config).put(routes::config::update_config))
         .route("/users", get(routes::users::list_users))
         .route("/users", post(routes::users::create_user))

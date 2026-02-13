@@ -9,11 +9,35 @@ use crate::error::AppError;
 use crate::AppState;
 
 pub async fn trigger_scan(State(state): State<Arc<AppState>>) -> Result<Json<Value>, AppError> {
-    let library_path = state.config.read().await.library.path.clone()
-        .ok_or_else(|| AppError::BadRequest("no library path configured".into()))?;
+    let config = state.config.read().await;
+    let resolved_libs = config.resolved_libraries();
+    drop(config);
 
-    let result = scanner::scan_library(&state.db, &library_path).await
-        .map_err(|e| AppError::Internal(e.to_string()))?;
+    if resolved_libs.is_empty() {
+        return Err(AppError::BadRequest("no library path configured".into()));
+    }
+
+    let mut total_artists = 0u32;
+    let mut total_albums = 0u32;
+    let mut total_tracks = 0u32;
+    let mut all_errors = Vec::new();
+
+    for lib_entry in &resolved_libs {
+        let library_id = riff_core::db::get_library_id_by_path(&state.db, &lib_entry.path)
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?
+            .ok_or_else(|| AppError::Internal(format!("no library_id for path {:?}", lib_entry.path)))?;
+
+        match scanner::scan_library(&state.db, &lib_entry.path, &library_id).await {
+            Ok(result) => {
+                total_artists += result.artists_added;
+                total_albums += result.albums_added;
+                total_tracks += result.tracks_added;
+                all_errors.extend(result.errors);
+            }
+            Err(e) => all_errors.push(format!("scan failed for {:?}: {}", lib_entry.name, e)),
+        }
+    }
 
     let enrichment_triggered = maybe_spawn_enrichment(&state).await;
     let analysis_triggered = if !enrichment_triggered {
@@ -23,10 +47,10 @@ pub async fn trigger_scan(State(state): State<Arc<AppState>>) -> Result<Json<Val
     };
     Ok(Json(json!({
         "status": "complete",
-        "artists_added": result.artists_added,
-        "albums_added": result.albums_added,
-        "tracks_added": result.tracks_added,
-        "errors": result.errors,
+        "artists_added": total_artists,
+        "albums_added": total_albums,
+        "tracks_added": total_tracks,
+        "errors": all_errors,
         "enrichment_triggered": enrichment_triggered,
         "analysis_triggered": analysis_triggered,
     })))

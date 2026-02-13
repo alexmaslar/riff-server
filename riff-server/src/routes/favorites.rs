@@ -23,6 +23,7 @@ pub struct ToggleFavoriteBody {
 pub struct ListFavoritesParams {
     pub r#type: Option<String>,
     pub limit: Option<i64>,
+    pub library: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -73,6 +74,7 @@ pub async fn list_favorites(
     Query(params): Query<ListFavoritesParams>,
 ) -> Result<Json<Value>, AppError> {
     let limit = params.limit.unwrap_or(50);
+    let library_ids = riff_core::db::resolve_library_ids(&state.db, params.library.as_deref()).await?;
 
     let entity_type = match params.r#type.as_deref() {
         Some(t) => t,
@@ -88,10 +90,12 @@ pub async fn list_favorites(
                  JOIN albums a ON f.entity_id = a.id
                  JOIN artists ar ON a.artist_id = ar.id
                  WHERE f.user_id = ? AND f.entity_type = 'album'
+                 AND a.library_id IN (SELECT value FROM json_each(?))
                  ORDER BY f.created_at DESC
                  LIMIT ?",
             )
             .bind(&claims.sub)
+            .bind(&library_ids)
             .bind(limit)
             .fetch_all(&state.db)
             .await?;
@@ -128,10 +132,12 @@ pub async fn list_favorites(
                  FROM favorites f
                  JOIN artists ar ON f.entity_id = ar.id
                  WHERE f.user_id = ? AND f.entity_type = 'artist'
+                 AND ar.library_id IN (SELECT value FROM json_each(?))
                  ORDER BY f.created_at DESC
                  LIMIT ?",
             )
             .bind(&claims.sub)
+            .bind(&library_ids)
             .bind(limit)
             .fetch_all(&state.db)
             .await?;
@@ -158,10 +164,12 @@ pub async fn list_favorites(
                  JOIN albums a ON t.album_id = a.id
                  JOIN artists ar ON a.artist_id = ar.id
                  WHERE f.user_id = ? AND f.entity_type = 'track'
+                 AND a.library_id IN (SELECT value FROM json_each(?))
                  ORDER BY f.created_at DESC
                  LIMIT ?",
             )
             .bind(&claims.sub)
+            .bind(&library_ids)
             .bind(limit)
             .fetch_all(&state.db)
             .await?;

@@ -27,6 +27,7 @@ pub struct ListParams {
     pub focus: Option<String>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
+    pub library: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -130,7 +131,11 @@ pub async fn list_albums(
          FROM albums a JOIN artists ar ON a.artist_id = ar.id",
     );
 
-    let mut has_where = false;
+    let library_ids = riff_core::db::resolve_library_ids(&state.db, params.library.as_deref()).await?;
+    builder.push(" WHERE a.library_id IN (SELECT value FROM json_each(");
+    builder.push_bind(library_ids);
+    builder.push("))");
+    let mut has_where = true;
 
     if let Some(ref search) = params.search {
         builder.push(" WHERE (a.title LIKE ");
@@ -343,7 +348,11 @@ pub async fn build_album_detail(
              FROM album_recommendations r \
              JOIN albums a ON r.recommended_album_id = a.id \
              JOIN artists ar ON a.artist_id = ar.id \
+             JOIN albums src ON src.id = r.album_id \
+             JOIN libraries src_lib ON src.library_id = src_lib.id \
+             JOIN libraries rec_lib ON a.library_id = rec_lib.id \
              WHERE r.album_id = ? \
+             AND (src.library_id = a.library_id OR (src_lib.isolated = 0 AND rec_lib.isolated = 0)) \
              ORDER BY r.sort_order"
         )
         .bind(album_id)
@@ -627,6 +636,7 @@ pub async fn serve_thumbnail(original_path: &str, entity_id: &str, width: u32) -
 #[derive(Debug, Deserialize)]
 pub struct ListFiltersParams {
     pub focus: Option<String>,
+    pub library: Option<String>,
 }
 
 struct ParsedFilter {
@@ -753,6 +763,8 @@ pub async fn list_filters(
         .map(parse_focus_filters)
         .unwrap_or_default();
 
+    let library_ids = riff_core::db::resolve_library_ids(&state.db, params.library.as_deref()).await?;
+
     // Each category query applies all filters EXCEPT its own category,
     // so the user can still switch within a category while cross-category
     // options narrow to only what would return results.
@@ -761,8 +773,10 @@ pub async fn list_filters(
         let mut qb = QueryBuilder::<Sqlite>::new(
             "SELECT DISTINCT j.value FROM albums a \
              JOIN artists ar ON a.artist_id = ar.id, json_each(a.genre) j \
-             WHERE j.value IS NOT NULL",
+             WHERE j.value IS NOT NULL AND a.library_id IN (SELECT value FROM json_each(",
         );
+        qb.push_bind(library_ids.clone());
+        qb.push("))");
         append_focus_conditions(&mut qb, &filters, "genre", &claims.sub);
         qb.push(" ORDER BY j.value");
         let rows = qb.build().fetch_all(&state.db).await?;
@@ -773,8 +787,10 @@ pub async fn list_filters(
         let mut qb = QueryBuilder::<Sqlite>::new(
             "SELECT DISTINCT j.value FROM albums a \
              JOIN artists ar ON a.artist_id = ar.id, json_each(a.style) j \
-             WHERE j.value IS NOT NULL",
+             WHERE j.value IS NOT NULL AND a.library_id IN (SELECT value FROM json_each(",
         );
+        qb.push_bind(library_ids.clone());
+        qb.push("))");
         append_focus_conditions(&mut qb, &filters, "style", &claims.sub);
         qb.push(" ORDER BY j.value");
         let rows = qb.build().fetch_all(&state.db).await?;
@@ -785,8 +801,10 @@ pub async fn list_filters(
         let mut qb = QueryBuilder::<Sqlite>::new(
             "SELECT DISTINCT a.label FROM albums a \
              JOIN artists ar ON a.artist_id = ar.id \
-             WHERE a.label IS NOT NULL AND a.label != ''",
+             WHERE a.label IS NOT NULL AND a.label != '' AND a.library_id IN (SELECT value FROM json_each(",
         );
+        qb.push_bind(library_ids.clone());
+        qb.push("))");
         append_focus_conditions(&mut qb, &filters, "label", &claims.sub);
         qb.push(" ORDER BY a.label");
         let rows = qb.build().fetch_all(&state.db).await?;
@@ -798,8 +816,10 @@ pub async fn list_filters(
             "SELECT DISTINCT t.format FROM tracks t \
              JOIN albums a ON t.album_id = a.id \
              JOIN artists ar ON a.artist_id = ar.id \
-             WHERE t.format IS NOT NULL",
+             WHERE t.format IS NOT NULL AND a.library_id IN (SELECT value FROM json_each(",
         );
+        qb.push_bind(library_ids.clone());
+        qb.push("))");
         append_focus_conditions(&mut qb, &filters, "format", &claims.sub);
         qb.push(" ORDER BY t.format");
         let rows = qb.build().fetch_all(&state.db).await?;
@@ -810,8 +830,10 @@ pub async fn list_filters(
         let mut qb = QueryBuilder::<Sqlite>::new(
             "SELECT DISTINCT (a.year / 10 * 10) as decade_start FROM albums a \
              JOIN artists ar ON a.artist_id = ar.id \
-             WHERE a.year IS NOT NULL",
+             WHERE a.year IS NOT NULL AND a.library_id IN (SELECT value FROM json_each(",
         );
+        qb.push_bind(library_ids.clone());
+        qb.push("))");
         append_focus_conditions(&mut qb, &filters, "decade", &claims.sub);
         qb.push(" ORDER BY decade_start");
         let rows = qb.build().fetch_all(&state.db).await?;

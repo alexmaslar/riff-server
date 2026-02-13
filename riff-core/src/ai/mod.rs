@@ -32,7 +32,9 @@ pub async fn summarize_library(
         sqlx::query_as(
             "SELECT a.id, a.title, ar.name, a.year, a.genre, a.style, a.label, a.catalog_number, a.country, a.release_notes \
              FROM albums a JOIN artists ar ON a.artist_id = ar.id \
-             WHERE a.ai_summary IS NULL AND a.metadata_status = 'matched'"
+             JOIN libraries l ON a.library_id = l.id \
+             WHERE a.ai_summary IS NULL AND a.metadata_status = 'matched' \
+             AND COALESCE(l.album_summaries, 1) = 1"
         )
         .fetch_all(pool)
         .await?;
@@ -255,7 +257,9 @@ pub async fn rate_library(
         sqlx::query_as(
             "SELECT a.id, a.title, ar.name, a.year, a.genre \
              FROM albums a JOIN artists ar ON a.artist_id = ar.id \
-             WHERE a.ai_summary IS NOT NULL AND a.ai_rating IS NULL"
+             JOIN libraries l ON a.library_id = l.id \
+             WHERE a.ai_summary IS NOT NULL AND a.ai_rating IS NULL \
+             AND COALESCE(l.album_ratings, 1) = 1"
         )
         .fetch_all(pool)
         .await?;
@@ -380,7 +384,11 @@ pub async fn bio_artists(
     };
 
     let rows: Vec<(String, String)> = sqlx::query_as(
-        "SELECT id, name FROM artists WHERE ai_bio IS NULL"
+        "SELECT DISTINCT ar.id, ar.name FROM artists ar \
+         JOIN albums a ON a.artist_id = ar.id \
+         JOIN libraries l ON a.library_id = l.id \
+         WHERE ar.ai_bio IS NULL \
+         AND COALESCE(l.artist_bios, 1) = 1"
     )
     .fetch_all(pool)
     .await?;
@@ -556,38 +564,69 @@ pub async fn recommend_library(
     pool: &SqlitePool,
     config: &AiConfig,
 ) -> anyhow::Result<RecommendResult> {
-    let albums: Vec<(String, String, String, Option<i32>, String, String, Option<String>)> =
-        sqlx::query_as(
-            "SELECT a.id, a.title, ar.name, a.year, a.genre, a.style, a.label \
-             FROM albums a JOIN artists ar ON a.artist_id = ar.id"
-        )
-        .fetch_all(pool)
-        .await?;
-
-    if albums.is_empty() {
-        return Ok(RecommendResult { albums_processed: 0, recommendations_generated: 0 });
-    }
-
-    recommend_library_inner(pool, config, &albums, false).await
+    recommend_library_partitioned(pool, config, false).await
 }
 
 pub async fn recommend_library_force(
     pool: &SqlitePool,
     config: &AiConfig,
 ) -> anyhow::Result<RecommendResult> {
-    let albums: Vec<(String, String, String, Option<i32>, String, String, Option<String>)> =
+    recommend_library_partitioned(pool, config, true).await
+}
+
+/// Run album recommendations partitioned by library isolation.
+/// Isolated libraries only recommend within themselves; non-isolated libraries are grouped.
+async fn recommend_library_partitioned(
+    pool: &SqlitePool,
+    config: &AiConfig,
+    force_full: bool,
+) -> anyhow::Result<RecommendResult> {
+    let mut total = RecommendResult { albums_processed: 0, recommendations_generated: 0 };
+
+    // Non-isolated libraries grouped together
+    let non_isolated: Vec<(String, String, String, Option<i32>, String, String, Option<String>)> =
         sqlx::query_as(
             "SELECT a.id, a.title, ar.name, a.year, a.genre, a.style, a.label \
-             FROM albums a JOIN artists ar ON a.artist_id = ar.id"
+             FROM albums a JOIN artists ar ON a.artist_id = ar.id \
+             JOIN libraries l ON a.library_id = l.id \
+             WHERE COALESCE(l.album_recommendations, 1) = 1 AND l.isolated = 0"
         )
         .fetch_all(pool)
         .await?;
 
-    if albums.is_empty() {
-        return Ok(RecommendResult { albums_processed: 0, recommendations_generated: 0 });
+    if !non_isolated.is_empty() {
+        let r = recommend_library_inner(pool, config, &non_isolated, force_full).await?;
+        total.albums_processed += r.albums_processed;
+        total.recommendations_generated += r.recommendations_generated;
     }
 
-    recommend_library_inner(pool, config, &albums, true).await
+    // Each isolated library gets its own pass
+    let isolated_libs: Vec<(String,)> = sqlx::query_as(
+        "SELECT id FROM libraries WHERE isolated = 1"
+    )
+    .fetch_all(pool)
+    .await?;
+
+    for (lib_id,) in &isolated_libs {
+        let albums: Vec<(String, String, String, Option<i32>, String, String, Option<String>)> =
+            sqlx::query_as(
+                "SELECT a.id, a.title, ar.name, a.year, a.genre, a.style, a.label \
+                 FROM albums a JOIN artists ar ON a.artist_id = ar.id \
+                 JOIN libraries l ON a.library_id = l.id \
+                 WHERE COALESCE(l.album_recommendations, 1) = 1 AND a.library_id = ?"
+            )
+            .bind(lib_id)
+            .fetch_all(pool)
+            .await?;
+
+        if !albums.is_empty() {
+            let r = recommend_library_inner(pool, config, &albums, force_full).await?;
+            total.albums_processed += r.albums_processed;
+            total.recommendations_generated += r.recommendations_generated;
+        }
+    }
+
+    Ok(total)
 }
 
 async fn recommend_library_inner(
@@ -758,34 +797,67 @@ pub async fn recommend_artists(
     pool: &SqlitePool,
     config: &AiConfig,
 ) -> anyhow::Result<RecommendResult> {
-    let artists: Vec<(String, String)> = sqlx::query_as(
-        "SELECT id, name FROM artists"
-    )
-    .fetch_all(pool)
-    .await?;
-
-    if artists.is_empty() {
-        return Ok(RecommendResult { albums_processed: 0, recommendations_generated: 0 });
-    }
-
-    recommend_artists_inner(pool, config, &artists, false).await
+    recommend_artists_partitioned(pool, config, false).await
 }
 
 pub async fn recommend_artists_force(
     pool: &SqlitePool,
     config: &AiConfig,
 ) -> anyhow::Result<RecommendResult> {
-    let artists: Vec<(String, String)> = sqlx::query_as(
-        "SELECT id, name FROM artists"
+    recommend_artists_partitioned(pool, config, true).await
+}
+
+/// Run artist recommendations partitioned by library isolation.
+/// Isolated libraries only recommend within themselves; non-isolated libraries are grouped.
+async fn recommend_artists_partitioned(
+    pool: &SqlitePool,
+    config: &AiConfig,
+    force_full: bool,
+) -> anyhow::Result<RecommendResult> {
+    let mut total = RecommendResult { albums_processed: 0, recommendations_generated: 0 };
+
+    // Non-isolated libraries grouped together
+    let non_isolated: Vec<(String, String)> = sqlx::query_as(
+        "SELECT DISTINCT ar.id, ar.name FROM artists ar \
+         JOIN albums a ON a.artist_id = ar.id \
+         JOIN libraries l ON a.library_id = l.id \
+         WHERE COALESCE(l.artist_recommendations, 1) = 1 AND l.isolated = 0"
     )
     .fetch_all(pool)
     .await?;
 
-    if artists.is_empty() {
-        return Ok(RecommendResult { albums_processed: 0, recommendations_generated: 0 });
+    if !non_isolated.is_empty() {
+        let r = recommend_artists_inner(pool, config, &non_isolated, force_full).await?;
+        total.albums_processed += r.albums_processed;
+        total.recommendations_generated += r.recommendations_generated;
     }
 
-    recommend_artists_inner(pool, config, &artists, true).await
+    // Each isolated library gets its own pass
+    let isolated_libs: Vec<(String,)> = sqlx::query_as(
+        "SELECT id FROM libraries WHERE isolated = 1"
+    )
+    .fetch_all(pool)
+    .await?;
+
+    for (lib_id,) in &isolated_libs {
+        let artists: Vec<(String, String)> = sqlx::query_as(
+            "SELECT DISTINCT ar.id, ar.name FROM artists ar \
+             JOIN albums a ON a.artist_id = ar.id \
+             JOIN libraries l ON a.library_id = l.id \
+             WHERE COALESCE(l.artist_recommendations, 1) = 1 AND a.library_id = ?"
+        )
+        .bind(lib_id)
+        .fetch_all(pool)
+        .await?;
+
+        if !artists.is_empty() {
+            let r = recommend_artists_inner(pool, config, &artists, force_full).await?;
+            total.albums_processed += r.albums_processed;
+            total.recommendations_generated += r.recommendations_generated;
+        }
+    }
+
+    Ok(total)
 }
 
 async fn recommend_artists_inner(

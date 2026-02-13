@@ -8,6 +8,7 @@ pub mod favorites;
 pub mod featured;
 pub mod history;
 pub mod hls;
+pub mod libraries;
 pub mod library;
 pub mod playlists;
 pub mod podcasts;

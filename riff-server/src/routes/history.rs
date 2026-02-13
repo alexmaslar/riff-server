@@ -23,6 +23,7 @@ pub struct RecordPlayBody {
 #[derive(Debug, Deserialize)]
 pub struct HistoryParams {
     pub limit: Option<i64>,
+    pub library: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -60,6 +61,7 @@ pub async fn recently_played_albums(
     Query(params): Query<HistoryParams>,
 ) -> Result<Json<Value>, AppError> {
     let limit = params.limit.unwrap_or(20);
+    let library_ids = riff_core::db::resolve_library_ids(&state.db, params.library.as_deref()).await?;
 
     let rows = sqlx::query(
         "SELECT a.id, a.title, a.artist_id, ar.name, a.year, a.genre, a.style,
@@ -70,11 +72,13 @@ pub async fn recently_played_albums(
          JOIN albums a ON t.album_id = a.id
          JOIN artists ar ON a.artist_id = ar.id
          WHERE ph.user_id = ?
+         AND a.library_id IN (SELECT value FROM json_each(?))
          GROUP BY a.id
          ORDER BY last_played DESC
          LIMIT ?",
     )
     .bind(&claims.sub)
+    .bind(&library_ids)
     .bind(limit)
     .fetch_all(&state.db)
     .await?;
@@ -112,6 +116,7 @@ pub async fn continue_listening(
     Query(params): Query<HistoryParams>,
 ) -> Result<Json<Value>, AppError> {
     let limit = params.limit.unwrap_or(20);
+    let library_ids = riff_core::db::resolve_library_ids(&state.db, params.library.as_deref()).await?;
 
     let rows = sqlx::query(
         "SELECT a.id, a.title, a.artist_id, ar.name, a.year, a.genre, a.style,
@@ -122,6 +127,7 @@ pub async fn continue_listening(
          JOIN albums a ON t.album_id = a.id
          JOIN artists ar ON a.artist_id = ar.id
          WHERE ph.user_id = ?
+         AND a.library_id IN (SELECT value FROM json_each(?))
          AND a.id IN (
              SELECT a2.id
              FROM albums a2
@@ -141,6 +147,7 @@ pub async fn continue_listening(
          LIMIT ?",
     )
     .bind(&claims.sub)
+    .bind(&library_ids)
     .bind(&claims.sub)
     .bind(limit)
     .fetch_all(&state.db)
@@ -186,6 +193,9 @@ pub async fn listening_stats(
         _ => "", // "all" or missing = no date filter
     };
 
+    let library = params.get("library").map(|s| s.as_str());
+    let library_ids = riff_core::db::resolve_library_ids(&state.db, library).await?;
+
     // Run all stats queries concurrently
     let artists_sql = format!(
         "SELECT ar.id, ar.name, ar.image_url, COUNT(*) as plays, SUM(t.duration_seconds) as listening_seconds
@@ -194,6 +204,7 @@ pub async fn listening_stats(
          JOIN albums a ON t.album_id = a.id
          JOIN artists ar ON a.artist_id = ar.id
          WHERE ph.user_id = ? AND ph.completed = 1 {date_filter}
+         AND a.library_id IN (SELECT value FROM json_each(?))
          GROUP BY ar.id
          ORDER BY listening_seconds DESC
          LIMIT 5"
@@ -205,6 +216,7 @@ pub async fn listening_stats(
          JOIN albums a ON t.album_id = a.id
          JOIN artists ar ON a.artist_id = ar.id
          WHERE ph.user_id = ? AND ph.completed = 1 {date_filter}
+         AND a.library_id IN (SELECT value FROM json_each(?))
          GROUP BY a.id
          ORDER BY listening_seconds DESC
          LIMIT 5"
@@ -216,6 +228,7 @@ pub async fn listening_stats(
          JOIN albums a ON t.album_id = a.id,
          json_each(CASE WHEN a.genre = '[]' OR a.genre IS NULL THEN '[\"Unknown\"]' ELSE a.genre END) j
          WHERE ph.user_id = ? AND ph.completed = 1 {date_filter}
+         AND a.library_id IN (SELECT value FROM json_each(?))
          GROUP BY j.value
          ORDER BY genre_seconds DESC"
     );
@@ -223,14 +236,16 @@ pub async fn listening_stats(
         "SELECT COUNT(*) as total_plays, COALESCE(SUM(t.duration_seconds), 0) as total_seconds
          FROM play_history ph
          JOIN tracks t ON ph.track_id = t.id
-         WHERE ph.user_id = ? AND ph.completed = 1 {date_filter}"
+         JOIN albums a ON t.album_id = a.id
+         WHERE ph.user_id = ? AND ph.completed = 1 {date_filter}
+         AND a.library_id IN (SELECT value FROM json_each(?))"
     );
 
     let (top_artists, top_albums, genre_rows, totals) = tokio::join!(
-        sqlx::query(&artists_sql).bind(&claims.sub).fetch_all(&state.db),
-        sqlx::query(&albums_sql).bind(&claims.sub).fetch_all(&state.db),
-        sqlx::query(&genres_sql).bind(&claims.sub).fetch_all(&state.db),
-        sqlx::query(&totals_sql).bind(&claims.sub).fetch_one(&state.db),
+        sqlx::query(&artists_sql).bind(&claims.sub).bind(&library_ids).fetch_all(&state.db),
+        sqlx::query(&albums_sql).bind(&claims.sub).bind(&library_ids).fetch_all(&state.db),
+        sqlx::query(&genres_sql).bind(&claims.sub).bind(&library_ids).fetch_all(&state.db),
+        sqlx::query(&totals_sql).bind(&claims.sub).bind(&library_ids).fetch_one(&state.db),
     );
 
     let top_artists = top_artists?;

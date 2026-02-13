@@ -17,6 +17,7 @@ pub struct ListParams {
     pub search: Option<String>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
+    pub library: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -76,21 +77,30 @@ pub async fn list_artists(
 ) -> Result<Json<Value>, AppError> {
     let limit = params.limit.unwrap_or(50);
     let offset = params.offset.unwrap_or(0);
+    let library_ids = riff_core::db::resolve_library_ids(&state.db, params.library.as_deref()).await?;
 
     let rows = if let Some(ref search) = params.search {
         let pattern = format!("%{}%", search);
         sqlx::query_as::<_, (String, String, Option<String>, Option<String>, i64)>(
-            "SELECT id, name, COALESCE(ai_bio, bio) as bio, image_url, COUNT(*) OVER() as total_count FROM artists WHERE name LIKE ? ORDER BY name LIMIT ? OFFSET ?",
+            "SELECT id, name, COALESCE(ai_bio, bio) as bio, image_url, COUNT(*) OVER() as total_count \
+             FROM artists \
+             WHERE name LIKE ? AND library_id IN (SELECT value FROM json_each(?)) \
+             ORDER BY name LIMIT ? OFFSET ?",
         )
         .bind(&pattern)
+        .bind(&library_ids)
         .bind(limit)
         .bind(offset)
         .fetch_all(&state.db)
         .await
     } else {
         sqlx::query_as::<_, (String, String, Option<String>, Option<String>, i64)>(
-            "SELECT id, name, COALESCE(ai_bio, bio) as bio, image_url, COUNT(*) OVER() as total_count FROM artists ORDER BY name LIMIT ? OFFSET ?",
+            "SELECT id, name, COALESCE(ai_bio, bio) as bio, image_url, COUNT(*) OVER() as total_count \
+             FROM artists \
+             WHERE library_id IN (SELECT value FROM json_each(?)) \
+             ORDER BY name LIMIT ? OFFSET ?",
         )
+        .bind(&library_ids)
         .bind(limit)
         .bind(offset)
         .fetch_all(&state.db)
@@ -155,6 +165,14 @@ pub async fn build_artist_detail(
              FROM artist_recommendations r \
              JOIN artists a ON r.recommended_artist_id = a.id \
              WHERE r.artist_id = ? \
+             AND EXISTS ( \
+                 SELECT 1 FROM albums src_al \
+                 JOIN libraries src_lib ON src_al.library_id = src_lib.id \
+                 JOIN albums rec_al ON rec_al.artist_id = a.id \
+                 JOIN libraries rec_lib ON rec_al.library_id = rec_lib.id \
+                 WHERE src_al.artist_id = r.artist_id \
+                 AND (src_al.library_id = rec_al.library_id OR (src_lib.isolated = 0 AND rec_lib.isolated = 0)) \
+             ) \
              ORDER BY r.sort_order"
         )
         .bind(artist_id)

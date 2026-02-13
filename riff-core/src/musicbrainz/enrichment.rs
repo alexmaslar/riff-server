@@ -83,7 +83,9 @@ async fn enrich_albums(
     let rows: Vec<(String, String, String, Option<i32>, Option<String>)> = match sqlx::query_as(
         "SELECT a.id, a.title, ar.name, a.year, a.cover_art_path \
          FROM albums a JOIN artists ar ON a.artist_id = ar.id \
-         WHERE a.metadata_status IN ('pending', 'not_found')"
+         JOIN libraries l ON a.library_id = l.id \
+         WHERE a.metadata_status IN ('pending', 'not_found') \
+         AND COALESCE(l.auto_enrich, 1) = 1"
     )
     .fetch_all(pool)
     .await

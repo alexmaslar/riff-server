@@ -27,11 +27,34 @@ pub struct ServerConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LibraryEntry {
+    pub name: String,
+    pub path: String,
+    #[serde(default)]
+    pub isolated: bool,
+    /// Per-library overrides (None = follow global setting)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_enrich: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub album_summaries: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub album_ratings: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub album_recommendations: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artist_bios: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artist_recommendations: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LibraryConfig {
     #[serde(default)]
     pub path: Option<String>,
     #[serde(default = "default_scan_interval")]
     pub scan_interval: u64,
+    #[serde(default)]
+    pub libraries: Vec<LibraryEntry>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -246,6 +269,7 @@ impl Default for LibraryConfig {
         Self {
             path: None,
             scan_interval: default_scan_interval(),
+            libraries: Vec::new(),
         }
     }
 }
@@ -280,6 +304,30 @@ impl Config {
     pub fn load_from_str(yaml: &str) -> anyhow::Result<Self> {
         let config: Config = serde_yaml_ng::from_str(yaml)?;
         Ok(config)
+    }
+
+    /// Return the effective list of libraries.
+    /// If `libraries` is non-empty, return it.
+    /// Else if `path` is Some, return a single entry with name "Music" and that path.
+    /// Else return empty vec.
+    pub fn resolved_libraries(&self) -> Vec<LibraryEntry> {
+        if !self.library.libraries.is_empty() {
+            return self.library.libraries.clone();
+        }
+        if let Some(ref path) = self.library.path {
+            return vec![LibraryEntry {
+                name: "Music".to_string(),
+                path: path.clone(),
+                isolated: false,
+                auto_enrich: None,
+                album_summaries: None,
+                album_ratings: None,
+                album_recommendations: None,
+                artist_bios: None,
+                artist_recommendations: None,
+            }];
+        }
+        Vec::new()
     }
 
     pub fn save(&self) -> anyhow::Result<()> {

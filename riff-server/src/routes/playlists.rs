@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     Extension, Json,
 };
 use riff_core::auth::Claims;
@@ -11,6 +11,16 @@ use uuid::Uuid;
 
 use crate::error::AppError;
 use crate::AppState;
+
+#[derive(Debug, Deserialize)]
+pub struct ListPlaylistsParams {
+    pub library: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreatePlaylistParams {
+    pub library: Option<String>,
+}
 
 #[derive(Debug, Deserialize)]
 pub struct CreatePlaylistBody {
@@ -33,7 +43,10 @@ pub struct ReorderTracksBody {
 pub async fn list_playlists(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<Claims>,
+    Query(params): Query<ListPlaylistsParams>,
 ) -> Result<Json<Value>, AppError> {
+    let library_ids = riff_core::db::resolve_library_ids(&state.db, params.library.as_deref()).await?;
+
     let rows = sqlx::query(
         "SELECT p.id, p.name, p.description,
                 COUNT(pt.id) as track_count,
@@ -43,10 +56,12 @@ pub async fn list_playlists(
          LEFT JOIN playlist_tracks pt ON p.id = pt.playlist_id
          LEFT JOIN tracks t ON pt.track_id = t.id
          WHERE p.user_id = ?
+         AND p.library_id IN (SELECT value FROM json_each(?))
          GROUP BY p.id
          ORDER BY p.updated_at DESC",
     )
     .bind(&claims.sub)
+    .bind(&library_ids)
     .fetch_all(&state.db)
     .await
     .map_err(|e| AppError::Internal(e.to_string()))?;
@@ -136,17 +151,23 @@ pub async fn get_playlist(
 pub async fn create_playlist(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<Claims>,
+    Query(params): Query<CreatePlaylistParams>,
     Json(body): Json<CreatePlaylistBody>,
 ) -> Result<Json<Value>, AppError> {
     let id = Uuid::new_v4().to_string();
 
+    let library_ids = riff_core::db::resolve_library_ids(&state.db, params.library.as_deref()).await?;
+    let lib_ids: Vec<String> = serde_json::from_str(&library_ids).unwrap_or_default();
+    let playlist_library_id = lib_ids.first().cloned();
+
     sqlx::query(
-        "INSERT INTO playlists (id, user_id, name, description) VALUES (?, ?, ?, ?)",
+        "INSERT INTO playlists (id, user_id, name, description, library_id) VALUES (?, ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(&claims.sub)
     .bind(&body.name)
     .bind(&body.description)
+    .bind(&playlist_library_id)
     .execute(&state.db)
     .await
     .map_err(|e| AppError::Internal(e.to_string()))?;
