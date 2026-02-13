@@ -854,6 +854,46 @@ pub async fn list_filters(
     })))
 }
 
+#[derive(Debug, Deserialize)]
+pub struct GenresParams {
+    pub library: Option<String>,
+}
+
+pub async fn list_genres(
+    State(state): State<Arc<AppState>>,
+    Extension(_claims): Extension<Claims>,
+    Query(params): Query<GenresParams>,
+) -> Result<Json<Value>, AppError> {
+    let library_ids = riff_core::db::resolve_library_ids(&state.db, params.library.as_deref()).await?;
+
+    let rows = sqlx::query(
+        "SELECT j.value as name, COUNT(DISTINCT a.id) as album_count,
+                (SELECT a2.id FROM albums a2, json_each(a2.genre) j2
+                 WHERE j2.value = j.value AND a2.library_id IN (SELECT value FROM json_each(?1))
+                 ORDER BY a2.play_count DESC LIMIT 1) as representative_album_id
+         FROM albums a, json_each(a.genre) j
+         WHERE j.value IS NOT NULL AND a.library_id IN (SELECT value FROM json_each(?1))
+         GROUP BY j.value
+         ORDER BY j.value"
+    )
+    .bind(&library_ids)
+    .fetch_all(&state.db)
+    .await?;
+
+    let genres: Vec<Value> = rows
+        .iter()
+        .map(|row| {
+            json!({
+                "name": row.get::<String, _>("name"),
+                "album_count": row.get::<i64, _>("album_count"),
+                "representative_album_id": row.get::<Option<String>, _>("representative_album_id"),
+            })
+        })
+        .collect();
+
+    Ok(Json(json!({ "genres": genres })))
+}
+
 pub async fn increment_play_count(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
