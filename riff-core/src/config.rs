@@ -45,6 +45,9 @@ pub struct LibraryEntry {
     pub artist_bios: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artist_recommendations: Option<bool>,
+    /// Per-library scan interval in seconds (None = use global default)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scan_interval: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -325,6 +328,7 @@ impl Config {
                 album_recommendations: None,
                 artist_bios: None,
                 artist_recommendations: None,
+                scan_interval: None,
             }];
         }
         Vec::new()

@@ -72,7 +72,8 @@ pub async fn sync_libraries(pool: &SqlitePool, libraries: &[LibraryEntry]) -> an
             sqlx::query(
                 "UPDATE libraries SET name = ?, isolated = ?, display_order = ?, \
                  auto_enrich = ?, album_summaries = ?, album_ratings = ?, \
-                 album_recommendations = ?, artist_bios = ?, artist_recommendations = ? \
+                 album_recommendations = ?, artist_bios = ?, artist_recommendations = ?, \
+                 scan_interval = ? \
                  WHERE id = ?",
             )
             .bind(&entry.name)
@@ -84,6 +85,7 @@ pub async fn sync_libraries(pool: &SqlitePool, libraries: &[LibraryEntry]) -> an
             .bind(entry.album_recommendations)
             .bind(entry.artist_bios)
             .bind(entry.artist_recommendations)
+            .bind(entry.scan_interval.map(|v| v as i64))
             .bind(db_id)
             .execute(pool)
             .await?;
@@ -93,8 +95,9 @@ pub async fn sync_libraries(pool: &SqlitePool, libraries: &[LibraryEntry]) -> an
             sqlx::query(
                 "INSERT INTO libraries (id, name, path, isolated, display_order, \
                  auto_enrich, album_summaries, album_ratings, \
-                 album_recommendations, artist_bios, artist_recommendations) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                 album_recommendations, artist_bios, artist_recommendations, \
+                 scan_interval) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&id)
             .bind(&entry.name)
@@ -107,6 +110,7 @@ pub async fn sync_libraries(pool: &SqlitePool, libraries: &[LibraryEntry]) -> an
             .bind(entry.album_recommendations)
             .bind(entry.artist_bios)
             .bind(entry.artist_recommendations)
+            .bind(entry.scan_interval.map(|v| v as i64))
             .execute(pool)
             .await?;
             info!("registered new library {:?} at {:?} (id={})", entry.name, entry.path, id);
@@ -121,7 +125,7 @@ pub async fn sync_libraries(pool: &SqlitePool, libraries: &[LibraryEntry]) -> an
     .await?;
 
     if let Some((first_id,)) = first_lib {
-        for table in &["artists", "albums", "tracks", "daily_mixes", "playlists"] {
+        for table in &["artists", "albums", "tracks", "playlists"] {
             let sql = format!("UPDATE {table} SET library_id = ? WHERE library_id IS NULL");
             let result = sqlx::query(&sql)
                 .bind(&first_id)

@@ -19,6 +19,7 @@ pub async fn list_libraries(
         "SELECT l.id, l.name, l.path, l.isolated, l.display_order,
                 l.auto_enrich, l.album_summaries, l.album_ratings,
                 l.album_recommendations, l.artist_bios, l.artist_recommendations,
+                l.scan_interval,
                 (SELECT COUNT(*) FROM albums WHERE library_id = l.id) as album_count,
                 (SELECT COUNT(*) FROM tracks WHERE library_id = l.id) as track_count
          FROM libraries l
@@ -43,6 +44,7 @@ pub async fn list_libraries(
                 "albumRecommendations": row.get::<Option<bool>, _>("album_recommendations"),
                 "artistBios": row.get::<Option<bool>, _>("artist_bios"),
                 "artistRecommendations": row.get::<Option<bool>, _>("artist_recommendations"),
+                "scanInterval": row.get::<Option<i64>, _>("scan_interval"),
             })
         })
         .collect();
@@ -76,6 +78,7 @@ pub async fn add_library(
             album_recommendations: None,
             artist_bios: None,
             artist_recommendations: None,
+            scan_interval: None,
         });
         config.save().map_err(|e| AppError::Internal(e.to_string()))?;
     }
@@ -119,6 +122,13 @@ where
     Ok(Some(Option::deserialize(deserializer)?))
 }
 
+fn deserialize_optional_nullable_u64<'de, D>(deserializer: D) -> Result<Option<Option<u64>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Some(Option::deserialize(deserializer)?))
+}
+
 #[derive(Debug, Deserialize)]
 pub struct UpdateLibraryBody {
     pub name: Option<String>,
@@ -136,6 +146,8 @@ pub struct UpdateLibraryBody {
     pub artist_bios: Option<Option<bool>>,
     #[serde(default, deserialize_with = "deserialize_optional_nullable")]
     pub artist_recommendations: Option<Option<bool>>,
+    #[serde(default, deserialize_with = "deserialize_optional_nullable_u64")]
+    pub scan_interval: Option<Option<u64>>,
 }
 
 /// PUT /libraries/:id — Update a library (admin)
@@ -186,6 +198,9 @@ pub async fn update_library(
             }
             if let Some(v) = body.artist_recommendations {
                 entry.artist_recommendations = v;
+            }
+            if let Some(v) = body.scan_interval {
+                entry.scan_interval = v;
             }
         }
         config.save().map_err(|e| AppError::Internal(e.to_string()))?;
