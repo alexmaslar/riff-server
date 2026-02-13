@@ -81,6 +81,8 @@ pub async fn master_playlist(
         return Err(AppError::Internal("ffmpeg not available".into()));
     }
 
+    tracing::info!("[HLS] master playlist request: {id}");
+
     // Verify track exists
     sqlx::query_scalar::<_, String>("SELECT id FROM tracks WHERE id = ?")
         .bind(&id)
@@ -178,7 +180,21 @@ pub async fn variant_playlist(
     let action = {
         let mut generating = state.hls_generating.lock().await;
         if playlist_path.exists() {
-            Action::Cached
+            // Validate cached playlist is complete (has #EXT-X-ENDLIST).
+            // Incomplete playlists are left behind when FFmpeg is interrupted
+            // (e.g. server restart during generation). Without #EXT-X-ENDLIST,
+            // AVPlayer treats the stream as live and stalls after buffered segments.
+            let is_complete = std::fs::read_to_string(&playlist_path)
+                .map(|c| c.contains("#EXT-X-ENDLIST"))
+                .unwrap_or(false);
+            if is_complete {
+                Action::Cached
+            } else {
+                tracing::warn!("[HLS] stale playlist missing #EXT-X-ENDLIST, regenerating: {gen_key}");
+                let _ = std::fs::remove_dir_all(&variant_dir);
+                generating.insert(gen_key.clone());
+                Action::Generate
+            }
         } else if generating.contains(&gen_key) {
             Action::Wait
         } else {
@@ -189,7 +205,7 @@ pub async fn variant_playlist(
 
     match action {
         Action::Cached => {
-            tracing::debug!("[HLS] variant playlist cache hit: {gen_key}");
+            tracing::info!("[HLS] variant playlist cache hit: {gen_key}");
         }
         Action::Generate => {
             tracing::info!("[HLS] generating segments for {gen_key}");
@@ -263,7 +279,7 @@ pub async fn serve_segment(
             return Err(e);
         }
     };
-    tracing::debug!("[HLS] serving segment: {id}/{variant}/{segment}");
+    tracing::info!("[HLS] serving segment: {id}/{variant}/{segment}");
 
     // Touch track dir mtime so cleanup_hls_cache knows it's still in use.
     // Without this, only variant_playlist touches mtime — during long playback
@@ -320,6 +336,8 @@ async fn generate_segments(
                 "hls",
                 "-hls_time",
                 "10",
+                "-hls_playlist_type",
+                "vod",
                 "-hls_list_size",
                 "0",
                 "-hls_segment_filename",

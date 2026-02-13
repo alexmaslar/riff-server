@@ -55,6 +55,7 @@ pub async fn stream_track(
     Query(params): Query<StreamParams>,
     request: axum::extract::Request,
 ) -> Result<Response, AppError> {
+    tracing::info!("[Stream] progressive stream request: {id}");
     let is_remote = request
         .extensions()
         .get::<IsRemote>()
