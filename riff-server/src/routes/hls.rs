@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::fs::File;
+use tracing;
 
 use crate::error::AppError;
 use crate::AppState;
@@ -130,10 +131,6 @@ pub async fn master_playlist(
 ///
 /// Generates segments on-demand for the requested variant (hi or lo),
 /// then returns the variant's m3u8 playlist.
-///
-/// For Generate/Wait paths, the response is streamed with periodic M3U8
-/// comment lines (`## keepalive`) to prevent cellular NAT from dropping
-/// the TCP connection during the 10-30+ second FFmpeg generation window.
 pub async fn variant_playlist(
     State(state): State<Arc<AppState>>,
     Path((id, variant)): Path<(String, String)>,
@@ -190,126 +187,55 @@ pub async fn variant_playlist(
         }
     };
 
-    // Cached — return immediately with no streaming overhead
-    if matches!(action, Action::Cached) {
-        let _ = filetime::set_file_mtime(&track_dir, filetime::FileTime::now());
-        let content = tokio::fs::read_to_string(&playlist_path)
-            .await
-            .map_err(|e| AppError::Internal(format!("failed to read playlist: {e}")))?;
-        return Ok(Response::builder()
-            .status(axum::http::StatusCode::OK)
-            .header(header::CONTENT_TYPE, "application/vnd.apple.mpegurl")
-            .header(header::CACHE_CONTROL, "private, max-age=3600")
-            .body(Body::from(content))
-            .unwrap());
-    }
-
-    // Generate or Wait — stream response with keepalive comments to survive
-    // cellular NAT timeouts. Without data flowing, NATs drop the TCP connection
-    // after 30-60s of inactivity (TCP keepalive probes are often ignored).
-    let (tx, rx) = tokio::sync::mpsc::channel::<Result<String, std::io::Error>>(16);
-
-    tokio::spawn(async move {
-        // Send M3U8 header immediately so HTTP response + body data flow over TCP
-        if tx.send(Ok("#EXTM3U\n".into())).await.is_err() {
-            return;
+    match action {
+        Action::Cached => {
+            tracing::debug!("[HLS] variant playlist cache hit: {gen_key}");
         }
-
-        let success = match action {
-            Action::Generate => {
-                let codec = if state.ffmpeg_has_fdk_aac {
-                    "libfdk_aac"
-                } else {
-                    "aac"
-                };
-
-                // Run FFmpeg in a sub-task so we can send keepalive concurrently
-                let state_gen = state.clone();
-                let file_path_gen = file_path.clone();
-                let variant_dir_gen = variant_dir.clone();
-                let gen_key_gen = gen_key.clone();
-                let mut gen_handle = tokio::spawn(async move {
-                    let _permit = state_gen
-                        .transcode_semaphore
-                        .clone()
-                        .acquire_owned()
-                        .await
-                        .map_err(|_| "transcode semaphore closed".to_string())?;
-                    let result = generate_segments(
-                        &file_path_gen, &variant_dir_gen, bitrate, codec,
-                    )
-                    .await
-                    .map_err(|e| format!("{e}"));
-                    state_gen.hls_generating.lock().await.remove(&gen_key_gen);
-                    result
-                });
-
-                // Send keepalive M3U8 comments every 5s while FFmpeg runs
-                let mut keepalive = tokio::time::interval(Duration::from_secs(5));
-                keepalive.tick().await; // skip immediate first tick
-                let gen_ok = loop {
-                    tokio::select! {
-                        biased;
-                        result = &mut gen_handle => {
-                            break result.map(|r| r.is_ok()).unwrap_or(false);
-                        }
-                        _ = keepalive.tick() => {
-                            if tx.send(Ok("## keepalive\n".into())).await.is_err() {
-                                return; // client disconnected; gen_handle cleans up gen_key
-                            }
-                        }
-                    }
-                };
-                gen_ok
-            }
-            Action::Wait => {
-                let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
-                let mut poll = tokio::time::interval(Duration::from_millis(200));
-                let mut keepalive = tokio::time::interval(Duration::from_secs(5));
+        Action::Generate => {
+            tracing::info!("[HLS] generating segments for {gen_key}");
+            let codec = if state.ffmpeg_has_fdk_aac {
+                "libfdk_aac"
+            } else {
+                "aac"
+            };
+            let _permit = state
+                .transcode_semaphore
+                .clone()
+                .acquire_owned()
+                .await
+                .map_err(|_| AppError::Internal("transcode semaphore closed".into()))?;
+            let result = generate_segments(&file_path, &variant_dir, bitrate, codec).await;
+            state.hls_generating.lock().await.remove(&gen_key);
+            result?;
+            tracing::info!("[HLS] segments ready for {gen_key}");
+        }
+        Action::Wait => {
+            tracing::info!("[HLS] waiting for in-progress generation: {gen_key}");
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+            let mut poll = tokio::time::interval(Duration::from_millis(200));
+            loop {
                 poll.tick().await;
-                keepalive.tick().await;
-                loop {
-                    tokio::select! {
-                        biased;
-                        _ = poll.tick() => {
-                            if playlist_path.exists() {
-                                break true;
-                            }
-                            if tokio::time::Instant::now() >= deadline {
-                                break false;
-                            }
-                        }
-                        _ = keepalive.tick() => {
-                            if tx.send(Ok("## keepalive\n".into())).await.is_err() {
-                                return;
-                            }
-                        }
-                    }
+                if playlist_path.exists() {
+                    break;
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(AppError::Internal("HLS generation timed out".into()));
                 }
             }
-            _ => unreachable!(),
-        };
-
-        if success {
-            let _ = filetime::set_file_mtime(&track_dir, filetime::FileTime::now());
-            if let Ok(content) = tokio::fs::read_to_string(&playlist_path).await {
-                // Strip #EXTM3U header since we already sent it as the first chunk
-                let rest = content.strip_prefix("#EXTM3U\n").unwrap_or(&content);
-                let _ = tx.send(Ok(rest.to_string())).await;
-            }
+            tracing::info!("[HLS] wait complete for {gen_key}");
         }
-        // tx dropped → stream ends; if !success, client sees incomplete M3U8 → error
-    });
+    }
 
-    let body_stream = futures::stream::unfold(rx, |mut rx| async move {
-        rx.recv().await.map(|item| (item, rx))
-    });
+    let _ = filetime::set_file_mtime(&track_dir, filetime::FileTime::now());
+    let content = tokio::fs::read_to_string(&playlist_path)
+        .await
+        .map_err(|e| AppError::Internal(format!("failed to read playlist: {e}")))?;
 
     Ok(Response::builder()
         .status(axum::http::StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/vnd.apple.mpegurl")
         .header(header::CACHE_CONTROL, "private, max-age=3600")
-        .body(Body::from_stream(body_stream))
+        .body(Body::from(content))
         .unwrap())
 }
 
@@ -330,7 +256,14 @@ pub async fn serve_segment(
 
     // Try bitrate-keyed dirs first, then fall back to legacy plain variant dirs
     let base = hls_base_dir()?.join(&id);
-    let segment_path = find_segment(&base, &variant, &segment)?;
+    let segment_path = match find_segment(&base, &variant, &segment) {
+        Ok(path) => path,
+        Err(e) => {
+            tracing::warn!("[HLS] segment not found: {id}/{variant}/{segment}");
+            return Err(e);
+        }
+    };
+    tracing::debug!("[HLS] serving segment: {id}/{variant}/{segment}");
 
     // Touch track dir mtime so cleanup_hls_cache knows it's still in use.
     // Without this, only variant_playlist touches mtime — during long playback
