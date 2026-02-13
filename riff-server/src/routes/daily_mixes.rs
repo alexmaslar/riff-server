@@ -62,28 +62,50 @@ pub async fn list_daily_mixes(
         }
     }
 
-    let rows = sqlx::query(
-        "SELECT dm.id, dm.mix_type, dm.title, dm.description, dm.seed_value,
-                COUNT(dmt.track_id) as track_count,
-                COALESCE(SUM(t.duration_seconds), 0) as total_duration
-         FROM daily_mixes dm
-         LEFT JOIN daily_mix_tracks dmt ON dm.id = dmt.mix_id
-         LEFT JOIN tracks t ON dmt.track_id = t.id
-         WHERE dm.user_id = ? AND dm.mix_date = ?
-         AND dm.library_id IN (SELECT value FROM json_each(?))
-         GROUP BY dm.id
-         ORDER BY CASE dm.mix_type
-             WHEN 'artist' THEN 1
-             WHEN 'genre' THEN 2
-             WHEN 'deep_cuts' THEN 3
-             WHEN 'decade' THEN 4
-         END",
-    )
-    .bind(&claims.sub)
-    .bind(&today_str)
-    .bind(&library_ids)
-    .fetch_all(&state.db)
-    .await?;
+    let rows = if let Some(lib_id) = library_id {
+        sqlx::query(
+            "SELECT dm.id, dm.mix_type, dm.title, dm.description, dm.seed_value,
+                    COUNT(dmt.track_id) as track_count,
+                    COALESCE(SUM(t.duration_seconds), 0) as total_duration
+             FROM daily_mixes dm
+             LEFT JOIN daily_mix_tracks dmt ON dm.id = dmt.mix_id
+             LEFT JOIN tracks t ON dmt.track_id = t.id
+             WHERE dm.user_id = ? AND dm.mix_date = ? AND dm.library_id = ?
+             GROUP BY dm.id
+             ORDER BY CASE dm.mix_type
+                 WHEN 'artist' THEN 1
+                 WHEN 'genre' THEN 2
+                 WHEN 'deep_cuts' THEN 3
+                 WHEN 'decade' THEN 4
+             END",
+        )
+        .bind(&claims.sub)
+        .bind(&today_str)
+        .bind(lib_id)
+        .fetch_all(&state.db)
+        .await?
+    } else {
+        sqlx::query(
+            "SELECT dm.id, dm.mix_type, dm.title, dm.description, dm.seed_value,
+                    COUNT(dmt.track_id) as track_count,
+                    COALESCE(SUM(t.duration_seconds), 0) as total_duration
+             FROM daily_mixes dm
+             LEFT JOIN daily_mix_tracks dmt ON dm.id = dmt.mix_id
+             LEFT JOIN tracks t ON dmt.track_id = t.id
+             WHERE dm.user_id = ? AND dm.mix_date = ? AND dm.library_id IS NULL
+             GROUP BY dm.id
+             ORDER BY CASE dm.mix_type
+                 WHEN 'artist' THEN 1
+                 WHEN 'genre' THEN 2
+                 WHEN 'deep_cuts' THEN 3
+                 WHEN 'decade' THEN 4
+             END",
+        )
+        .bind(&claims.sub)
+        .bind(&today_str)
+        .fetch_all(&state.db)
+        .await?
+    };
 
     // Pre-fetch all seed artist image URLs in one query
     let artist_ids: Vec<String> = rows
