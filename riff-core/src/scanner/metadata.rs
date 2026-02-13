@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::Path;
+use symphonia::core::codecs::CodecType;
 use symphonia::core::formats::FormatOptions;
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::{MetadataOptions, StandardTagKey, Tag};
@@ -15,7 +16,7 @@ pub struct TrackMetadata {
     pub duration_seconds: i32,
     pub format: String,
     pub sample_rate: i32,
-    pub bit_depth: i32,
+    pub bit_depth: Option<i32>,
     pub file_size_bytes: i64,
     pub year: Option<i32>,
     pub genre: Vec<String>,
@@ -53,17 +54,18 @@ pub fn extract_metadata(path: &Path) -> anyhow::Result<TrackMetadata> {
 
     // Extract codec params from the default (first) track
     let mut sample_rate: i32 = 44100;
-    let mut bit_depth: i32 = 16;
+    let mut bit_depth: Option<i32> = None;
     let mut duration_seconds: i32 = 0;
+    let mut codec_type: Option<CodecType> = None;
 
     if let Some(track) = format.default_track() {
         let params = &track.codec_params;
+        codec_type = Some(params.codec);
         if let Some(sr) = params.sample_rate {
             sample_rate = sr as i32;
         }
-        if let Some(bd) = params.bits_per_sample {
-            bit_depth = bd as i32;
-        }
+        // Only store bit_depth when symphonia reports it (lossy codecs return None)
+        bit_depth = params.bits_per_sample.map(|bd| bd as i32);
         // Calculate duration from n_frames and sample_rate
         if let (Some(n_frames), Some(sr)) = (params.n_frames, params.sample_rate) {
             if sr > 0 {
@@ -87,7 +89,7 @@ pub fn extract_metadata(path: &Path) -> anyhow::Result<TrackMetadata> {
         tags.extend(rev.tags().iter().cloned());
     }
 
-    let audio_format = detect_format(path);
+    let audio_format = detect_format(path, codec_type);
 
     let mut meta = TrackMetadata {
         title: filename_without_ext(path),
@@ -273,9 +275,9 @@ pub fn metadata_from_path(path: &Path, library_root: &Path) -> Option<TrackMetad
         track_number,
         disc_number,
         duration_seconds: 0,
-        format: detect_format(path),
+        format: detect_format(path, None),
         sample_rate: 44100,
-        bit_depth: 16,
+        bit_depth: Some(16),
         file_size_bytes: file_size,
         year,
         genre: Vec::new(),
@@ -306,17 +308,26 @@ fn parse_disc_folder(name: &str) -> Option<i32> {
     None
 }
 
-fn detect_format(path: &Path) -> String {
-    match path
+fn detect_format(path: &Path, codec: Option<CodecType>) -> String {
+    let ext = path
         .extension()
         .and_then(|e| e.to_str())
-        .map(|e| e.to_lowercase())
-        .as_deref()
-    {
+        .map(|e| e.to_lowercase());
+
+    match ext.as_deref() {
         Some("flac") => "FLAC".to_string(),
-        Some("m4a") => "ALAC".to_string(),
+        Some("m4a") => {
+            // Use codec ID to distinguish ALAC from AAC in M4A containers
+            match codec {
+                Some(symphonia::core::codecs::CODEC_TYPE_ALAC) => "ALAC".to_string(),
+                Some(symphonia::core::codecs::CODEC_TYPE_AAC) => "AAC".to_string(),
+                _ => "ALAC".to_string(), // default assumption for m4a without codec info
+            }
+        }
         Some("wav") => "WAV".to_string(),
         Some("aiff") | Some("aif") => "AIFF".to_string(),
+        Some("mp3") => "MP3".to_string(),
+        Some("ogg") | Some("oga") => "OGG".to_string(),
         Some(ext) => ext.to_uppercase(),
         None => "UNKNOWN".to_string(),
     }
@@ -393,40 +404,61 @@ mod tests {
 
     #[test]
     fn test_detect_format_flac() {
-        assert_eq!(detect_format(Path::new("song.flac")), "FLAC");
+        assert_eq!(detect_format(Path::new("song.flac"), None), "FLAC");
     }
 
     #[test]
-    fn test_detect_format_m4a() {
-        assert_eq!(detect_format(Path::new("song.m4a")), "ALAC");
+    fn test_detect_format_m4a_default() {
+        assert_eq!(detect_format(Path::new("song.m4a"), None), "ALAC");
+    }
+
+    #[test]
+    fn test_detect_format_m4a_alac_codec() {
+        assert_eq!(
+            detect_format(Path::new("song.m4a"), Some(symphonia::core::codecs::CODEC_TYPE_ALAC)),
+            "ALAC"
+        );
+    }
+
+    #[test]
+    fn test_detect_format_m4a_aac_codec() {
+        assert_eq!(
+            detect_format(Path::new("song.m4a"), Some(symphonia::core::codecs::CODEC_TYPE_AAC)),
+            "AAC"
+        );
     }
 
     #[test]
     fn test_detect_format_wav() {
-        assert_eq!(detect_format(Path::new("song.wav")), "WAV");
+        assert_eq!(detect_format(Path::new("song.wav"), None), "WAV");
     }
 
     #[test]
     fn test_detect_format_aiff() {
-        assert_eq!(detect_format(Path::new("song.aiff")), "AIFF");
-        assert_eq!(detect_format(Path::new("song.aif")), "AIFF");
+        assert_eq!(detect_format(Path::new("song.aiff"), None), "AIFF");
+        assert_eq!(detect_format(Path::new("song.aif"), None), "AIFF");
+    }
+
+    #[test]
+    fn test_detect_format_mp3() {
+        assert_eq!(detect_format(Path::new("song.mp3"), None), "MP3");
+    }
+
+    #[test]
+    fn test_detect_format_ogg() {
+        assert_eq!(detect_format(Path::new("song.ogg"), None), "OGG");
+        assert_eq!(detect_format(Path::new("song.oga"), None), "OGG");
     }
 
     #[test]
     fn test_detect_format_case_insensitive() {
-        assert_eq!(detect_format(Path::new("song.FLAC")), "FLAC");
-        assert_eq!(detect_format(Path::new("song.Wav")), "WAV");
-    }
-
-    #[test]
-    fn test_detect_format_unknown_extension() {
-        assert_eq!(detect_format(Path::new("song.mp3")), "MP3");
-        assert_eq!(detect_format(Path::new("song.ogg")), "OGG");
+        assert_eq!(detect_format(Path::new("song.FLAC"), None), "FLAC");
+        assert_eq!(detect_format(Path::new("song.Wav"), None), "WAV");
     }
 
     #[test]
     fn test_detect_format_no_extension() {
-        assert_eq!(detect_format(Path::new("song")), "UNKNOWN");
+        assert_eq!(detect_format(Path::new("song"), None), "UNKNOWN");
     }
 
     // -- filename_without_ext --

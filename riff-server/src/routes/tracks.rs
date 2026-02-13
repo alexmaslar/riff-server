@@ -25,6 +25,9 @@ fn mime_for_format(format: &str) -> &'static str {
         "ALAC" => "audio/mp4",
         "WAV" => "audio/wav",
         "AIFF" => "audio/aiff",
+        "MP3" => "audio/mpeg",
+        "AAC" => "audio/mp4",
+        "OGG" => "audio/ogg",
         _ => "application/octet-stream",
     }
 }
@@ -35,8 +38,15 @@ fn ext_for_format(format: &str) -> &'static str {
         "ALAC" => "m4a",
         "WAV" => "wav",
         "AIFF" => "aiff",
+        "MP3" => "mp3",
+        "AAC" => "m4a",
+        "OGG" => "ogg",
         _ => "bin",
     }
+}
+
+fn is_lossless_format(format: &str) -> bool {
+    matches!(format, "FLAC" | "ALAC" | "WAV" | "AIFF")
 }
 
 pub async fn stream_track(
@@ -227,7 +237,7 @@ pub async fn stream_track(
                 )
                 .header(header::ACCEPT_RANGES, "bytes")
                 .header(header::ETAG, &etag)
-                .header("X-Riff-Quality", "lossless")
+                .header("X-Riff-Quality", if is_lossless_format(&format) { "lossless" } else { "original" })
                 .body(Body::from_stream(stream))
                 .unwrap())
         }
@@ -245,7 +255,7 @@ pub async fn stream_track(
                 .header(header::CONTENT_LENGTH, file_size.to_string())
                 .header(header::ACCEPT_RANGES, "bytes")
                 .header(header::ETAG, &etag)
-                .header("X-Riff-Quality", "lossless")
+                .header("X-Riff-Quality", if is_lossless_format(&format) { "lossless" } else { "original" })
                 .body(Body::from_stream(stream))
                 .unwrap())
         }

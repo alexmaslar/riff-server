@@ -8,7 +8,7 @@ use tracing::{info, warn};
 use uuid::Uuid;
 use walkdir::WalkDir;
 
-const SUPPORTED_EXTENSIONS: &[&str] = &["flac", "m4a", "wav", "aiff", "aif"];
+const SUPPORTED_EXTENSIONS: &[&str] = &["flac", "m4a", "wav", "aiff", "aif", "mp3", "ogg", "oga"];
 
 pub struct ScanResult {
     pub artists_added: u32,
@@ -270,7 +270,7 @@ async fn insert_track(
     .bind(file_path)
     .bind(&meta.format)
     .bind(meta.sample_rate)
-    .bind(meta.bit_depth)
+    .bind(meta.bit_depth.unwrap_or(0))
     .bind(meta.file_size_bytes)
     .bind(&meta.composer)
     .bind(&meta.language)
