@@ -19,6 +19,8 @@ pub struct StreamParams {
     pub quality: Option<String>,
 }
 
+/// Mid-bitrate tier (kbps) — 128 for moderate cellular connections.
+const MID_BITRATE: u32 = 128;
 /// Low-bitrate tier (kbps) — always 64 for poor connections.
 const LO_BITRATE: u32 = 64;
 
@@ -63,6 +65,7 @@ fn find_segment(
 fn variant_bitrate(variant: &str, config_bitrate: u32) -> u32 {
     match variant {
         "hi" => config_bitrate,
+        "mid" => MID_BITRATE,
         "lo" => LO_BITRATE,
         _ => config_bitrate,
     }
@@ -111,12 +114,15 @@ pub async fn master_playlist(
 
     // BANDWIDTH in bits/sec with ~12% overhead for framing
     let hi_bw = (hi_bitrate as u64) * 1120;
+    let mid_bw = (MID_BITRATE as u64) * 1120;
     let lo_bw = (LO_BITRATE as u64) * 1120;
 
     let master = format!(
         "#EXTM3U\n\
          #EXT-X-STREAM-INF:BANDWIDTH={hi_bw},CODECS=\"mp4a.40.2\"\n\
          hi/playlist.m3u8{quality_param}\n\
+         #EXT-X-STREAM-INF:BANDWIDTH={mid_bw},CODECS=\"mp4a.40.2\"\n\
+         mid/playlist.m3u8{quality_param}\n\
          #EXT-X-STREAM-INF:BANDWIDTH={lo_bw},CODECS=\"mp4a.40.2\"\n\
          lo/playlist.m3u8{quality_param}\n"
     );
@@ -335,7 +341,7 @@ async fn generate_segments(
                 "-f",
                 "hls",
                 "-hls_time",
-                "10",
+                "6",
                 "-hls_playlist_type",
                 "vod",
                 "-hls_list_size",

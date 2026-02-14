@@ -162,16 +162,18 @@ where
 }
 
 /// Create a TCP listener with keepalive probes to survive cellular NAT timeouts.
-/// Probes start after 15s idle, repeat every 5s, and give up after 3 failures (~30s total).
+/// Probes start after 5s idle, repeat every 5s, and give up after 6 failures (~35s total).
+/// Early probes (5s) keep cellular NAT mappings alive — waiting 15s risks the NAT
+/// dropping the mapping before the first probe even fires.
 fn create_keepalive_listener(addr: SocketAddr) -> std::io::Result<std::net::TcpListener> {
     let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
     socket.set_reuse_address(true)?;
     socket.set_nodelay(true)?;
     socket.set_tcp_keepalive(
         &TcpKeepalive::new()
-            .with_time(Duration::from_secs(15))
+            .with_time(Duration::from_secs(5))
             .with_interval(Duration::from_secs(5))
-            .with_retries(3),
+            .with_retries(6),
     )?;
     socket.bind(&addr.into())?;
     socket.listen(1024)?;
