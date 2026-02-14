@@ -64,7 +64,7 @@ pub async fn stream_track(
     let headers = request.headers().clone();
 
     let (file_path, format, duration_seconds) = sqlx::query_as::<_, (String, String, f64)>(
-        "SELECT file_path, format, COALESCE(duration_seconds, 0.0) FROM tracks WHERE id = ?",
+        "SELECT file_path, format, CAST(COALESCE(duration_seconds, 0) AS REAL) FROM tracks WHERE id = ?",
     )
     .bind(&id)
     .fetch_optional(&state.db)
