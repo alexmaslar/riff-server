@@ -63,8 +63,8 @@ pub async fn stream_track(
         .unwrap_or(false);
     let headers = request.headers().clone();
 
-    let (file_path, format) = sqlx::query_as::<_, (String, String)>(
-        "SELECT file_path, format FROM tracks WHERE id = ?",
+    let (file_path, format, duration_seconds) = sqlx::query_as::<_, (String, String, f64)>(
+        "SELECT file_path, format, COALESCE(duration_seconds, 0.0) FROM tracks WHERE id = ?",
     )
     .bind(&id)
     .fetch_optional(&state.db)
@@ -161,14 +161,21 @@ pub async fn stream_track(
                     };
                 }
                 Ok(transcode::TranscodeResult::Streaming { body }) => {
-                    return Ok(Response::builder()
+                    let mut builder = Response::builder()
                         .status(StatusCode::OK)
                         .header(header::CONTENT_TYPE, "audio/aac")
                         .header("X-Riff-Transcoded", "true")
                         .header("X-Riff-Quality", effective_quality)
-                        .header("X-Riff-Original-Format", &format)
-                        .body(body)
-                        .unwrap());
+                        .header("X-Riff-Original-Format", &format);
+
+                    // Estimate content-length from duration + bitrate for client progress tracking.
+                    // Use a custom header since the estimate may be inaccurate.
+                    if duration_seconds > 0.0 {
+                        let estimated_bytes = (duration_seconds * (bitrate as f64) * 1000.0 / 8.0) as u64;
+                        builder = builder.header("X-Riff-Estimated-Length", estimated_bytes.to_string());
+                    }
+
+                    return Ok(builder.body(body).unwrap());
                 }
                 Err(e) => {
                     tracing::warn!("transcode failed, falling back to raw: {e}");
