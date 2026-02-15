@@ -233,6 +233,28 @@ async fn run_periodic_scanner(state: Arc<AppState>) {
     }
 }
 
+async fn run_daily_refresh(state: Arc<AppState>) {
+    loop {
+        // Compute duration until next midnight UTC
+        let now = chrono::Utc::now();
+        let tomorrow = (now.date_naive() + chrono::Days::new(1))
+            .and_hms_opt(0, 0, 0)
+            .unwrap();
+        let until_midnight = tomorrow
+            .signed_duration_since(now.naive_utc())
+            .to_std()
+            .unwrap_or(Duration::from_secs(60));
+
+        tokio::time::sleep(until_midnight).await;
+
+        // Generate daily mixes for all users
+        match daily_mixes::generate_all_daily_mixes(&state.db).await {
+            Ok(_) => tracing::info!("daily mix refresh complete"),
+            Err(e) => tracing::warn!("daily mix refresh failed: {e}"),
+        }
+    }
+}
+
 /// Create a TCP listener with keepalive probes to survive cellular NAT timeouts.
 /// Probes start after 5s idle, repeat every 5s, and give up after 6 failures (~35s total).
 /// Early probes (5s) keep cellular NAT mappings alive — waiting 15s risks the NAT
@@ -392,6 +414,14 @@ async fn main() -> Result<()> {
         let scanner_state = state.clone();
         tokio::spawn(async move {
             run_periodic_scanner(scanner_state).await;
+        });
+    }
+
+    // Daily mix refresh at midnight UTC
+    {
+        let daily_state = state.clone();
+        tokio::spawn(async move {
+            run_daily_refresh(daily_state).await;
         });
     }
 
