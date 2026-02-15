@@ -6,6 +6,7 @@ use riff_core::{config::LibraryEntry, db, scanner};
 use serde::{Deserialize, Deserializer};
 use serde_json::{json, Value};
 use sqlx::Row;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use crate::error::AppError;
@@ -274,24 +275,34 @@ pub async fn scan_single_library(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, AppError> {
-    let row: Option<(String, String)> =
-        sqlx::query_as("SELECT id, path FROM libraries WHERE id = ?")
-            .bind(&id)
-            .fetch_optional(&state.db)
-            .await?;
+    // Guard: prevent overlap with periodic scanner
+    if state.scan_running.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+        return Ok(Json(json!({ "status": "already_running" })));
+    }
 
-    let (library_id, lib_path) =
-        row.ok_or_else(|| AppError::NotFound("library not found".into()))?;
+    let result = async {
+        let row: Option<(String, String)> =
+            sqlx::query_as("SELECT id, path FROM libraries WHERE id = ?")
+                .bind(&id)
+                .fetch_optional(&state.db)
+                .await?;
 
-    let result = scanner::scan_library(&state.db, &lib_path, &library_id)
-        .await
-        .map_err(|e| AppError::Internal(e.to_string()))?;
+        let (library_id, lib_path) =
+            row.ok_or_else(|| AppError::NotFound("library not found".into()))?;
 
-    Ok(Json(json!({
-        "status": "complete",
-        "artists_added": result.artists_added,
-        "albums_added": result.albums_added,
-        "tracks_added": result.tracks_added,
-        "errors": result.errors,
-    })))
+        let scan_result = scanner::scan_library(&state.db, &lib_path, &library_id)
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        Ok(Json(json!({
+            "status": "complete",
+            "artists_added": scan_result.artists_added,
+            "albums_added": scan_result.albums_added,
+            "tracks_added": scan_result.tracks_added,
+            "errors": scan_result.errors,
+        })))
+    }.await;
+
+    state.scan_running.store(false, Ordering::SeqCst);
+    result
 }

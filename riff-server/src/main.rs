@@ -42,6 +42,7 @@ pub struct AppState {
     pub artist_bio_running: AtomicBool,
     pub artist_recommendation_running: AtomicBool,
     pub top_tracks_running: AtomicBool,
+    pub scan_running: AtomicBool,
     pub remote_access: upnp::RemoteAccessManager,
     pub restart: Notify,
     pub ffmpeg_available: bool,
@@ -158,6 +159,77 @@ where
             Err(e) => tracing::warn!("{name} failed: {e}"),
         }
         flag.store(false, Ordering::SeqCst);
+    }
+}
+
+async fn run_periodic_scanner(state: Arc<AppState>) {
+    loop {
+        // Read the minimum scan interval across all libraries
+        let interval_secs = {
+            let config = state.config.read().await;
+            let global = config.library.scan_interval;
+            config
+                .resolved_libraries()
+                .iter()
+                .filter_map(|lib| lib.scan_interval)
+                .min()
+                .unwrap_or(global)
+        };
+
+        // scan_interval = 0 means disabled; re-check every 5 minutes
+        if interval_secs == 0 {
+            tokio::time::sleep(Duration::from_secs(300)).await;
+            continue;
+        }
+        tokio::time::sleep(Duration::from_secs(interval_secs)).await;
+
+        // Guard: skip if a scan is already in progress
+        if state
+            .scan_running
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            tracing::info!("periodic scan skipped — scan already running");
+            continue;
+        }
+
+        let config = state.config.read().await;
+        let libs = config.resolved_libraries();
+        let global_interval = config.library.scan_interval;
+        drop(config);
+
+        for lib_entry in &libs {
+            let effective_interval = lib_entry.scan_interval.unwrap_or(global_interval);
+            if effective_interval == 0 {
+                continue;
+            }
+
+            let library_id = match db::get_library_id_by_path(&state.db, &lib_entry.path).await {
+                Ok(Some(id)) => id,
+                _ => continue,
+            };
+
+            tracing::info!("periodic scan: {:?} ({})", lib_entry.name, lib_entry.path);
+            match scanner::scan_library(&state.db, &lib_entry.path, &library_id).await {
+                Ok(result) => {
+                    if result.tracks_added > 0
+                        || result.albums_added > 0
+                        || result.artists_added > 0
+                    {
+                        tracing::info!(
+                            "periodic scan complete for {:?}: {} artists, {} albums, {} tracks",
+                            lib_entry.name,
+                            result.artists_added,
+                            result.albums_added,
+                            result.tracks_added,
+                        );
+                    }
+                }
+                Err(e) => tracing::warn!("periodic scan failed for {:?}: {}", lib_entry.name, e),
+            }
+        }
+
+        state.scan_running.store(false, Ordering::SeqCst);
     }
 }
 
@@ -292,6 +364,7 @@ async fn main() -> Result<()> {
         artist_bio_running: AtomicBool::new(false),
         artist_recommendation_running: AtomicBool::new(false),
         top_tracks_running: AtomicBool::new(false),
+        scan_running: AtomicBool::new(false),
         remote_access: upnp::RemoteAccessManager::new(config.server.https_port),
         restart: Notify::new(),
         ffmpeg_available,
@@ -311,6 +384,14 @@ async fn main() -> Result<()> {
         let pipeline_state = state.clone();
         tokio::spawn(async move {
             run_background_pipeline(pipeline_state).await;
+        });
+    }
+
+    // Periodic library scanner
+    {
+        let scanner_state = state.clone();
+        tokio::spawn(async move {
+            run_periodic_scanner(scanner_state).await;
         });
     }
 
