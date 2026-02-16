@@ -1,0 +1,2 @@
+ALTER TABLE albums ADD COLUMN source TEXT NOT NULL DEFAULT 'local';
+ALTER TABLE albums ADD COLUMN apple_music_id TEXT;

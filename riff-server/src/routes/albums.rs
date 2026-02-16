@@ -11,6 +11,7 @@ use serde_json::{json, Value};
 use sqlx::{QueryBuilder, Row, Sqlite, SqlitePool};
 use std::sync::Arc;
 use tokio::fs::File;
+use uuid::Uuid;
 
 use crate::error::AppError;
 use crate::AppState;
@@ -43,6 +44,8 @@ pub struct AlbumResponse {
     pub cover_art_path: Option<String>,
     pub added_at: String,
     pub play_count: i64,
+    pub source: Option<String>,
+    pub apple_music_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -70,6 +73,8 @@ pub struct AlbumDetailResponse {
     pub credits: Vec<CreditSummary>,
     pub is_favorited: bool,
     pub similar_albums: Vec<SimilarAlbum>,
+    pub source: Option<String>,
+    pub apple_music_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -108,6 +113,7 @@ pub struct TrackSummary {
     pub loudness_lufs: Option<f64>,
     pub mood: Option<String>,
     pub file_size_bytes: Option<i64>,
+    pub isrc: Option<String>,
     pub album_play_count: Option<i64>,
 }
 
@@ -127,7 +133,7 @@ pub async fn list_albums(
     };
 
     let mut builder = QueryBuilder::<Sqlite>::new(
-        "SELECT a.id, a.title, a.artist_id, ar.name, a.year, a.genre, a.style, a.label, a.cover_art_path, a.added_at, a.play_count, COUNT(*) OVER() as total_count
+        "SELECT a.id, a.title, a.artist_id, ar.name, a.year, a.genre, a.style, a.label, a.cover_art_path, a.added_at, a.play_count, COUNT(*) OVER() as total_count, a.source, a.apple_music_id
          FROM albums a JOIN artists ar ON a.artist_id = ar.id",
     );
 
@@ -294,6 +300,8 @@ pub async fn list_albums(
                 cover_art_path: row.get(8),
                 added_at: row.get(9),
                 play_count: row.get(10),
+                source: row.get(12),
+                apple_music_id: row.get(13),
             }
         })
         .collect();
@@ -307,7 +315,7 @@ pub async fn build_album_detail(
     user_id: &str,
 ) -> Result<AlbumDetailResponse, AppError> {
     let album_row = sqlx::query(
-        "SELECT a.id, a.title, a.artist_id, ar.name, a.year, a.genre, a.style, a.label, a.catalog_number, a.cover_art_path, a.ai_summary, a.ai_rating, a.metadata_status, a.added_at, a.country, a.release_notes, a.all_labels, a.is_compilation, a.play_count
+        "SELECT a.id, a.title, a.artist_id, ar.name, a.year, a.genre, a.style, a.label, a.catalog_number, a.cover_art_path, a.ai_summary, a.ai_rating, a.metadata_status, a.added_at, a.country, a.release_notes, a.all_labels, a.is_compilation, a.play_count, a.source, a.apple_music_id
          FROM albums a JOIN artists ar ON a.artist_id = ar.id
          WHERE a.id = ?",
     )
@@ -323,7 +331,7 @@ pub async fn build_album_detail(
                     t.album_id, ar.name as artist_name, t.sample_rate, t.bit_depth,
                     t.composer, COALESCE(t.bpm_tag, t.bpm_analyzed) as bpm,
                     COALESCE(t.musical_key, t.key_analyzed) as resolved_key, t.loudness_lufs, t.mood,
-                    t.file_size_bytes, a.play_count as album_play_count
+                    t.file_size_bytes, t.isrc, a.play_count as album_play_count
              FROM tracks t
              JOIN albums a ON t.album_id = a.id
              JOIN artists ar ON a.artist_id = ar.id
@@ -383,7 +391,8 @@ pub async fn build_album_detail(
             loudness_lufs: row.get(13),
             mood: row.get(14),
             file_size_bytes: row.get(15),
-            album_play_count: row.get(16),
+            isrc: row.get(16),
+            album_play_count: row.get(17),
         })
         .collect();
 
@@ -439,7 +448,100 @@ pub async fn build_album_detail(
         credits: credit_summaries,
         is_favorited,
         similar_albums,
+        source: album_row.get(19),
+        apple_music_id: album_row.get(20),
     })
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateAlbumBody {
+    pub title: String,
+    pub artist_name: String,
+    pub year: Option<i32>,
+    #[serde(default)]
+    pub genre: Vec<String>,
+    pub cover_art_url: Option<String>,
+    pub apple_music_id: String,
+}
+
+pub async fn create_album(
+    State(state): State<Arc<AppState>>,
+    Extension(_claims): Extension<Claims>,
+    Json(body): Json<CreateAlbumBody>,
+) -> Result<Json<Value>, AppError> {
+    // Idempotency: if an album with this apple_music_id already exists, return it
+    let existing = sqlx::query_as::<_, (String,)>(
+        "SELECT id FROM albums WHERE apple_music_id = ?",
+    )
+    .bind(&body.apple_music_id)
+    .fetch_optional(&state.db)
+    .await?;
+
+    if let Some((existing_id,)) = existing {
+        return Ok(Json(json!({
+            "id": existing_id,
+            "apple_music_id": body.apple_music_id,
+            "existed": true,
+        })));
+    }
+
+    // Find the first non-isolated library
+    let library_row = sqlx::query_as::<_, (String,)>(
+        "SELECT id FROM libraries WHERE isolated = 0 LIMIT 1",
+    )
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or(AppError::BadRequest("no library available".into()))?;
+    let library_id = library_row.0;
+
+    // Upsert artist by name (case-insensitive match within the library)
+    let artist_id = match sqlx::query_as::<_, (String,)>(
+        "SELECT id FROM artists WHERE name COLLATE NOCASE = ? AND library_id = ?",
+    )
+    .bind(&body.artist_name)
+    .bind(&library_id)
+    .fetch_optional(&state.db)
+    .await?
+    {
+        Some((id,)) => id,
+        None => {
+            let new_id = Uuid::new_v4().to_string();
+            sqlx::query(
+                "INSERT INTO artists (id, name, library_id) VALUES (?, ?, ?)",
+            )
+            .bind(&new_id)
+            .bind(&body.artist_name)
+            .bind(&library_id)
+            .execute(&state.db)
+            .await?;
+            new_id
+        }
+    };
+
+    // Insert the album
+    let album_id = Uuid::new_v4().to_string();
+    let genre_json = serde_json::to_string(&body.genre).unwrap_or_else(|_| "[]".to_string());
+
+    sqlx::query(
+        "INSERT INTO albums (id, title, artist_id, library_id, year, genre, style, cover_art_path, source, apple_music_id, metadata_status, added_at)
+         VALUES (?, ?, ?, ?, ?, ?, '[]', ?, 'apple_music', ?, 'not_found', datetime('now'))",
+    )
+    .bind(&album_id)
+    .bind(&body.title)
+    .bind(&artist_id)
+    .bind(&library_id)
+    .bind(body.year)
+    .bind(&genre_json)
+    .bind(&body.cover_art_url)
+    .bind(&body.apple_music_id)
+    .execute(&state.db)
+    .await?;
+
+    Ok(Json(json!({
+        "id": album_id,
+        "apple_music_id": body.apple_music_id,
+        "existed": false,
+    })))
 }
 
 pub async fn get_album(
