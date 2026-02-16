@@ -486,6 +486,7 @@ pub struct CreateAlbumBody {
     pub apple_music_id: String,
     #[serde(default)]
     pub tracks: Vec<CreateAlbumTrack>,
+    pub library_id: Option<String>,
 }
 
 /// Insert Apple Music track stubs for an album, returning the ID mappings.
@@ -543,11 +544,33 @@ pub async fn create_album(
     Extension(_claims): Extension<Claims>,
     Json(body): Json<CreateAlbumBody>,
 ) -> Result<Json<Value>, AppError> {
-    // Idempotency: if an album with this apple_music_id already exists, return it
+    // Resolve library_id: use provided value (validated) or fall back to first non-isolated library
+    let library_id = if let Some(ref lib_id) = body.library_id {
+        // Validate the library exists
+        sqlx::query_as::<_, (String,)>(
+            "SELECT id FROM libraries WHERE id = ?",
+        )
+        .bind(lib_id)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or(AppError::BadRequest("library not found".into()))?;
+        lib_id.clone()
+    } else {
+        let library_row = sqlx::query_as::<_, (String,)>(
+            "SELECT id FROM libraries WHERE isolated = 0 LIMIT 1",
+        )
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or(AppError::BadRequest("no library available".into()))?;
+        library_row.0
+    };
+
+    // Idempotency: if an album with this apple_music_id already exists in this library, return it
     let existing = sqlx::query_as::<_, (String,)>(
-        "SELECT id FROM albums WHERE apple_music_id = ?",
+        "SELECT id FROM albums WHERE apple_music_id = ? AND library_id = ?",
     )
     .bind(&body.apple_music_id)
+    .bind(&library_id)
     .fetch_optional(&state.db)
     .await?;
 
@@ -588,15 +611,6 @@ pub async fn create_album(
             "tracks": track_mappings,
         })));
     }
-
-    // Find the first non-isolated library
-    let library_row = sqlx::query_as::<_, (String,)>(
-        "SELECT id FROM libraries WHERE isolated = 0 LIMIT 1",
-    )
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or(AppError::BadRequest("no library available".into()))?;
-    let library_id = library_row.0;
 
     // Upsert artist by name (case-insensitive match within the library)
     let artist_id = match sqlx::query_as::<_, (String,)>(
@@ -1116,6 +1130,78 @@ pub async fn list_genres(
         .collect();
 
     Ok(Json(json!({ "genres": genres })))
+}
+
+pub async fn delete_album(
+    State(state): State<Arc<AppState>>,
+    Extension(_claims): Extension<Claims>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, AppError> {
+    // Verify album exists and is an Apple Music album
+    let row = sqlx::query_as::<_, (Option<String>,)>(
+        "SELECT source FROM albums WHERE id = ?",
+    )
+    .bind(&id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or(AppError::NotFound("album not found".into()))?;
+
+    if row.0.as_deref() != Some("apple_music") {
+        return Err(AppError::BadRequest(
+            "only Apple Music albums can be deleted".into(),
+        ));
+    }
+
+    // Delete related rows (no FK cascade enforced at runtime)
+    sqlx::query("DELETE FROM favorites WHERE entity_type = 'album' AND entity_id = ?")
+        .bind(&id)
+        .execute(&state.db)
+        .await?;
+
+    sqlx::query(
+        "DELETE FROM play_history WHERE track_id IN (SELECT id FROM tracks WHERE album_id = ?)",
+    )
+    .bind(&id)
+    .execute(&state.db)
+    .await?;
+
+    sqlx::query("DELETE FROM playlist_tracks WHERE track_id IN (SELECT id FROM tracks WHERE album_id = ?)")
+        .bind(&id)
+        .execute(&state.db)
+        .await?;
+
+    sqlx::query("DELETE FROM daily_mix_tracks WHERE track_id IN (SELECT id FROM tracks WHERE album_id = ?)")
+        .bind(&id)
+        .execute(&state.db)
+        .await?;
+
+    sqlx::query("DELETE FROM album_credits WHERE album_id = ?")
+        .bind(&id)
+        .execute(&state.db)
+        .await?;
+
+    sqlx::query("DELETE FROM album_recommendations WHERE album_id = ? OR recommended_album_id = ?")
+        .bind(&id)
+        .bind(&id)
+        .execute(&state.db)
+        .await?;
+
+    sqlx::query("DELETE FROM album_art_cache WHERE album_id = ?")
+        .bind(&id)
+        .execute(&state.db)
+        .await?;
+
+    sqlx::query("DELETE FROM tracks WHERE album_id = ?")
+        .bind(&id)
+        .execute(&state.db)
+        .await?;
+
+    sqlx::query("DELETE FROM albums WHERE id = ?")
+        .bind(&id)
+        .execute(&state.db)
+        .await?;
+
+    Ok(Json(json!({"ok": true})))
 }
 
 pub async fn increment_play_count(
