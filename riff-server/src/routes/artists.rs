@@ -134,6 +134,69 @@ pub async fn get_artist(
     ))
 }
 
+#[derive(Debug, Deserialize)]
+pub struct StoriesParams {
+    pub library: Option<String>,
+}
+
+pub async fn artist_stories(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<Claims>,
+    Query(params): Query<StoriesParams>,
+) -> Result<Json<Value>, AppError> {
+    let library_ids = riff_core::db::resolve_library_ids(&state.db, params.library.as_deref()).await?;
+
+    let rows = sqlx::query_as::<_, (String, String, Option<String>, bool)>(
+        "WITH new_music AS ( \
+            SELECT DISTINCT ar.id, ar.name, ar.image_url, 1 as has_new_music, 0 as play_count \
+            FROM artists ar \
+            JOIN albums al ON al.artist_id = ar.id \
+            WHERE al.added_at >= datetime('now', '-7 days') \
+              AND al.library_id IN (SELECT value FROM json_each(?1)) \
+              AND ar.image_url IS NOT NULL \
+        ), \
+        top_played AS ( \
+            SELECT ar.id, ar.name, ar.image_url, 0 as has_new_music, COUNT(*) as play_count \
+            FROM play_history ph \
+            JOIN tracks t ON ph.track_id = t.id \
+            JOIN albums a ON t.album_id = a.id \
+            JOIN artists ar ON a.artist_id = ar.id \
+            WHERE ph.user_id = ?2 \
+              AND a.library_id IN (SELECT value FROM json_each(?1)) \
+              AND ar.image_url IS NOT NULL \
+            GROUP BY ar.id \
+            ORDER BY play_count DESC \
+            LIMIT 20 \
+        ), \
+        combined AS ( \
+            SELECT *, ROW_NUMBER() OVER (PARTITION BY id ORDER BY has_new_music DESC, play_count DESC) as rn \
+            FROM (SELECT * FROM new_music UNION ALL SELECT * FROM top_played) \
+        ) \
+        SELECT id, name, image_url, has_new_music \
+        FROM combined WHERE rn = 1 \
+        ORDER BY has_new_music DESC, play_count DESC \
+        LIMIT 10",
+    )
+    .bind(&library_ids)
+    .bind(&claims.sub)
+    .fetch_all(&state.db)
+    .await?;
+
+    let artists: Vec<Value> = rows
+        .into_iter()
+        .map(|(id, name, image_url, has_new_music)| {
+            json!({
+                "id": id,
+                "name": name,
+                "image_url": image_url,
+                "has_new_music": has_new_music,
+            })
+        })
+        .collect();
+
+    Ok(Json(json!({ "artists": artists })))
+}
+
 pub async fn build_artist_detail(
     db: &SqlitePool,
     artist_id: &str,

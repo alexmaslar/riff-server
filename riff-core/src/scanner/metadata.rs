@@ -32,6 +32,7 @@ pub struct TrackMetadata {
     pub replay_gain_album_gain: Option<f64>,
     pub replay_gain_album_peak: Option<f64>,
     pub musicbrainz_recording_id: Option<String>,
+    pub isrc: Option<String>,
 }
 
 pub fn extract_metadata(path: &Path) -> anyhow::Result<TrackMetadata> {
@@ -116,6 +117,7 @@ pub fn extract_metadata(path: &Path) -> anyhow::Result<TrackMetadata> {
         replay_gain_album_gain: None,
         replay_gain_album_peak: None,
         musicbrainz_recording_id: None,
+        isrc: None,
     };
 
     for tag in &tags {
@@ -208,6 +210,9 @@ pub fn extract_metadata(path: &Path) -> anyhow::Result<TrackMetadata> {
             Some(StandardTagKey::MusicBrainzRecordingId) => {
                 meta.musicbrainz_recording_id = Some(tag.value.to_string());
             }
+            Some(StandardTagKey::IdentIsrc) => {
+                meta.isrc = Some(tag.value.to_string());
+            }
             _ => {
                 // Handle tags without standard key mappings via raw key string
                 let key_lower = tag.key.to_lowercase();
@@ -293,6 +298,7 @@ pub fn metadata_from_path(path: &Path, library_root: &Path) -> Option<TrackMetad
         replay_gain_album_gain: None,
         replay_gain_album_peak: None,
         musicbrainz_recording_id: None,
+        isrc: None,
     })
 }
 

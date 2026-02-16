@@ -258,8 +258,8 @@ async fn insert_track(
 ) -> anyhow::Result<()> {
     let id = Uuid::new_v4();
     sqlx::query(
-        "INSERT INTO tracks (id, album_id, title, track_number, disc_number, duration_seconds, file_path, format, sample_rate, bit_depth, file_size_bytes, composer, language, bpm_tag, musical_key, mood, replay_gain_track_gain, replay_gain_track_peak, replay_gain_album_gain, replay_gain_album_peak, musicbrainz_recording_id, library_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO tracks (id, album_id, title, track_number, disc_number, duration_seconds, file_path, format, sample_rate, bit_depth, file_size_bytes, composer, language, bpm_tag, musical_key, mood, replay_gain_track_gain, replay_gain_track_peak, replay_gain_album_gain, replay_gain_album_peak, musicbrainz_recording_id, isrc, library_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(id.to_string())
     .bind(album_id.to_string())
@@ -282,6 +282,7 @@ async fn insert_track(
     .bind(meta.replay_gain_album_gain)
     .bind(meta.replay_gain_album_peak)
     .bind(&meta.musicbrainz_recording_id)
+    .bind(&meta.isrc)
     .bind(library_id)
     .execute(pool)
     .await?;

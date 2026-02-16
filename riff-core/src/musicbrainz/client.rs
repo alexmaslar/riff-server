@@ -70,7 +70,7 @@ impl MusicBrainzClient {
         self.limiter.until_ready().await;
 
         let url = format!(
-            "{}/release/{}?inc=artist-credits+labels+genres+tags+annotation+artist-rels&fmt=json",
+            "{}/release/{}?inc=artist-credits+labels+genres+tags+annotation+artist-rels+recordings+isrcs&fmt=json",
             BASE_URL, mbid
         );
 

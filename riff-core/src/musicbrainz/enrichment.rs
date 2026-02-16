@@ -272,6 +272,9 @@ async fn enrich_one_album(
         }
     }
 
+    // Enrich tracks with ISRCs from MusicBrainz recordings
+    enrich_track_isrcs(pool, album_id, &release).await;
+
     Ok(true)
 }
 
@@ -399,6 +402,47 @@ pub async fn enrich_artist_top_tracks(
 
     info!("Deezer top tracks enrichment complete: {} artists", enriched);
     Ok(enriched)
+}
+
+/// Update tracks in this album with ISRCs from MusicBrainz recordings.
+/// Matches by disc_number + track_number position.
+async fn enrich_track_isrcs(
+    pool: &SqlitePool,
+    album_id: &str,
+    release: &super::types::MBReleaseDetail,
+) {
+    let mut updated = 0u32;
+
+    for medium in &release.media {
+        for track in &medium.tracks {
+            let isrc = match &track.recording {
+                Some(rec) if !rec.isrcs.is_empty() => &rec.isrcs[0],
+                _ => continue,
+            };
+
+            let result = sqlx::query(
+                "UPDATE tracks SET isrc = ? WHERE album_id = ? AND disc_number = ? AND track_number = ? AND isrc IS NULL"
+            )
+            .bind(isrc)
+            .bind(album_id)
+            .bind(medium.position as i32)
+            .bind(track.position as i32)
+            .execute(pool)
+            .await;
+
+            match result {
+                Ok(r) if r.rows_affected() > 0 => updated += 1,
+                Ok(_) => {}
+                Err(e) => {
+                    warn!("failed to update ISRC for disc {} track {}: {}", medium.position, track.position, e);
+                }
+            }
+        }
+    }
+
+    if updated > 0 {
+        debug!("enriched {} tracks with ISRCs for album {}", updated, album_id);
+    }
 }
 
 fn capitalize_first(s: &str) -> String {

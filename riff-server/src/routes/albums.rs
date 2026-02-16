@@ -144,7 +144,7 @@ pub async fn list_albums(
     let mut has_where = true;
 
     if let Some(ref search) = params.search {
-        builder.push(" WHERE (a.title LIKE ");
+        builder.push(" AND (a.title LIKE ");
         builder.push_bind(format!("%{search}%"));
         builder.push(" OR ar.name LIKE ");
         builder.push_bind(format!("%{search}%"));
@@ -454,6 +454,7 @@ pub async fn build_album_detail(
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CreateAlbumBody {
     pub title: String,
     pub artist_name: String,

@@ -55,6 +55,8 @@ pub struct MBReleaseDetail {
     pub relations: Vec<MBRelation>,
     #[serde(default, rename = "release-group")]
     pub release_group: Option<MBReleaseGroup>,
+    #[serde(default)]
+    pub media: Vec<MBMedium>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -96,4 +98,27 @@ pub struct MBReleaseGroup {
     pub primary_type: Option<String>,
     #[serde(default, rename = "secondary-types")]
     pub secondary_types: Vec<String>,
+}
+
+// Media / Track / Recording types for ISRC enrichment
+
+#[derive(Debug, Deserialize)]
+pub struct MBMedium {
+    pub position: u32,
+    #[serde(default)]
+    pub tracks: Vec<MBTrack>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MBTrack {
+    pub position: u32,
+    pub title: String,
+    pub recording: Option<MBRecording>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MBRecording {
+    pub id: String,
+    #[serde(default)]
+    pub isrcs: Vec<String>,
 }
