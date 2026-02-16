@@ -588,6 +588,16 @@ pub async fn get_cover(
         }
     };
 
+    // For URL-based cover art (e.g. Apple Music), redirect to the source
+    if cover_path.starts_with("http://") || cover_path.starts_with("https://") {
+        return Response::builder()
+            .status(StatusCode::TEMPORARY_REDIRECT)
+            .header(header::LOCATION, &cover_path)
+            .header(header::CACHE_CONTROL, "public, max-age=86400")
+            .body(Body::empty())
+            .unwrap();
+    }
+
     // If ?w= is specified, serve a cached thumbnail
     if let Some(w) = params.w {
         let w = w.clamp(50, 2000);
