@@ -115,6 +115,7 @@ pub struct TrackSummary {
     pub file_size_bytes: Option<i64>,
     pub isrc: Option<String>,
     pub album_play_count: Option<i64>,
+    pub apple_music_id: Option<String>,
 }
 
 pub async fn list_albums(
@@ -331,7 +332,7 @@ pub async fn build_album_detail(
                     t.album_id, ar.name as artist_name, t.sample_rate, t.bit_depth,
                     t.composer, COALESCE(t.bpm_tag, t.bpm_analyzed) as bpm,
                     COALESCE(t.musical_key, t.key_analyzed) as resolved_key, t.loudness_lufs, t.mood,
-                    t.file_size_bytes, t.isrc, a.play_count as album_play_count
+                    t.file_size_bytes, t.isrc, a.play_count as album_play_count, t.apple_music_id
              FROM tracks t
              JOIN albums a ON t.album_id = a.id
              JOIN artists ar ON a.artist_id = ar.id
@@ -393,6 +394,7 @@ pub async fn build_album_detail(
             file_size_bytes: row.get(15),
             isrc: row.get(16),
             album_play_count: row.get(17),
+            apple_music_id: row.get(18),
         })
         .collect();
 
@@ -455,6 +457,25 @@ pub async fn build_album_detail(
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CreateAlbumTrack {
+    pub title: String,
+    pub track_number: i32,
+    pub disc_number: i32,
+    pub duration_seconds: i32,
+    pub apple_music_id: String,
+    pub isrc: Option<String>,
+    pub artist_name: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackMapping {
+    pub id: String,
+    pub apple_music_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CreateAlbumBody {
     pub title: String,
     pub artist_name: String,
@@ -463,6 +484,58 @@ pub struct CreateAlbumBody {
     pub genre: Vec<String>,
     pub cover_art_url: Option<String>,
     pub apple_music_id: String,
+    #[serde(default)]
+    pub tracks: Vec<CreateAlbumTrack>,
+}
+
+/// Insert Apple Music track stubs for an album, returning the ID mappings.
+async fn insert_am_track_stubs(
+    db: &SqlitePool,
+    album_id: &str,
+    tracks: &[CreateAlbumTrack],
+) -> Result<Vec<TrackMapping>, AppError> {
+    let mut mappings = Vec::with_capacity(tracks.len());
+    for track in tracks {
+        let track_id = Uuid::new_v4().to_string();
+        let file_path = format!("apple_music://{}", track.apple_music_id);
+        let result = sqlx::query(
+            "INSERT OR IGNORE INTO tracks (id, album_id, title, track_number, disc_number, duration_seconds, file_path, format, sample_rate, bit_depth, apple_music_id, isrc)
+             VALUES (?, ?, ?, ?, ?, ?, ?, 'AAC', 44100, 16, ?, ?)",
+        )
+        .bind(&track_id)
+        .bind(album_id)
+        .bind(&track.title)
+        .bind(track.track_number)
+        .bind(track.disc_number)
+        .bind(track.duration_seconds)
+        .bind(&file_path)
+        .bind(&track.apple_music_id)
+        .bind(&track.isrc)
+        .execute(db)
+        .await?;
+
+        if result.rows_affected() > 0 {
+            mappings.push(TrackMapping {
+                id: track_id,
+                apple_music_id: track.apple_music_id.clone(),
+            });
+        } else {
+            // Row already existed (UNIQUE on file_path) — look up the existing ID
+            if let Some((existing_id,)) = sqlx::query_as::<_, (String,)>(
+                "SELECT id FROM tracks WHERE file_path = ?",
+            )
+            .bind(&file_path)
+            .fetch_optional(db)
+            .await?
+            {
+                mappings.push(TrackMapping {
+                    id: existing_id,
+                    apple_music_id: track.apple_music_id.clone(),
+                });
+            }
+        }
+    }
+    Ok(mappings)
 }
 
 pub async fn create_album(
@@ -479,10 +552,40 @@ pub async fn create_album(
     .await?;
 
     if let Some((existing_id,)) = existing {
+        // Backfill tracks if the album exists but has no track stubs
+        let track_mappings = if !body.tracks.is_empty() {
+            let has_tracks = sqlx::query_as::<_, (i64,)>(
+                "SELECT COUNT(*) FROM tracks WHERE album_id = ?",
+            )
+            .bind(&existing_id)
+            .fetch_one(&state.db)
+            .await
+            .map(|(c,)| c > 0)
+            .unwrap_or(true);
+
+            if !has_tracks {
+                insert_am_track_stubs(&state.db, &existing_id, &body.tracks).await?
+            } else {
+                // Return existing track mappings
+                sqlx::query_as::<_, (String, String)>(
+                    "SELECT id, apple_music_id FROM tracks WHERE album_id = ? AND apple_music_id IS NOT NULL",
+                )
+                .bind(&existing_id)
+                .fetch_all(&state.db)
+                .await?
+                .into_iter()
+                .map(|(id, amid)| TrackMapping { id, apple_music_id: amid })
+                .collect()
+            }
+        } else {
+            vec![]
+        };
+
         return Ok(Json(json!({
             "id": existing_id,
             "apple_music_id": body.apple_music_id,
             "existed": true,
+            "tracks": track_mappings,
         })));
     }
 
@@ -538,10 +641,18 @@ pub async fn create_album(
     .execute(&state.db)
     .await?;
 
+    // Insert track stubs
+    let track_mappings = if !body.tracks.is_empty() {
+        insert_am_track_stubs(&state.db, &album_id, &body.tracks).await?
+    } else {
+        vec![]
+    };
+
     Ok(Json(json!({
         "id": album_id,
         "apple_music_id": body.apple_music_id,
         "existed": false,
+        "tracks": track_mappings,
     })))
 }
 
