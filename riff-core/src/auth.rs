@@ -92,11 +92,10 @@ pub async fn bootstrap_admin(pool: &SqlitePool, config: &Config) -> anyhow::Resu
     let id = Uuid::new_v4();
     let hash = hash_password(&password)?;
 
-    sqlx::query("INSERT INTO users (id, username, password_hash, display_name, role) VALUES (?, ?, ?, ?, ?)")
+    sqlx::query("INSERT INTO users (id, username, password_hash, role) VALUES (?, ?, ?, ?)")
         .bind(id.to_string())
         .bind(username)
         .bind(&hash)
-        .bind("Admin")
         .bind("admin")
         .execute(pool)
         .await?;

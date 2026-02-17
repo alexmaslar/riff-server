@@ -23,13 +23,12 @@ pub struct UpdateAccountRequest {
 pub struct CreateUserRequest {
     pub username: String,
     pub password: String,
-    pub display_name: String,
     pub role: Option<String>,
 }
 
 pub async fn list_users(State(state): State<Arc<AppState>>) -> Result<Json<Value>, AppError> {
-    let rows = sqlx::query_as::<_, (String, String, String, String, String)>(
-        "SELECT id, username, display_name, role, created_at FROM users ORDER BY username",
+    let rows = sqlx::query_as::<_, (String, String, String, String)>(
+        "SELECT id, username, role, created_at FROM users ORDER BY username",
     )
     .fetch_all(&state.db)
     .await
@@ -37,11 +36,10 @@ pub async fn list_users(State(state): State<Arc<AppState>>) -> Result<Json<Value
 
     let users: Vec<Value> = rows
         .into_iter()
-        .map(|(id, username, display_name, role, created_at)| {
+        .map(|(id, username, role, created_at)| {
             json!({
                 "id": id,
                 "username": username,
-                "display_name": display_name,
                 "role": role,
                 "created_at": created_at,
             })
@@ -61,12 +59,11 @@ pub async fn create_user(
     let role = req.role.unwrap_or_else(|| "user".to_string());
 
     sqlx::query(
-        "INSERT INTO users (id, username, password_hash, display_name, role) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO users (id, username, password_hash, role) VALUES (?, ?, ?, ?)",
     )
     .bind(id.to_string())
     .bind(&req.username)
     .bind(&hash)
-    .bind(&req.display_name)
     .bind(&role)
     .execute(&state.db)
     .await
@@ -75,7 +72,6 @@ pub async fn create_user(
     Ok(Json(json!({
         "id": id.to_string(),
         "username": req.username,
-        "display_name": req.display_name,
         "role": role,
     })))
 }
