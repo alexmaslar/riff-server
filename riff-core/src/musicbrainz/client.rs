@@ -84,6 +84,24 @@ impl MusicBrainzClient {
         Ok(resp.json().await?)
     }
 
+    pub async fn get_artist(&self, mbid: &str) -> anyhow::Result<MBArtistDetail> {
+        self.limiter.until_ready().await;
+
+        let url = format!(
+            "{}/artist/{}?inc=url-rels&fmt=json",
+            BASE_URL, mbid
+        );
+
+        let resp = self.http.get(&url).send().await?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("MusicBrainz artist detail error {}: {}", status, body);
+        }
+
+        Ok(resp.json().await?)
+    }
+
     /// Download cover art from Cover Art Archive. Returns None on 404 (no cover).
     pub async fn download_cover(&self, mbid: &str) -> anyhow::Result<Option<Vec<u8>>> {
         // CAA is a separate service with no rate limit, so no limiter wait

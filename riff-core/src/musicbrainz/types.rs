@@ -78,6 +78,20 @@ pub struct MBRelation {
     #[serde(rename = "type")]
     pub relation_type: String,
     pub artist: Option<MBArtistRef>,
+    pub url: Option<MBUrlResource>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MBUrlResource {
+    pub resource: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MBArtistDetail {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub relations: Vec<MBRelation>,
 }
 
 #[derive(Debug, Deserialize)]

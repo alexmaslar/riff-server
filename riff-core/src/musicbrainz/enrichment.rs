@@ -326,8 +326,14 @@ pub async fn enrich_artist_images_discogs(
     pool: &SqlitePool,
     api_key: &str,
 ) -> anyhow::Result<u32> {
-    let rows: Vec<(String, String)> = sqlx::query_as(
-        "SELECT id, name FROM artists WHERE image_url IS NULL"
+    let rows: Vec<(String, String, Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT a.id, a.name, a.external_id, \
+                GROUP_CONCAT(al.genre, '|||') AS genres_raw, \
+                GROUP_CONCAT(al.style, '|||') AS styles_raw \
+         FROM artists a \
+         LEFT JOIN albums al ON al.artist_id = a.id \
+         WHERE a.image_url IS NULL \
+         GROUP BY a.id, a.name, a.external_id"
     )
     .fetch_all(pool)
     .await?;
@@ -339,29 +345,58 @@ pub async fn enrich_artist_images_discogs(
 
     info!("enriching {} artists with Discogs images", rows.len());
 
-    let client = reqwest::Client::builder()
+    let http_client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .user_agent("RiffServer/0.1 (riff-music-server)")
         .build()?;
 
+    let mb_client = MusicBrainzClient::new()?;
     let mut enriched = 0u32;
 
-    for (artist_id, artist_name) in &rows {
-        match crate::discogs::fetch_artist_image(&client, artist_name, api_key).await {
-            Ok(Some(image_url)) => {
+    for (artist_id, artist_name, external_id, genres_raw, styles_raw) in &rows {
+        // Try MBID → Discogs ID first for exact match
+        let mut image_url: Option<String> = None;
+
+        if let Some(mbid) = external_id {
+            match mb_client.get_artist(mbid).await {
+                Ok(detail) => {
+                    if let Some(discogs_id) = extract_discogs_artist_id(&detail.relations) {
+                        debug!("Discogs: fetching by ID {} for '{}'", discogs_id, artist_name);
+                        match crate::discogs::fetch_artist_image_by_id(&http_client, &discogs_id, api_key).await {
+                            Ok(url) => image_url = url,
+                            Err(e) => warn!("Discogs ID lookup failed for '{}': {}", artist_name, e),
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!("MusicBrainz artist lookup failed for '{}': {}", artist_name, e);
+                }
+            }
+        }
+
+        // Fall back to name search with genre hints
+        if image_url.is_none() {
+            let genre_hints = parse_aggregated_genres(genres_raw.as_deref(), styles_raw.as_deref());
+            match crate::discogs::fetch_artist_image(&http_client, artist_name, api_key, &genre_hints).await {
+                Ok(url) => image_url = url,
+                Err(e) => {
+                    warn!("Discogs image error for '{}': {}", artist_name, e);
+                }
+            }
+        }
+
+        match &image_url {
+            Some(url) => {
                 sqlx::query("UPDATE artists SET image_url = ? WHERE id = ?")
-                    .bind(&image_url)
+                    .bind(url)
                     .bind(artist_id)
                     .execute(pool)
                     .await?;
                 enriched += 1;
-                debug!("Discogs image for '{}': {}", artist_name, image_url);
+                debug!("Discogs image for '{}': {}", artist_name, url);
             }
-            Ok(None) => {
+            None => {
                 debug!("no Discogs image found for '{}'", artist_name);
-            }
-            Err(e) => {
-                warn!("Discogs image error for '{}': {}", artist_name, e);
             }
         }
 
@@ -371,6 +406,23 @@ pub async fn enrich_artist_images_discogs(
 
     info!("Discogs image enrichment complete: {} artists", enriched);
     Ok(enriched)
+}
+
+/// Extract a Discogs artist ID from MusicBrainz URL relations.
+/// Looks for a URL matching `discogs.com/artist/` and extracts the trailing numeric ID.
+fn extract_discogs_artist_id(relations: &[super::types::MBRelation]) -> Option<String> {
+    for rel in relations {
+        if let Some(url_res) = &rel.url {
+            if let Some(pos) = url_res.resource.find("discogs.com/artist/") {
+                let after = &url_res.resource[pos + "discogs.com/artist/".len()..];
+                let id: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+                if !id.is_empty() {
+                    return Some(id);
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Fetch Deezer top tracks for artists that haven't been enriched yet (or stale > 30 days).
@@ -496,6 +548,33 @@ async fn enrich_track_isrcs(
     if updated > 0 {
         debug!("enriched {} tracks with ISRCs for album {}", updated, album_id);
     }
+}
+
+/// Parse `GROUP_CONCAT(..., '|||')`-separated JSON arrays of genre/style strings
+/// into a deduplicated, lowercased list suitable for Discogs disambiguation.
+fn parse_aggregated_genres(genres_raw: Option<&str>, styles_raw: Option<&str>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut result = Vec::new();
+
+    for raw in [genres_raw, styles_raw].into_iter().flatten() {
+        for json_fragment in raw.split("|||") {
+            let fragment = json_fragment.trim();
+            if fragment.is_empty() {
+                continue;
+            }
+            // Each fragment is a JSON array like '["Electronic","Ambient"]'
+            if let Ok(tags) = serde_json::from_str::<Vec<String>>(fragment) {
+                for tag in tags {
+                    let lower = tag.to_lowercase();
+                    if seen.insert(lower.clone()) {
+                        result.push(lower);
+                    }
+                }
+            }
+        }
+    }
+
+    result
 }
 
 fn capitalize_first(s: &str) -> String {
