@@ -18,14 +18,14 @@ pub async fn login(
     State(state): State<Arc<AppState>>,
     Json(req): Json<LoginRequest>,
 ) -> Result<Json<Value>, AppError> {
-    let user = sqlx::query_as::<_, (String, String, String, String)>(
-        "SELECT id, username, password_hash, role FROM users WHERE username = ?",
+    let user = sqlx::query_as::<_, (String, String, String, String, Option<String>)>(
+        "SELECT id, username, password_hash, role, default_library_id FROM users WHERE username = ?",
     )
     .bind(&req.username)
     .fetch_optional(&state.db)
     .await;
 
-    let (id_str, username, password_hash, role) = match user {
+    let (id_str, username, password_hash, role, default_library_id) = match user {
         Ok(Some(row)) => row,
         Ok(None) => return Err(AppError::Unauthorized("invalid credentials".into())),
         Err(e) => return Err(AppError::Internal(e.to_string())),
@@ -49,6 +49,7 @@ pub async fn login(
                 "id": id_str,
                 "username": username,
                 "role": role,
+                "default_library_id": default_library_id,
             }
         }))),
         Err(e) => Err(AppError::Internal(e.to_string())),

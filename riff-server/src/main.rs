@@ -554,6 +554,8 @@ async fn main() -> Result<()> {
         .route("/mixes/daily", get(routes::daily_mixes::list_daily_mixes))
         .route("/mixes/daily/{id}", get(routes::daily_mixes::get_daily_mix))
         .route("/mixes/daily/{id}/save", post(routes::daily_mixes::save_mix_as_playlist))
+        // User account (self-service)
+        .route("/user/account", put(routes::users::update_account))
         // Libraries (read-only for non-admin)
         .route("/libraries", get(routes::libraries::list_libraries))
         .route_layer(axum_mw::from_fn_with_state(
