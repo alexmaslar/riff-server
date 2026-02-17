@@ -127,7 +127,7 @@ pub async fn update_config(
     Json(update): Json<ConfigUpdate>,
 ) -> Result<Json<Value>, AppError> {
     // Clone config under write lock, apply mutations, then drop lock before disk I/O
-    let (config_snapshot, any_newly_enabled, https_port_changed) = {
+    let (config_snapshot, any_newly_enabled, https_port_changed, discogs_key_changed) = {
         let mut config = state.config.write().await;
 
         // Snapshot AI flags before mutations
@@ -137,6 +137,9 @@ pub async fn update_config(
         let old_album_recommendations = config.metadata.ai.album_recommendations;
         let old_artist_bios = config.metadata.ai.artist_bios;
         let old_artist_recommendations = config.metadata.ai.artist_recommendations;
+
+        // Snapshot Discogs key before mutations
+        let old_discogs_key = config.metadata.discogs_api_key.clone();
 
         let mut https_port_changed = false;
         if let Some(srv) = update.server {
@@ -227,6 +230,12 @@ pub async fn update_config(
             }
         }
 
+        let discogs_key_changed = match (&old_discogs_key, &config.metadata.discogs_api_key) {
+            (None, Some(_)) => true,
+            (Some(old), Some(new)) if old != new => true,
+            _ => false,
+        };
+
         let any_newly_enabled =
             (!old_ai_enabled && config.metadata.ai.enabled) ||
             (!old_album_summaries && config.metadata.ai.album_summaries) ||
@@ -247,7 +256,7 @@ pub async fn update_config(
         }
 
         let snapshot = config.clone();
-        (snapshot, any_newly_enabled, https_port_changed)
+        (snapshot, any_newly_enabled, https_port_changed, discogs_key_changed)
     }; // write lock dropped before disk I/O
 
     // Save to disk outside the lock
@@ -308,6 +317,39 @@ pub async fn update_config(
         tokio::spawn(async move {
             super::library::maybe_spawn_summarization(&spawn_state).await;
         });
+    }
+
+    if discogs_key_changed {
+        if let Some(ref api_key) = config_snapshot.metadata.discogs_api_key {
+            let api_key = api_key.clone();
+            let db = state.db.clone();
+            tokio::spawn(async move {
+                // Clear all artist images so Discogs can re-fill them
+                match sqlx::query("UPDATE artists SET image_url = NULL WHERE image_url IS NOT NULL")
+                    .execute(&db)
+                    .await
+                {
+                    Ok(r) => tracing::info!(
+                        "cleared {} artist images for Discogs re-fetch",
+                        r.rows_affected()
+                    ),
+                    Err(e) => {
+                        tracing::warn!("failed to clear artist images: {e}");
+                        return;
+                    }
+                }
+                // Run Discogs enrichment with the new key
+                match riff_core::musicbrainz::enrich_artist_images_discogs(&db, &api_key).await {
+                    Ok(n) => tracing::info!("discogs re-enrichment: {n} artists updated"),
+                    Err(e) => tracing::warn!("discogs re-enrichment failed: {e}"),
+                }
+                // Deezer fallback for any remaining NULL image_urls
+                match riff_core::musicbrainz::enrich_artist_top_tracks(&db).await {
+                    Ok(n) => tracing::info!("deezer fallback after discogs refresh: {n} artists"),
+                    Err(e) => tracing::warn!("deezer fallback failed: {e}"),
+                }
+            });
+        }
     }
 
     Ok(Json(response))
