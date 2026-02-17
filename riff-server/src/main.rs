@@ -121,7 +121,22 @@ async fn run_background_pipeline(state: Arc<AppState>) {
         }
     }
 
-    // Step 3: Deezer top tracks + artist images (no API key needed)
+    // Step 3a: Discogs artist images (if API key configured)
+    {
+        let config = state.config.read().await;
+        if let Some(ref api_key) = config.metadata.discogs_api_key {
+            let api_key = api_key.clone();
+            let db = state.db.clone();
+            drop(config);
+            match musicbrainz::enrich_artist_images_discogs(&db, &api_key).await {
+                Ok(n) if n > 0 => tracing::info!("discogs artist images: {n} artists updated"),
+                Ok(_) => {}
+                Err(e) => tracing::warn!("discogs artist images failed: {e}"),
+            }
+        }
+    }
+
+    // Step 3b: Deezer top tracks + artist images fallback (no API key needed)
     run_stage(&state.top_tracks_running, "top tracks", {
         let db = state.db.clone();
         async move { musicbrainz::enrich_artist_top_tracks(&db).await }

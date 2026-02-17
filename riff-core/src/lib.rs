@@ -7,6 +7,7 @@ pub mod db;
 pub mod featured;
 pub mod musicbrainz;
 pub mod deezer;
+pub mod discogs;
 pub mod mix_collage;
 pub mod models;
 pub mod scanner;

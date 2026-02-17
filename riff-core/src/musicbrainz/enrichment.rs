@@ -320,6 +320,59 @@ async fn download_cover(
     Ok(true)
 }
 
+/// Fetch artist images from Discogs using their search API.
+/// Requires a Discogs personal access token. Only processes artists with no image yet.
+pub async fn enrich_artist_images_discogs(
+    pool: &SqlitePool,
+    api_key: &str,
+) -> anyhow::Result<u32> {
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT id, name FROM artists WHERE image_url IS NULL"
+    )
+    .fetch_all(pool)
+    .await?;
+
+    if rows.is_empty() {
+        info!("no artists need Discogs image enrichment");
+        return Ok(0);
+    }
+
+    info!("enriching {} artists with Discogs images", rows.len());
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .user_agent("RiffServer/0.1 (riff-music-server)")
+        .build()?;
+
+    let mut enriched = 0u32;
+
+    for (artist_id, artist_name) in &rows {
+        match crate::discogs::fetch_artist_image(&client, artist_name, api_key).await {
+            Ok(Some(image_url)) => {
+                sqlx::query("UPDATE artists SET image_url = ? WHERE id = ?")
+                    .bind(&image_url)
+                    .bind(artist_id)
+                    .execute(pool)
+                    .await?;
+                enriched += 1;
+                debug!("Discogs image for '{}': {}", artist_name, image_url);
+            }
+            Ok(None) => {
+                debug!("no Discogs image found for '{}'", artist_name);
+            }
+            Err(e) => {
+                warn!("Discogs image error for '{}': {}", artist_name, e);
+            }
+        }
+
+        // Rate limit: Discogs allows 60 req/min authenticated, stay well under
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+
+    info!("Discogs image enrichment complete: {} artists", enriched);
+    Ok(enriched)
+}
+
 /// Fetch Deezer top tracks for artists that haven't been enriched yet (or stale > 30 days).
 /// Also fetches artist images from Deezer when not already set.
 pub async fn enrich_artist_top_tracks(

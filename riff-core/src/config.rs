@@ -74,10 +74,14 @@ pub struct AuthConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MetadataConfig {
-    #[serde(default, alias = "discogs")]
+    #[serde(default)]
     pub enrichment: EnrichmentConfig,
     #[serde(default)]
     pub ai: AiConfig,
+    /// Optional Discogs personal access token for artist images.
+    /// If not set, Deezer is used as the sole image source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discogs_api_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -207,6 +211,7 @@ impl Default for MetadataConfig {
         Self {
             enrichment: EnrichmentConfig::default(),
             ai: AiConfig::default(),
+            discogs_api_key: None,
         }
     }
 }
