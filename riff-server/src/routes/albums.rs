@@ -914,9 +914,9 @@ pub async fn delete_album(
     Extension(_claims): Extension<Claims>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, AppError> {
-    // Verify album exists
-    sqlx::query_as::<_, (String,)>(
-        "SELECT id FROM albums WHERE id = ?",
+    // Verify album exists and get artist_id for orphan cleanup
+    let (_, artist_id) = sqlx::query_as::<_, (String, String)>(
+        "SELECT id, artist_id FROM albums WHERE id = ?",
     )
     .bind(&id)
     .fetch_optional(&state.db)
@@ -971,6 +971,26 @@ pub async fn delete_album(
         .bind(&id)
         .execute(&state.db)
         .await?;
+
+    // Delete orphaned artist (no remaining albums)
+    let (remaining,) = sqlx::query_as::<_, (i64,)>(
+        "SELECT COUNT(*) FROM albums WHERE artist_id = ?",
+    )
+    .bind(&artist_id)
+    .fetch_one(&state.db)
+    .await?;
+
+    if remaining == 0 {
+        sqlx::query("DELETE FROM favorites WHERE entity_type = 'artist' AND entity_id = ?")
+            .bind(&artist_id)
+            .execute(&state.db)
+            .await?;
+
+        sqlx::query("DELETE FROM artists WHERE id = ?")
+            .bind(&artist_id)
+            .execute(&state.db)
+            .await?;
+    }
 
     Ok(Json(json!({"ok": true})))
 }
