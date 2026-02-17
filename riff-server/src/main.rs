@@ -230,13 +230,19 @@ async fn run_periodic_scanner(state: Arc<AppState>) {
                     if result.tracks_added > 0
                         || result.albums_added > 0
                         || result.artists_added > 0
+                        || result.tracks_removed > 0
+                        || result.albums_removed > 0
+                        || result.artists_removed > 0
                     {
                         tracing::info!(
-                            "periodic scan complete for {:?}: {} artists, {} albums, {} tracks",
+                            "periodic scan complete for {:?}: +{} artists, +{} albums, +{} tracks, -{} tracks, -{} albums, -{} artists",
                             lib_entry.name,
                             result.artists_added,
                             result.albums_added,
                             result.tracks_added,
+                            result.tracks_removed,
+                            result.albums_removed,
+                            result.artists_removed,
                         );
                     }
                 }
@@ -338,11 +344,14 @@ async fn main() -> Result<()> {
         match scanner::scan_library(&pool, &lib_entry.path, &library_id).await {
             Ok(result) => {
                 tracing::info!(
-                    "scan complete for {:?}: {} artists, {} albums, {} tracks",
+                    "scan complete for {:?}: +{} artists, +{} albums, +{} tracks, -{} tracks, -{} albums, -{} artists",
                     lib_entry.name,
                     result.artists_added,
                     result.albums_added,
                     result.tracks_added,
+                    result.tracks_removed,
+                    result.albums_removed,
+                    result.artists_removed,
                 );
             }
             Err(e) => tracing::warn!("library scan failed for {:?}: {}", lib_entry.name, e),

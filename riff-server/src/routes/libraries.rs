@@ -103,7 +103,7 @@ pub async fn add_library(
     let lib_id_for_scan = library_id.clone();
     tokio::spawn(async move {
         match scanner::scan_library(&db, &path, &lib_id_for_scan).await {
-            Ok(r) => tracing::info!("scan complete for new library: {} artists, {} albums, {} tracks", r.artists_added, r.albums_added, r.tracks_added),
+            Ok(r) => tracing::info!("scan complete for new library: +{} artists, +{} albums, +{} tracks, -{} tracks, -{} albums, -{} artists", r.artists_added, r.albums_added, r.tracks_added, r.tracks_removed, r.albums_removed, r.artists_removed),
             Err(e) => tracing::warn!("scan failed for new library: {e}"),
         }
     });
@@ -228,7 +228,7 @@ pub async fn update_library(
         let lib_id = id.clone();
         tokio::spawn(async move {
             match scanner::scan_library(&db, &new_path, &lib_id).await {
-                Ok(r) => tracing::info!("re-scan complete for library {}: {} artists, {} albums, {} tracks", lib_id, r.artists_added, r.albums_added, r.tracks_added),
+                Ok(r) => tracing::info!("re-scan complete for library {}: +{} artists, +{} albums, +{} tracks, -{} tracks, -{} albums, -{} artists", lib_id, r.artists_added, r.albums_added, r.tracks_added, r.tracks_removed, r.albums_removed, r.artists_removed),
                 Err(e) => tracing::warn!("re-scan failed for library {}: {e}", lib_id),
             }
         });
@@ -299,6 +299,9 @@ pub async fn scan_single_library(
             "artists_added": scan_result.artists_added,
             "albums_added": scan_result.albums_added,
             "tracks_added": scan_result.tracks_added,
+            "tracks_removed": scan_result.tracks_removed,
+            "albums_removed": scan_result.albums_removed,
+            "artists_removed": scan_result.artists_removed,
             "errors": scan_result.errors,
         })))
     }.await;

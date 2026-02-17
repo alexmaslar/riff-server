@@ -14,6 +14,9 @@ pub struct ScanResult {
     pub artists_added: u32,
     pub albums_added: u32,
     pub tracks_added: u32,
+    pub tracks_removed: u32,
+    pub albums_removed: u32,
+    pub artists_removed: u32,
     pub errors: Vec<String>,
 }
 
@@ -27,6 +30,9 @@ pub async fn scan_library(pool: &SqlitePool, library_path: &str, library_id: &st
         artists_added: 0,
         albums_added: 0,
         tracks_added: 0,
+        tracks_removed: 0,
+        albums_removed: 0,
+        artists_removed: 0,
         errors: Vec::new(),
     };
 
@@ -156,13 +162,21 @@ pub async fn scan_library(pool: &SqlitePool, library_path: &str, library_id: &st
         result.tracks_added += 1;
     }
 
+    // Remove tracks whose files no longer exist, then empty albums and orphaned artists
+    let (tracks_removed, albums_removed, artists_removed) =
+        remove_stale_entries(pool, library_id).await?;
+    result.tracks_removed = tracks_removed;
+    result.albums_removed = albums_removed;
+    result.artists_removed = artists_removed;
+
     // Merge any duplicate artists/albums from prior scans
     let (artists_deduped, albums_deduped) = deduplicate_library(pool, library_id).await?;
 
     info!(
-        "scan complete: {} artists, {} albums, {} tracks added, {} errors, deduped {} artists + {} albums",
-        result.artists_added, result.albums_added, result.tracks_added, result.errors.len(),
-        artists_deduped, albums_deduped
+        "scan complete: +{} artists, +{} albums, +{} tracks, -{} tracks, -{} albums, -{} artists, {} errors, deduped {} artists + {} albums",
+        result.artists_added, result.albums_added, result.tracks_added,
+        result.tracks_removed, result.albums_removed, result.artists_removed,
+        result.errors.len(), artists_deduped, albums_deduped
     );
 
     Ok(result)
@@ -296,6 +310,140 @@ async fn insert_track(
     }
 
     Ok(())
+}
+
+/// Remove tracks whose files no longer exist on disk, then delete empty albums
+/// and orphaned artists. Returns (tracks_removed, albums_removed, artists_removed).
+async fn remove_stale_entries(
+    pool: &SqlitePool,
+    library_id: &str,
+) -> anyhow::Result<(u32, u32, u32)> {
+    // Find all tracks in this library
+    let all_tracks: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT t.id, t.file_path, t.album_id FROM tracks t
+         JOIN albums a ON t.album_id = a.id
+         WHERE a.library_id = ?",
+    )
+    .bind(library_id)
+    .fetch_all(pool)
+    .await?;
+
+    // Identify stale tracks (file no longer on disk)
+    let mut stale_track_ids: Vec<String> = Vec::new();
+    let mut affected_album_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for (track_id, file_path, album_id) in &all_tracks {
+        if !Path::new(file_path).exists() {
+            stale_track_ids.push(track_id.clone());
+            affected_album_ids.insert(album_id.clone());
+        }
+    }
+
+    // Delete stale tracks and their related data
+    for track_id in &stale_track_ids {
+        sqlx::query("DELETE FROM play_history WHERE track_id = ?")
+            .bind(track_id)
+            .execute(pool)
+            .await?;
+        sqlx::query("DELETE FROM playlist_tracks WHERE track_id = ?")
+            .bind(track_id)
+            .execute(pool)
+            .await?;
+        sqlx::query("DELETE FROM daily_mix_tracks WHERE track_id = ?")
+            .bind(track_id)
+            .execute(pool)
+            .await?;
+        sqlx::query("DELETE FROM favorites WHERE entity_type = 'track' AND entity_id = ?")
+            .bind(track_id)
+            .execute(pool)
+            .await?;
+        sqlx::query("DELETE FROM tracks WHERE id = ?")
+            .bind(track_id)
+            .execute(pool)
+            .await?;
+    }
+
+    let tracks_removed = stale_track_ids.len() as u32;
+    if tracks_removed > 0 {
+        info!("removed {} stale tracks", tracks_removed);
+    }
+
+    // Find empty albums (no remaining tracks)
+    let empty_albums: Vec<(String, String)> = sqlx::query_as(
+        "SELECT a.id, a.artist_id FROM albums a
+         WHERE a.library_id = ? AND NOT EXISTS (SELECT 1 FROM tracks WHERE album_id = a.id)",
+    )
+    .bind(library_id)
+    .fetch_all(pool)
+    .await?;
+
+    let mut orphan_candidate_artist_ids: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+
+    for (album_id, artist_id) in &empty_albums {
+        sqlx::query("DELETE FROM favorites WHERE entity_type = 'album' AND entity_id = ?")
+            .bind(album_id)
+            .execute(pool)
+            .await?;
+        sqlx::query("DELETE FROM album_credits WHERE album_id = ?")
+            .bind(album_id)
+            .execute(pool)
+            .await?;
+        sqlx::query("DELETE FROM album_recommendations WHERE album_id = ? OR recommended_album_id = ?")
+            .bind(album_id)
+            .bind(album_id)
+            .execute(pool)
+            .await?;
+        sqlx::query("DELETE FROM album_art_cache WHERE album_id = ?")
+            .bind(album_id)
+            .execute(pool)
+            .await?;
+        sqlx::query("DELETE FROM albums WHERE id = ?")
+            .bind(album_id)
+            .execute(pool)
+            .await?;
+        orphan_candidate_artist_ids.insert(artist_id.clone());
+    }
+
+    let albums_removed = empty_albums.len() as u32;
+    if albums_removed > 0 {
+        info!("removed {} empty albums", albums_removed);
+    }
+
+    // Find orphaned artists (no remaining albums)
+    let orphaned_artists: Vec<(String,)> = sqlx::query_as(
+        "SELECT id FROM artists
+         WHERE library_id = ? AND NOT EXISTS (SELECT 1 FROM albums WHERE artist_id = artists.id)",
+    )
+    .bind(library_id)
+    .fetch_all(pool)
+    .await?;
+
+    for (artist_id,) in &orphaned_artists {
+        sqlx::query("DELETE FROM favorites WHERE entity_type = 'artist' AND entity_id = ?")
+            .bind(artist_id)
+            .execute(pool)
+            .await?;
+        sqlx::query("DELETE FROM artist_recommendations WHERE artist_id = ? OR recommended_artist_id = ?")
+            .bind(artist_id)
+            .bind(artist_id)
+            .execute(pool)
+            .await?;
+        sqlx::query("DELETE FROM artist_top_tracks WHERE artist_id = ?")
+            .bind(artist_id)
+            .execute(pool)
+            .await?;
+        sqlx::query("DELETE FROM artists WHERE id = ?")
+            .bind(artist_id)
+            .execute(pool)
+            .await?;
+    }
+
+    let artists_removed = orphaned_artists.len() as u32;
+    if artists_removed > 0 {
+        info!("removed {} orphaned artists", artists_removed);
+    }
+
+    Ok((tracks_removed, albums_removed, artists_removed))
 }
 
 /// Merge duplicate artists and albums (case-insensitive name matches).

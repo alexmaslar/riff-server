@@ -26,6 +26,9 @@ pub async fn trigger_scan(State(state): State<Arc<AppState>>) -> Result<Json<Val
         let mut total_artists = 0u32;
         let mut total_albums = 0u32;
         let mut total_tracks = 0u32;
+        let mut total_tracks_removed = 0u32;
+        let mut total_albums_removed = 0u32;
+        let mut total_artists_removed = 0u32;
         let mut all_errors = Vec::new();
 
         for lib_entry in &resolved_libs {
@@ -39,6 +42,9 @@ pub async fn trigger_scan(State(state): State<Arc<AppState>>) -> Result<Json<Val
                     total_artists += result.artists_added;
                     total_albums += result.albums_added;
                     total_tracks += result.tracks_added;
+                    total_tracks_removed += result.tracks_removed;
+                    total_albums_removed += result.albums_removed;
+                    total_artists_removed += result.artists_removed;
                     all_errors.extend(result.errors);
                 }
                 Err(e) => all_errors.push(format!("scan failed for {:?}: {}", lib_entry.name, e)),
@@ -56,6 +62,9 @@ pub async fn trigger_scan(State(state): State<Arc<AppState>>) -> Result<Json<Val
             "artists_added": total_artists,
             "albums_added": total_albums,
             "tracks_added": total_tracks,
+            "tracks_removed": total_tracks_removed,
+            "albums_removed": total_albums_removed,
+            "artists_removed": total_artists_removed,
             "errors": all_errors,
             "enrichment_triggered": enrichment_triggered,
             "analysis_triggered": analysis_triggered,
