@@ -1,6 +1,6 @@
 use axum::{
     body::Body,
-    extract::State,
+    extract::{ConnectInfo, State},
     http::{header, Request, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
@@ -8,6 +8,7 @@ use axum::{
 };
 use riff_core::auth::{self, Claims};
 use serde_json::json;
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use crate::AppState;
@@ -17,8 +18,31 @@ use crate::AppState;
 #[derive(Debug, Clone, Copy)]
 pub struct IsRemote(pub bool);
 
+/// Client IP address extracted from ConnectInfo or X-Forwarded-For header.
+#[derive(Debug, Clone)]
+pub struct ClientIp(pub String);
+
+fn extract_client_ip(req: &Request<Body>) -> String {
+    // Try ConnectInfo first (set by axum::serve / into_make_service_with_connect_info)
+    if let Some(ci) = req.extensions().get::<ConnectInfo<SocketAddr>>() {
+        return ci.0.ip().to_string();
+    }
+    // Fall back to X-Forwarded-For for reverse proxy setups
+    if let Some(xff) = req.headers().get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
+        if let Some(first) = xff.split(',').next() {
+            let trimmed = first.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
+        }
+    }
+    "unknown".to_string()
+}
+
 pub async fn mark_remote(mut req: Request<Body>, next: Next) -> Response {
     req.extensions_mut().insert(IsRemote(true));
+    let ip = extract_client_ip(&req);
+    req.extensions_mut().insert(ClientIp(ip));
     next.run(req).await
 }
 
@@ -30,6 +54,8 @@ pub async fn mark_local(mut req: Request<Body>, next: Next) -> Response {
         .and_then(|v| v.to_str().ok())
         .is_some_and(|v| v == "true" || v == "1");
     req.extensions_mut().insert(IsRemote(is_remote));
+    let ip = extract_client_ip(&req);
+    req.extensions_mut().insert(ClientIp(ip));
     next.run(req).await
 }
 

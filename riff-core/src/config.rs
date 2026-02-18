@@ -346,7 +346,15 @@ impl Config {
 
         std::fs::create_dir_all(&config_dir)?;
         let yaml = serde_yaml_ng::to_string(self)?;
-        std::fs::write(config_dir.join("config.yaml"), yaml)?;
+        let path = config_dir.join("config.yaml");
+        std::fs::write(&path, yaml)?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        }
+
         Ok(())
     }
 }

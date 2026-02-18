@@ -49,6 +49,7 @@ pub struct AppState {
     pub ffmpeg_has_fdk_aac: bool,
     pub transcode_semaphore: Arc<tokio::sync::Semaphore>,
     pub hls_generating: tokio::sync::Mutex<std::collections::HashSet<String>>,
+    pub login_guard: tokio::sync::Mutex<routes::auth::LoginGuard>,
 }
 
 async fn run_background_pipeline(state: Arc<AppState>) {
@@ -417,6 +418,7 @@ async fn main() -> Result<()> {
         ffmpeg_has_fdk_aac,
         transcode_semaphore: Arc::new(tokio::sync::Semaphore::new(max_transcodes)),
         hls_generating: tokio::sync::Mutex::new(std::collections::HashSet::new()),
+        login_guard: tokio::sync::Mutex::new(routes::auth::LoginGuard::new()),
     });
 
     // Set cert fingerprint on the remote access manager
@@ -480,7 +482,9 @@ async fn main() -> Result<()> {
             .allow_methods(Any)
             .allow_headers(Any)
     } else {
-        CorsLayer::very_permissive()
+        // Restrictive by default: no cross-origin requests unless configured.
+        // The iOS app uses native HTTP (not CORS), so this has no impact on normal usage.
+        CorsLayer::new()
     };
 
     // Public routes (no auth required)

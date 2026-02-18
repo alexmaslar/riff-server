@@ -112,6 +112,12 @@ fn generate_certificate(cert_path: &Path, key_path: &Path) -> Result<()> {
     std::fs::write(cert_path, cert.pem())?;
     std::fs::write(key_path, key_pair.serialize_pem())?;
 
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(key_path, std::fs::Permissions::from_mode(0o600))?;
+    }
+
     // Track the IP used in SANs for future change detection
     if let Some(dir) = cert_path.parent() {
         save_san_ip(dir);

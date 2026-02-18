@@ -1,5 +1,6 @@
 pub mod albums;
 pub mod artists;
+pub mod audit;
 pub mod auth;
 pub mod autoqueue;
 pub mod config;

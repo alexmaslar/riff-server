@@ -12,6 +12,7 @@ pub enum AppError {
     Unauthorized(String),
     Forbidden(String),
     Internal(String),
+    TooManyRequests(String, u64),
 }
 
 impl std::fmt::Display for AppError {
@@ -22,6 +23,7 @@ impl std::fmt::Display for AppError {
             AppError::Unauthorized(msg) => write!(f, "unauthorized: {msg}"),
             AppError::Forbidden(msg) => write!(f, "forbidden: {msg}"),
             AppError::Internal(msg) => write!(f, "internal error: {msg}"),
+            AppError::TooManyRequests(msg, _) => write!(f, "too many requests: {msg}"),
         }
     }
 }
@@ -30,15 +32,31 @@ impl std::error::Error for AppError {}
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        let (status, message) = match self {
-            AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
-            AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg),
-            AppError::Unauthorized(msg) => (StatusCode::UNAUTHORIZED, msg),
-            AppError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg),
-            AppError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg),
-        };
-
-        (status, Json(json!({ "error": message }))).into_response()
+        match self {
+            AppError::TooManyRequests(msg, retry_after_secs) => {
+                let mut response = (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    Json(json!({ "error": msg })),
+                )
+                    .into_response();
+                response.headers_mut().insert(
+                    "Retry-After",
+                    retry_after_secs.to_string().parse().unwrap(),
+                );
+                response
+            }
+            other => {
+                let (status, message) = match other {
+                    AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
+                    AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg),
+                    AppError::Unauthorized(msg) => (StatusCode::UNAUTHORIZED, msg),
+                    AppError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg),
+                    AppError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg),
+                    AppError::TooManyRequests(..) => unreachable!(),
+                };
+                (status, Json(json!({ "error": message }))).into_response()
+            }
+        }
     }
 }
 

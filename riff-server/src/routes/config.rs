@@ -1,10 +1,12 @@
-use axum::{extract::State, http::header, Json};
+use axum::{extract::State, http::header, Extension, Json};
+use riff_core::auth::Claims;
 use riff_core::config::AiProvider;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
 use crate::error::AppError;
+use crate::middleware::ClientIp;
 use crate::AppState;
 
 fn mask_secret(s: &str) -> String {
@@ -124,6 +126,8 @@ pub struct AiUpdate {
 
 pub async fn update_config(
     State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<Claims>,
+    Extension(client_ip): Extension<ClientIp>,
     Json(update): Json<ConfigUpdate>,
 ) -> Result<Json<Value>, AppError> {
     // Clone config under write lock, apply mutations, then drop lock before disk I/O
@@ -261,6 +265,34 @@ pub async fn update_config(
 
     // Save to disk outside the lock
     config_snapshot.save().map_err(|e| AppError::Internal(format!("failed to save config: {e}")))?;
+
+    // Audit log
+    {
+        let mut changed = Vec::new();
+        if https_port_changed {
+            changed.push(format!("https_port={}", config_snapshot.server.https_port));
+        }
+        if any_newly_enabled {
+            changed.push("ai_features_enabled".to_string());
+        }
+        if discogs_key_changed {
+            changed.push("discogs_api_key".to_string());
+        }
+        let details = if changed.is_empty() {
+            "config updated".to_string()
+        } else {
+            format!("config updated: {}", changed.join(", "))
+        };
+        super::audit::log(
+            &state.db,
+            &claims.sub,
+            &claims.username,
+            "config_update",
+            Some(&details),
+            Some(&client_ip.0),
+        )
+        .await;
+    }
 
     if https_port_changed {
         tracing::info!(

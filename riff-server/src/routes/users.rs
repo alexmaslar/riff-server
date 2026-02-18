@@ -9,6 +9,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::error::AppError;
+use crate::middleware::ClientIp;
 use crate::AppState;
 
 #[derive(Debug, Deserialize)]
@@ -50,8 +51,13 @@ pub async fn list_users(State(state): State<Arc<AppState>>) -> Result<Json<Value
 
 pub async fn create_user(
     State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<Claims>,
+    Extension(client_ip): Extension<ClientIp>,
     Json(req): Json<CreateUserRequest>,
 ) -> Result<Json<Value>, AppError> {
+    auth::validate_password(&req.password)
+        .map_err(|e| AppError::BadRequest(e.to_string()))?;
+
     let hash = auth::hash_password(&req.password)
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
@@ -69,6 +75,16 @@ pub async fn create_user(
     .await
     .map_err(|e| AppError::BadRequest(e.to_string()))?;
 
+    super::audit::log(
+        &state.db,
+        &claims.sub,
+        &claims.username,
+        "user_create",
+        Some(&format!("created user '{}' with role '{}'", req.username, role)),
+        Some(&client_ip.0),
+    )
+    .await;
+
     Ok(Json(json!({
         "id": id.to_string(),
         "username": req.username,
@@ -79,22 +95,24 @@ pub async fn create_user(
 pub async fn delete_user(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<Claims>,
+    Extension(client_ip): Extension<ClientIp>,
     Path(user_id): Path<String>,
 ) -> Result<Json<Value>, AppError> {
     if claims.sub == user_id {
         return Err(AppError::Forbidden("cannot delete yourself".into()));
     }
 
-    // Verify user exists
-    let (count,) = sqlx::query_as::<_, (i64,)>("SELECT COUNT(*) FROM users WHERE id = ?")
+    // Fetch username for audit log before deletion
+    let target_username = sqlx::query_as::<_, (String,)>("SELECT username FROM users WHERE id = ?")
         .bind(&user_id)
-        .fetch_one(&state.db)
+        .fetch_optional(&state.db)
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
-    if count == 0 {
-        return Err(AppError::NotFound("user not found".into()));
-    }
+    let target_username = match target_username {
+        Some((name,)) => name,
+        None => return Err(AppError::NotFound("user not found".into())),
+    };
 
     // Delete related data then the user
     let queries = [
@@ -109,6 +127,16 @@ pub async fn delete_user(
         sqlx::query(query).bind(&user_id).execute(&state.db).await
             .map_err(|e| AppError::Internal(e.to_string()))?;
     }
+
+    super::audit::log(
+        &state.db,
+        &claims.sub,
+        &claims.username,
+        "user_delete",
+        Some(&format!("deleted user '{}'", target_username)),
+        Some(&client_ip.0),
+    )
+    .await;
 
     Ok(Json(json!({ "status": "deleted" })))
 }
@@ -168,9 +196,8 @@ pub async fn update_account(
             Err(e) => return Err(AppError::Internal(e.to_string())),
         }
 
-        if new_password.len() < 4 {
-            return Err(AppError::BadRequest("new password must be at least 4 characters".into()));
-        }
+        auth::validate_password(new_password)
+            .map_err(|e| AppError::BadRequest(e.to_string()))?;
 
         let hash = auth::hash_password(new_password)
             .map_err(|e| AppError::Internal(e.to_string()))?;

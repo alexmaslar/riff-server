@@ -18,6 +18,13 @@ pub struct Claims {
     pub exp: usize,
 }
 
+pub fn validate_password(password: &str) -> Result<(), &'static str> {
+    if password.len() < 8 {
+        return Err("password must be at least 8 characters");
+    }
+    Ok(())
+}
+
 pub fn hash_password(password: &str) -> anyhow::Result<String> {
     let salt = SaltString::generate(&mut OsRng);
     let argon2 = Argon2::default();
@@ -41,7 +48,7 @@ pub fn create_token(
     secret: &str,
 ) -> anyhow::Result<String> {
     let expiration = Utc::now()
-        .checked_add_signed(chrono::Duration::days(30))
+        .checked_add_signed(chrono::Duration::days(7))
         .expect("valid timestamp")
         .timestamp() as usize;
 
@@ -87,6 +94,13 @@ pub async fn bootstrap_admin(pool: &SqlitePool, config: &Config) -> anyhow::Resu
             return Ok(());
         }
     };
+
+    if password.len() < 8 {
+        tracing::warn!(
+            "admin_password is only {} characters — passwords should be at least 8 characters for security",
+            password.len()
+        );
+    }
 
     let username = &config.auth.admin_username;
     let id = Uuid::new_v4();

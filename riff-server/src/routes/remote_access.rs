@@ -1,9 +1,11 @@
-use axum::{extract::State, Json};
+use axum::{extract::State, Extension, Json};
+use riff_core::auth::Claims;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
 use crate::error::AppError;
+use crate::middleware::ClientIp;
 use crate::AppState;
 
 fn status_json(status: &crate::upnp::RemoteAccessStatus, https_port: u16) -> Value {
@@ -35,6 +37,8 @@ pub async fn get_status(
 
 pub async fn enable(
     State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<Claims>,
+    Extension(client_ip): Extension<ClientIp>,
 ) -> Result<Json<Value>, AppError> {
     let config = state.config.read().await;
     let external_url = config.remote_access.external_url.clone();
@@ -55,6 +59,16 @@ pub async fn enable(
         }
     }
 
+    super::audit::log(
+        &state.db,
+        &claims.sub,
+        &claims.username,
+        "remote_access_enable",
+        None,
+        Some(&client_ip.0),
+    )
+    .await;
+
     let status = state.remote_access.status.read().await;
     let https_port = state.config.read().await.server.https_port;
     Ok(Json(status_json(&status, https_port)))
@@ -62,6 +76,8 @@ pub async fn enable(
 
 pub async fn disable(
     State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<Claims>,
+    Extension(client_ip): Extension<ClientIp>,
 ) -> Result<Json<Value>, AppError> {
     state.remote_access.stop().await;
 
@@ -72,6 +88,16 @@ pub async fn disable(
             tracing::warn!("failed to save config: {e}");
         }
     }
+
+    super::audit::log(
+        &state.db,
+        &claims.sub,
+        &claims.username,
+        "remote_access_disable",
+        None,
+        Some(&client_ip.0),
+    )
+    .await;
 
     let status = state.remote_access.status.read().await;
     let https_port = state.config.read().await.server.https_port;
@@ -89,6 +115,8 @@ pub struct ConfigureRequest {
 
 pub async fn configure(
     State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<Claims>,
+    Extension(client_ip): Extension<ClientIp>,
     Json(body): Json<ConfigureRequest>,
 ) -> Result<Json<Value>, AppError> {
     // Validate method if provided
@@ -131,6 +159,21 @@ pub async fn configure(
         config.remote_access.enabled = true;
         let _ = config.save();
     }
+
+    let details = format!(
+        "method={}, external_url={}",
+        body.method.as_deref().unwrap_or("unchanged"),
+        body.external_url.as_deref().unwrap_or("unchanged"),
+    );
+    super::audit::log(
+        &state.db,
+        &claims.sub,
+        &claims.username,
+        "remote_access_configure",
+        Some(&details),
+        Some(&client_ip.0),
+    )
+    .await;
 
     let status = state.remote_access.status.read().await;
     let https_port = state.config.read().await.server.https_port;
