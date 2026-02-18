@@ -45,6 +45,8 @@ pub struct PopularTrack {
     pub title: String,
     pub duration_seconds: Option<i32>,
     pub format: Option<String>,
+    pub sample_rate: Option<i32>,
+    pub bit_depth: Option<i32>,
     pub album_id: String,
     pub album_title: String,
     pub cover_art_path: Option<String>,
@@ -240,9 +242,10 @@ pub async fn build_artist_detail(
         )
         .bind(artist_id)
         .fetch_all(db),
-        sqlx::query_as::<_, (String, i32, i64, String, String, Option<i32>, Option<String>, String, String, Option<String>)>(
+        sqlx::query_as::<_, (String, i32, i64, String, String, Option<i32>, Option<String>, Option<i32>, Option<i32>, String, String, Option<String>)>(
             "SELECT att.track_name, att.rank, att.playcount, \
                     t.id, t.title, t.duration_seconds, t.format, \
+                    t.sample_rate, t.bit_depth, \
                     al.id, al.title, al.cover_art_path \
              FROM artist_top_tracks att \
              JOIN albums al ON al.artist_id = att.artist_id \
@@ -284,7 +287,7 @@ pub async fn build_artist_detail(
 
     let popular_tracks: Vec<PopularTrack> = top_tracks_rows
         .into_iter()
-        .map(|(track_name, rank, playcount, track_id, title, duration_seconds, format, album_id, album_title, cover_art_path)| {
+        .map(|(track_name, rank, playcount, track_id, title, duration_seconds, format, sample_rate, bit_depth, album_id, album_title, cover_art_path)| {
             PopularTrack {
                 rank,
                 name: track_name,
@@ -293,6 +296,8 @@ pub async fn build_artist_detail(
                 title,
                 duration_seconds,
                 format,
+                sample_rate,
+                bit_depth,
                 album_id,
                 album_title,
                 cover_art_path,
