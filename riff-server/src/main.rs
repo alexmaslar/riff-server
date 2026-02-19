@@ -792,6 +792,14 @@ async fn run_download_processor(state: Arc<AppState>) {
     loop {
         tokio::time::sleep(Duration::from_secs(10)).await;
 
+        // Reset stuck processing items (>30 min without completing)
+        let _ = sqlx::query(
+            "UPDATE download_queue SET status = 'completed', processing_stage = 'complete', completed_at = datetime('now') \
+             WHERE status = 'processing' AND completed_at IS NULL AND created_at < datetime('now', '-30 minutes')"
+        )
+        .execute(&state.db)
+        .await;
+
         // Fetch next queued download
         let row: Option<(String, String, String, String, Option<String>)> = sqlx::query_as(
             "SELECT id, provider, provider_album_id, quality, library_id FROM download_queue WHERE status = 'queued' ORDER BY created_at ASC LIMIT 1"
@@ -960,22 +968,23 @@ async fn run_download_processor(state: Arc<AppState>) {
             }
         }
 
-        // Mark complete
+        // Mark as processing → scanning stage
         let _ = sqlx::query(
-            "UPDATE download_queue SET status = 'completed', current_track = NULL, completed_at = datetime('now') WHERE id = ?"
+            "UPDATE download_queue SET status = 'processing', processing_stage = 'scanning', current_track = NULL WHERE id = ?"
         )
         .bind(&dl_id)
         .execute(&state.db)
         .await;
 
         tracing::info!(
-            "download complete: {} - {} ({} tracks)",
+            "download complete: {} - {} ({} tracks), starting post-processing",
             detail.album.artist.name,
             detail.album.title,
             completed
         );
 
         // Scan library so the new album appears in the DB immediately
+        let mut new_album: Option<(String,)> = None;
         if !resolved_library_id.is_empty() {
             match scanner::scan_library(&state.db, &library_path, &resolved_library_id).await {
                 Ok(result) => {
@@ -988,10 +997,99 @@ async fn run_download_processor(state: Arc<AppState>) {
                         tracks_added: result.tracks_added,
                         tracks_removed: result.tracks_removed,
                     });
+
+                    // Find the newly created album
+                    new_album = sqlx::query_as(
+                        "SELECT a.id FROM albums a JOIN artists ar ON a.artist_id = ar.id \
+                         WHERE LOWER(ar.name) = LOWER(?) AND LOWER(a.title) = LOWER(?) \
+                         AND a.library_id = ? ORDER BY a.added_at DESC LIMIT 1"
+                    )
+                    .bind(&detail.album.artist.name)
+                    .bind(&detail.album.title)
+                    .bind(&resolved_library_id)
+                    .fetch_optional(&state.db)
+                    .await
+                    .unwrap_or(None);
+
+                    if let Some((ref local_album_id,)) = new_album {
+                        // Update local_album_id on the download queue entry
+                        let _ = sqlx::query("UPDATE download_queue SET local_album_id = ? WHERE id = ?")
+                            .bind(local_album_id)
+                            .bind(&dl_id)
+                            .execute(&state.db)
+                            .await;
+
+                        // Set provider info on the album
+                        let _ = sqlx::query("UPDATE albums SET provider = ?, provider_album_id = ? WHERE id = ?")
+                            .bind(&provider_name)
+                            .bind(&album_id)
+                            .bind(local_album_id)
+                            .execute(&state.db)
+                            .await;
+                    }
                 }
                 Err(e) => tracing::warn!("post-download scan failed: {e}"),
             }
         }
+
+        // Run AI pipeline if we found the album
+        if let Some((ref local_album_id,)) = new_album {
+            let config = state.config.read().await;
+            let ai_config = config.metadata.ai.clone();
+            drop(config);
+
+            // Stage 1: MusicBrainz enrichment
+            let status: Option<(String,)> = sqlx::query_as("SELECT status FROM download_queue WHERE id = ?")
+                .bind(&dl_id).fetch_optional(&state.db).await.unwrap_or(None);
+            if status.as_ref().map(|s| s.0.as_str()) != Some("cancelled") {
+                let _ = sqlx::query("UPDATE download_queue SET processing_stage = 'enriching' WHERE id = ?")
+                    .bind(&dl_id).execute(&state.db).await;
+                if let Err(e) = musicbrainz::enrichment::enrich_album(&state.db, local_album_id).await {
+                    tracing::warn!("post-download enrichment failed for {}: {e}", local_album_id);
+                }
+            }
+
+            // Stage 2: AI summarize (if AI configured)
+            let status: Option<(String,)> = sqlx::query_as("SELECT status FROM download_queue WHERE id = ?")
+                .bind(&dl_id).fetch_optional(&state.db).await.unwrap_or(None);
+            if status.as_ref().map(|s| s.0.as_str()) != Some("cancelled") && ai_config.enabled {
+                let _ = sqlx::query("UPDATE download_queue SET processing_stage = 'summarizing' WHERE id = ?")
+                    .bind(&dl_id).execute(&state.db).await;
+                if let Err(e) = ai::summarize_album(&state.db, &ai_config, local_album_id).await {
+                    tracing::warn!("post-download summarization failed for {}: {e}", local_album_id);
+                }
+            }
+
+            // Stage 3: AI rate
+            let status: Option<(String,)> = sqlx::query_as("SELECT status FROM download_queue WHERE id = ?")
+                .bind(&dl_id).fetch_optional(&state.db).await.unwrap_or(None);
+            if status.as_ref().map(|s| s.0.as_str()) != Some("cancelled") && ai_config.enabled {
+                let _ = sqlx::query("UPDATE download_queue SET processing_stage = 'rating' WHERE id = ?")
+                    .bind(&dl_id).execute(&state.db).await;
+                if let Err(e) = ai::rate_album(&state.db, &ai_config, local_album_id).await {
+                    tracing::warn!("post-download rating failed for {}: {e}", local_album_id);
+                }
+            }
+
+            // Stage 4: AI extract tags
+            let status: Option<(String,)> = sqlx::query_as("SELECT status FROM download_queue WHERE id = ?")
+                .bind(&dl_id).fetch_optional(&state.db).await.unwrap_or(None);
+            if status.as_ref().map(|s| s.0.as_str()) != Some("cancelled") && ai_config.enabled {
+                let _ = sqlx::query("UPDATE download_queue SET processing_stage = 'extracting_tags' WHERE id = ?")
+                    .bind(&dl_id).execute(&state.db).await;
+                if let Err(e) = ai::extract_tags_album(&state.db, &ai_config, local_album_id).await {
+                    tracing::warn!("post-download tag extraction failed for {}: {e}", local_album_id);
+                }
+            }
+        }
+
+        // Mark fully completed
+        let _ = sqlx::query(
+            "UPDATE download_queue SET status = 'completed', processing_stage = 'complete', completed_at = datetime('now') WHERE id = ?"
+        )
+        .bind(&dl_id)
+        .execute(&state.db)
+        .await;
     }
 }
 

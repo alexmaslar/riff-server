@@ -83,7 +83,7 @@ pub async fn list_downloads(
     let rows = sqlx::query_as::<_, DownloadRow>(
         "SELECT id, provider, provider_album_id, album_title, artist_name, cover_art_url, quality,
                 status, tracks_total, tracks_completed, current_track, error, local_album_id,
-                created_at, completed_at
+                processing_stage, created_at, completed_at
          FROM download_queue
          ORDER BY created_at DESC
          LIMIT 100"
@@ -108,6 +108,16 @@ pub async fn list_downloads(
                 "current_track": r.current_track,
                 "error": r.error,
                 "local_album_id": r.local_album_id,
+                "processing_stage": r.processing_stage,
+                "stage_description": r.processing_stage.as_ref().map(|s| match s.as_str() {
+                    "scanning" => "Scanning library...",
+                    "enriching" => "Enriching metadata...",
+                    "summarizing" => "Writing summary...",
+                    "rating" => "Rating...",
+                    "extracting_tags" => "Extracting tags...",
+                    "complete" => "Complete",
+                    other => other,
+                }),
                 "created_at": r.created_at,
                 "completed_at": r.completed_at,
             })
@@ -123,7 +133,7 @@ pub async fn cancel_download(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, AppError> {
     let result = sqlx::query(
-        "UPDATE download_queue SET status = 'cancelled' WHERE id = ? AND status IN ('queued', 'downloading')"
+        "UPDATE download_queue SET status = 'cancelled' WHERE id = ? AND status IN ('queued', 'downloading', 'processing')"
     )
     .bind(&id)
     .execute(&state.db)
@@ -153,6 +163,7 @@ struct DownloadRow {
     current_track: Option<String>,
     error: Option<String>,
     local_album_id: Option<String>,
+    processing_stage: Option<String>,
     created_at: String,
     completed_at: Option<String>,
 }
