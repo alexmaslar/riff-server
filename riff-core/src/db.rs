@@ -140,6 +140,14 @@ pub async fn sync_libraries(pool: &SqlitePool, libraries: &[LibraryEntry]) -> an
                 );
             }
         }
+        // Daily mixes are ephemeral (regenerated regularly) — delete stale NULL ones
+        // instead of backfilling, which would violate the UNIQUE constraint.
+        let deleted = sqlx::query("DELETE FROM daily_mixes WHERE library_id IS NULL")
+            .execute(pool)
+            .await?;
+        if deleted.rows_affected() > 0 {
+            info!("deleted {} stale daily_mixes with NULL library_id", deleted.rows_affected());
+        }
     }
 
     Ok(())
@@ -180,19 +188,23 @@ pub async fn resolve_library_ids(
 pub async fn wipe_library_data(pool: &SqlitePool, library_id: &str) -> anyhow::Result<()> {
     // Order matters: delete children before parents
     sqlx::query(
-        "DELETE FROM daily_mix_tracks WHERE mix_id IN (SELECT id FROM daily_mixes WHERE library_id = ?)",
+        "DELETE FROM daily_mix_tracks WHERE mix_id IN (SELECT id FROM daily_mixes WHERE library_id = ?)
+         OR track_id IN (SELECT id FROM tracks WHERE library_id = ?)",
     )
+    .bind(library_id)
     .bind(library_id)
     .execute(pool)
     .await?;
-    sqlx::query("DELETE FROM daily_mixes WHERE library_id = ?")
+    sqlx::query("DELETE FROM daily_mixes WHERE library_id = ? OR library_id IS NULL")
         .bind(library_id)
         .execute(pool)
         .await?;
 
     sqlx::query(
-        "DELETE FROM playlist_tracks WHERE playlist_id IN (SELECT id FROM playlists WHERE library_id = ?)",
+        "DELETE FROM playlist_tracks WHERE playlist_id IN (SELECT id FROM playlists WHERE library_id = ?)
+         OR track_id IN (SELECT id FROM tracks WHERE library_id = ?)",
     )
+    .bind(library_id)
     .bind(library_id)
     .execute(pool)
     .await?;
@@ -259,7 +271,51 @@ pub async fn wipe_library_data(pool: &SqlitePool, library_id: &str) -> anyhow::R
         .execute(pool)
         .await?;
 
+    // Clear user default_library_id references so the library row can be deleted
+    sqlx::query("UPDATE users SET default_library_id = NULL WHERE default_library_id = ?")
+        .bind(library_id)
+        .execute(pool)
+        .await?;
+
     info!("library data wiped for library_id={}", library_id);
+    Ok(())
+}
+
+/// Update file paths when a library is relocated to a new directory.
+/// Preserves all metadata by updating path prefixes instead of wiping data.
+pub async fn relocate_library_paths(
+    pool: &SqlitePool,
+    library_id: &str,
+    old_path: &str,
+    new_path: &str,
+) -> anyhow::Result<()> {
+    // Update track file paths
+    let tracks_updated = sqlx::query(
+        "UPDATE tracks SET file_path = REPLACE(file_path, ?, ?) WHERE library_id = ?"
+    )
+    .bind(old_path)
+    .bind(new_path)
+    .bind(library_id)
+    .execute(pool)
+    .await?
+    .rows_affected();
+
+    // Update album cover art paths
+    let covers_updated = sqlx::query(
+        "UPDATE albums SET cover_art_path = REPLACE(cover_art_path, ?, ?)
+         WHERE library_id = ? AND cover_art_path IS NOT NULL"
+    )
+    .bind(old_path)
+    .bind(new_path)
+    .bind(library_id)
+    .execute(pool)
+    .await?
+    .rows_affected();
+
+    info!(
+        "library paths relocated for library_id={}: {} tracks, {} covers updated",
+        library_id, tracks_updated, covers_updated
+    );
     Ok(())
 }
 

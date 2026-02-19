@@ -314,16 +314,15 @@ impl Config {
         Ok(config)
     }
 
-    /// Return the effective list of libraries.
-    /// If `libraries` is non-empty, return it.
+    /// Return the effective list of libraries, deduplicated by path.
+    /// If `libraries` is non-empty, return it (first entry wins for duplicate paths).
     /// Else if `path` is Some, return a single entry with name "Music" and that path.
     /// Else return empty vec.
     pub fn resolved_libraries(&self) -> Vec<LibraryEntry> {
-        if !self.library.libraries.is_empty() {
-            return self.library.libraries.clone();
-        }
-        if let Some(ref path) = self.library.path {
-            return vec![LibraryEntry {
+        let raw = if !self.library.libraries.is_empty() {
+            self.library.libraries.clone()
+        } else if let Some(ref path) = self.library.path {
+            vec![LibraryEntry {
                 name: "Music".to_string(),
                 path: path.clone(),
                 isolated: false,
@@ -334,9 +333,15 @@ impl Config {
                 artist_bios: None,
                 artist_recommendations: None,
                 scan_interval: None,
-            }];
-        }
-        Vec::new()
+            }]
+        } else {
+            return Vec::new();
+        };
+        // Deduplicate by path (first entry wins)
+        let mut seen = std::collections::HashSet::new();
+        raw.into_iter()
+            .filter(|entry| seen.insert(entry.path.clone()))
+            .collect()
     }
 
     pub fn save(&self) -> anyhow::Result<()> {

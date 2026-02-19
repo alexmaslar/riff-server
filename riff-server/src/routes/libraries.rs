@@ -66,6 +66,15 @@ pub async fn add_library(
     State(state): State<Arc<AppState>>,
     Json(body): Json<AddLibraryBody>,
 ) -> Result<Json<Value>, AppError> {
+    // Check for duplicate path
+    {
+        let config = state.config.read().await;
+        let resolved = config.resolved_libraries();
+        if resolved.iter().any(|l| l.path == body.path) {
+            return Err(AppError::BadRequest(format!("a library already exists at path: {}", body.path)));
+        }
+    }
+
     // Add to config
     {
         let mut config = state.config.write().await;
@@ -172,6 +181,23 @@ pub async fn update_library(
     // Update config
     {
         let mut config = state.config.write().await;
+        // Migrate legacy single-path config to libraries array if needed
+        if config.library.libraries.is_empty() {
+            if let Some(legacy_path) = config.library.path.take() {
+                config.library.libraries.push(LibraryEntry {
+                    name: "Music".to_string(),
+                    path: legacy_path,
+                    isolated: false,
+                    auto_enrich: None,
+                    album_summaries: None,
+                    album_ratings: None,
+                    album_recommendations: None,
+                    artist_bios: None,
+                    artist_recommendations: None,
+                    scan_interval: None,
+                });
+            }
+        }
         if let Some(entry) = config.library.libraries.iter_mut().find(|l| l.path == lib_path) {
             if let Some(ref name) = body.name {
                 entry.name = name.clone();
@@ -207,9 +233,9 @@ pub async fn update_library(
         config.save().map_err(|e| AppError::Internal(e.to_string()))?;
     }
 
-    // If path changed, wipe data for the old library and re-scan at the new path
+    // If path changed, relocate file paths and re-scan at the new path
     if path_changed {
-        db::wipe_library_data(&state.db, &id).await
+        db::relocate_library_paths(&state.db, &id, &lib_path, body.path.as_ref().unwrap()).await
             .map_err(|e| AppError::Internal(e.to_string()))?;
     }
 
@@ -255,6 +281,23 @@ pub async fn remove_library(
     // Remove from config
     {
         let mut config = state.config.write().await;
+        // Migrate legacy single-path config to libraries array if needed
+        if config.library.libraries.is_empty() {
+            if let Some(legacy_path) = config.library.path.take() {
+                config.library.libraries.push(LibraryEntry {
+                    name: "Music".to_string(),
+                    path: legacy_path,
+                    isolated: false,
+                    auto_enrich: None,
+                    album_summaries: None,
+                    album_ratings: None,
+                    album_recommendations: None,
+                    artist_bios: None,
+                    artist_recommendations: None,
+                    scan_interval: None,
+                });
+            }
+        }
         config.library.libraries.retain(|l| l.path != lib_path);
         config.save().map_err(|e| AppError::Internal(e.to_string()))?;
     }
