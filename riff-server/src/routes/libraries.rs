@@ -88,6 +88,7 @@ pub async fn add_library(
             album_recommendations: None,
             artist_bios: None,
             artist_recommendations: None,
+            album_tags: None,
             scan_interval: None,
         });
         config.save().map_err(|e| AppError::Internal(e.to_string()))?;
@@ -194,6 +195,7 @@ pub async fn update_library(
                     album_recommendations: None,
                     artist_bios: None,
                     artist_recommendations: None,
+                    album_tags: None,
                     scan_interval: None,
                 });
             }
@@ -294,6 +296,7 @@ pub async fn remove_library(
                     album_recommendations: None,
                     artist_bios: None,
                     artist_recommendations: None,
+                    album_tags: None,
                     scan_interval: None,
                 });
             }

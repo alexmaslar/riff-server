@@ -59,6 +59,9 @@ pub struct AlbumDetailResponse {
     pub cover_art_path: Option<String>,
     pub ai_summary: Option<String>,
     pub ai_rating: Option<f64>,
+    pub ai_moods: Vec<String>,
+    pub ai_descriptors: Vec<String>,
+    pub ai_keywords: Vec<String>,
     pub metadata_status: String,
     pub added_at: String,
     pub country: Option<String>,
@@ -310,7 +313,7 @@ pub async fn build_album_detail(
     user_id: &str,
 ) -> Result<AlbumDetailResponse, AppError> {
     let album_row = sqlx::query(
-        "SELECT a.id, a.title, a.artist_id, ar.name, a.year, a.genre, a.style, a.label, a.catalog_number, a.cover_art_path, a.ai_summary, a.ai_rating, a.metadata_status, a.added_at, a.country, a.release_notes, a.all_labels, a.is_compilation, a.play_count, a.source
+        "SELECT a.id, a.title, a.artist_id, ar.name, a.year, a.genre, a.style, a.label, a.catalog_number, a.cover_art_path, a.ai_summary, a.ai_rating, a.ai_moods, a.ai_descriptors, a.ai_keywords, a.metadata_status, a.added_at, a.country, a.release_notes, a.all_labels, a.is_compilation, a.play_count, a.source
          FROM albums a JOIN artists ar ON a.artist_id = ar.id
          WHERE a.id = ?",
     )
@@ -415,9 +418,12 @@ pub async fn build_album_detail(
 
     let genre_str: String = album_row.get(5);
     let style_str: String = album_row.get(6);
-    let all_labels_str: String = album_row.get(16);
-    let is_compilation_int: i32 = album_row.get(17);
-    let play_count: i64 = album_row.get(18);
+    let ai_moods_str: String = album_row.get(12);
+    let ai_descriptors_str: String = album_row.get(13);
+    let ai_keywords_str: String = album_row.get(14);
+    let all_labels_str: String = album_row.get(19);
+    let is_compilation_int: i32 = album_row.get(20);
+    let play_count: i64 = album_row.get(21);
 
     Ok(AlbumDetailResponse {
         id: album_row.get(0),
@@ -432,10 +438,13 @@ pub async fn build_album_detail(
         cover_art_path: album_row.get(9),
         ai_summary: album_row.get(10),
         ai_rating: album_row.get(11),
-        metadata_status: album_row.get(12),
-        added_at: album_row.get(13),
-        country: album_row.get(14),
-        release_notes: album_row.get(15),
+        ai_moods: serde_json::from_str(&ai_moods_str).unwrap_or_default(),
+        ai_descriptors: serde_json::from_str(&ai_descriptors_str).unwrap_or_default(),
+        ai_keywords: serde_json::from_str(&ai_keywords_str).unwrap_or_default(),
+        metadata_status: album_row.get(15),
+        added_at: album_row.get(16),
+        country: album_row.get(17),
+        release_notes: album_row.get(18),
         all_labels: serde_json::from_str(&all_labels_str).unwrap_or_default(),
         is_compilation: is_compilation_int != 0,
         play_count,
@@ -443,7 +452,7 @@ pub async fn build_album_detail(
         credits: credit_summaries,
         is_favorited,
         similar_albums,
-        source: album_row.get(19),
+        source: album_row.get(22),
     })
 }
 

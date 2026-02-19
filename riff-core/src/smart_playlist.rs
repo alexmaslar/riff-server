@@ -299,6 +299,8 @@ pub async fn generate_smart_playlist(
             key: c.musical_key.clone(),
             mood: c.mood.clone(),
             duration_seconds: c.duration_seconds,
+            album_moods: c.album_moods.join(", "),
+            album_descriptors: c.album_descriptors.join(", "),
         })
         .collect();
 
@@ -383,6 +385,8 @@ pub async fn refine_smart_playlist(
             key: c.musical_key.clone(),
             mood: c.mood.clone(),
             duration_seconds: c.duration_seconds,
+            album_moods: c.album_moods.join(", "),
+            album_descriptors: c.album_descriptors.join(", "),
         })
         .collect();
 
@@ -415,6 +419,8 @@ pub async fn refine_smart_playlist(
             key: c.musical_key.clone(),
             mood: c.mood.clone(),
             duration_seconds: c.duration_seconds,
+            album_moods: c.album_moods.join(", "),
+            album_descriptors: c.album_descriptors.join(", "),
         })
         .collect();
 
@@ -586,7 +592,7 @@ async fn extract_keyword_filters(pool: &SqlitePool, prompt: &str) -> CandidateFi
         }
     }
 
-    // Mood keywords
+    // Mood keywords: hardcoded core set + dynamic tags from DB
     let mood_keywords = [
         "energetic", "melancholic", "aggressive", "calm", "happy",
         "sad", "dark", "bright", "dreamy", "intense",
@@ -594,6 +600,18 @@ async fn extract_keyword_filters(pool: &SqlitePool, prompt: &str) -> CandidateFi
     for mood in &mood_keywords {
         if prompt_lower.contains(mood) {
             filters.moods.push(mood.to_string());
+        }
+    }
+
+    // Expand mood vocabulary with album-level AI tags from the database
+    if let Ok(album_tags) = get_known_album_tags(pool).await {
+        for tag in &album_tags {
+            let tag_lower = tag.to_lowercase();
+            if tag_lower.len() >= 3 && prompt_lower.contains(&tag_lower)
+                && !filters.moods.contains(&tag_lower)
+            {
+                filters.moods.push(tag_lower);
+            }
         }
     }
 
@@ -632,6 +650,21 @@ async fn get_known_artists(pool: &SqlitePool) -> Result<Vec<(String, String)>> {
     Ok(rows)
 }
 
+/// Get distinct AI-extracted tags (moods, descriptors, keywords) from all albums.
+async fn get_known_album_tags(pool: &SqlitePool) -> Result<Vec<String>> {
+    let rows: Vec<(String,)> = sqlx::query_as(
+        "SELECT DISTINCT j.value FROM albums a, json_each(a.ai_moods) j WHERE j.value IS NOT NULL AND j.value != ''
+         UNION
+         SELECT DISTINCT j.value FROM albums a, json_each(a.ai_descriptors) j WHERE j.value IS NOT NULL AND j.value != ''
+         UNION
+         SELECT DISTINCT j.value FROM albums a, json_each(a.ai_keywords) j WHERE j.value IS NOT NULL AND j.value != ''"
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows.into_iter().map(|(t,)| t).collect())
+}
+
 // ─── SQL Candidate Query ────────────────────────────────────────────────────
 
 #[allow(dead_code)]
@@ -655,6 +688,8 @@ struct CandidateRow {
     bit_depth: Option<i32>,
     composer: Option<String>,
     loudness_lufs: Option<f64>,
+    album_moods: Vec<String>,
+    album_descriptors: Vec<String>,
 }
 
 async fn query_candidates(pool: &SqlitePool, filters: &CandidateFilters) -> Result<Vec<CandidateRow>> {
@@ -666,6 +701,7 @@ async fn query_candidates(pool: &SqlitePool, filters: &CandidateFilters) -> Resu
                 COALESCE(t.key_analyzed, t.musical_key) as musical_key,
                 t.mood, t.format, t.track_number, t.disc_number,
                 t.sample_rate, t.bit_depth, t.composer, t.loudness_lufs,
+                a.ai_moods, a.ai_descriptors,
                 COALESCE(a.ai_rating, 5.0) as rating
          FROM tracks t
          JOIN albums a ON t.album_id = a.id
@@ -740,14 +776,20 @@ async fn query_candidates(pool: &SqlitePool, filters: &CandidateFilters) -> Resu
         builder.push_bind(max);
     }
 
-    // Mood filter
+    // Mood filter: match track mood OR album-level AI moods
     if !filters.moods.is_empty() {
-        builder.push(" AND t.mood IN (");
+        builder.push(" AND (t.mood IN (");
         let mut sep = builder.separated(", ");
         for m in &filters.moods {
             sep.push_bind(m.clone());
         }
         sep.push_unseparated(")");
+        builder.push(" OR a.id IN (SELECT am.id FROM albums am, json_each(am.ai_moods) jm WHERE jm.value IN (");
+        let mut sep = builder.separated(", ");
+        for m in &filters.moods {
+            sep.push_bind(m.clone());
+        }
+        sep.push_unseparated(")))");
     }
 
     builder.push(" ORDER BY rating DESC, RANDOM()");
@@ -762,6 +804,8 @@ async fn query_candidates(pool: &SqlitePool, filters: &CandidateFilters) -> Resu
         .map(|row| {
             let genre_json: String = row.get("genre");
             let genres: Vec<String> = serde_json::from_str(&genre_json).unwrap_or_default();
+            let moods_json: String = row.try_get("ai_moods").unwrap_or_default();
+            let descriptors_json: String = row.try_get("ai_descriptors").unwrap_or_default();
 
             CandidateRow {
                 id: row.get("id"),
@@ -783,6 +827,8 @@ async fn query_candidates(pool: &SqlitePool, filters: &CandidateFilters) -> Resu
                 bit_depth: row.try_get("bit_depth").ok().flatten(),
                 composer: row.try_get("composer").ok().flatten(),
                 loudness_lufs: row.try_get("loudness_lufs").ok().flatten(),
+                album_moods: serde_json::from_str(&moods_json).unwrap_or_default(),
+                album_descriptors: serde_json::from_str(&descriptors_json).unwrap_or_default(),
             }
         })
         .collect();
@@ -802,7 +848,8 @@ async fn fetch_candidates_by_ids(pool: &SqlitePool, ids: &[String]) -> Result<Ve
                 COALESCE(t.bpm_analyzed, t.bpm_tag) as bpm,
                 COALESCE(t.key_analyzed, t.musical_key) as musical_key,
                 t.mood, t.format, t.track_number, t.disc_number,
-                t.sample_rate, t.bit_depth, t.composer, t.loudness_lufs
+                t.sample_rate, t.bit_depth, t.composer, t.loudness_lufs,
+                a.ai_moods, a.ai_descriptors
          FROM tracks t
          JOIN albums a ON t.album_id = a.id
          JOIN artists ar ON a.artist_id = ar.id
@@ -822,6 +869,8 @@ async fn fetch_candidates_by_ids(pool: &SqlitePool, ids: &[String]) -> Result<Ve
         .map(|row| {
             let genre_json: String = row.get("genre");
             let genres: Vec<String> = serde_json::from_str(&genre_json).unwrap_or_default();
+            let moods_json: String = row.try_get("ai_moods").unwrap_or_default();
+            let descriptors_json: String = row.try_get("ai_descriptors").unwrap_or_default();
 
             CandidateRow {
                 id: row.get("id"),
@@ -843,6 +892,8 @@ async fn fetch_candidates_by_ids(pool: &SqlitePool, ids: &[String]) -> Result<Ve
                 bit_depth: row.try_get("bit_depth").ok().flatten(),
                 composer: row.try_get("composer").ok().flatten(),
                 loudness_lufs: row.try_get("loudness_lufs").ok().flatten(),
+                album_moods: serde_json::from_str(&moods_json).unwrap_or_default(),
+                album_descriptors: serde_json::from_str(&descriptors_json).unwrap_or_default(),
             }
         })
         .collect();

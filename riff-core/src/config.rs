@@ -45,6 +45,8 @@ pub struct LibraryEntry {
     pub artist_bios: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artist_recommendations: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub album_tags: Option<bool>,
     /// Per-library scan interval in seconds (None = use global default)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scan_interval: Option<u64>,
@@ -116,6 +118,8 @@ pub struct AiConfig {
     pub artist_bios: bool,
     #[serde(default = "default_true")]
     pub artist_recommendations: bool,
+    #[serde(default = "default_true")]
+    pub album_tags: bool,
     #[serde(default = "default_true")]
     pub playlist_generation: bool,
 }
@@ -201,6 +205,7 @@ impl Default for AiConfig {
             album_recommendations: true,
             artist_bios: true,
             artist_recommendations: true,
+            album_tags: true,
             playlist_generation: true,
         }
     }
@@ -332,6 +337,7 @@ impl Config {
                 album_recommendations: None,
                 artist_bios: None,
                 artist_recommendations: None,
+                album_tags: None,
                 scan_interval: None,
             }]
         } else {

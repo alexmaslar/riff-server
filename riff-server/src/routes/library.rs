@@ -147,6 +147,13 @@ pub async fn library_stats(State(state): State<Arc<AppState>>) -> Result<Json<Va
             .fetch_one(&state.db)
             .await?;
 
+    let (pending_tags,): (i64,) =
+        sqlx::query_as(
+            "SELECT COUNT(*) FROM albums WHERE ai_summary IS NOT NULL AND ai_moods = '[]'"
+        )
+            .fetch_one(&state.db)
+            .await?;
+
     Ok(Json(json!({
         "artists": artist_count,
         "albums": album_count,
@@ -157,6 +164,7 @@ pub async fn library_stats(State(state): State<Arc<AppState>>) -> Result<Json<Va
         "summarized": summarized,
         "pendingSummaries": pending_summaries,
         "pendingRatings": pending_rate,
+        "pendingTags": pending_tags,
     })))
 }
 
@@ -351,11 +359,44 @@ async fn maybe_spawn_rating(state: &Arc<AppState>) -> bool {
         }
         rate_state.rating_running.store(false, Ordering::SeqCst);
 
-        // Chain recommendations after rating, then analysis
-        maybe_spawn_recommendations(&rate_state).await;
+        // Chain tag extraction after rating, then recommendations, then analysis
+        maybe_spawn_tag_extraction(&rate_state).await;
     });
 
     true
+}
+
+pub async fn trigger_tag_extraction(State(state): State<Arc<AppState>>) -> Result<Json<Value>, AppError> {
+    let config = state.config.read().await;
+    if !config.metadata.ai.enabled {
+        return Err(AppError::BadRequest("AI not enabled in config".into()));
+    }
+    if !config.metadata.ai.album_tags {
+        return Err(AppError::BadRequest("Album tags disabled in config".into()));
+    }
+    let ai_config = config.metadata.ai.clone();
+    drop(config);
+
+    if state.tag_extraction_running.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+        return Ok(Json(json!({ "status": "already_running" })));
+    }
+
+    let tag_state = state.clone();
+    tokio::spawn(async move {
+        match ai::extract_tags_library(&tag_state.db, &ai_config).await {
+            Ok(result) => {
+                tracing::info!(
+                    "tag extraction complete: {} tagged, {} errors",
+                    result.albums_tagged,
+                    result.errors.len(),
+                );
+            }
+            Err(e) => tracing::warn!("tag extraction failed: {}", e),
+        }
+        tag_state.tag_extraction_running.store(false, Ordering::SeqCst);
+    });
+
+    Ok(Json(json!({ "status": "started" })))
 }
 
 pub async fn trigger_recommendations(State(state): State<Arc<AppState>>) -> Result<Json<Value>, AppError> {
@@ -460,6 +501,45 @@ pub async fn trigger_artist_bios(State(state): State<Arc<AppState>>) -> Result<J
     Ok(Json(json!({ "status": "started" })))
 }
 
+async fn maybe_spawn_tag_extraction(state: &Arc<AppState>) -> bool {
+    let ai_config = {
+        let config = state.config.read().await;
+        if !config.metadata.ai.enabled {
+            return false;
+        }
+        if !config.metadata.ai.album_tags {
+            // Skip to next in chain
+            return maybe_spawn_recommendations(state).await;
+        }
+        config.metadata.ai.clone()
+    };
+
+    if state.tag_extraction_running.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+        tracing::debug!("tag extraction already running, skipping");
+        return false;
+    }
+
+    let tag_state = state.clone();
+    tokio::spawn(async move {
+        match ai::extract_tags_library(&tag_state.db, &ai_config).await {
+            Ok(result) => {
+                tracing::info!(
+                    "tag extraction complete: {} tagged, {} errors",
+                    result.albums_tagged,
+                    result.errors.len(),
+                );
+            }
+            Err(e) => tracing::warn!("tag extraction failed: {}", e),
+        }
+        tag_state.tag_extraction_running.store(false, Ordering::SeqCst);
+
+        // Chain recommendations after tag extraction
+        maybe_spawn_recommendations(&tag_state).await;
+    });
+
+    true
+}
+
 async fn maybe_spawn_recommendations(state: &Arc<AppState>) -> bool {
     let ai_config = {
         let config = state.config.read().await;
@@ -544,6 +624,7 @@ async fn maybe_spawn_artist_recommendations(state: &Arc<AppState>) -> bool {
 pub struct ClearAiDataRequest {
     pub album_summaries: Option<bool>,
     pub album_ratings: Option<bool>,
+    pub album_tags: Option<bool>,
     pub album_recommendations: Option<bool>,
     pub artist_bios: Option<bool>,
     pub artist_recommendations: Option<bool>,
@@ -570,6 +651,14 @@ pub async fn clear_ai_data(
             .await?;
         tracing::info!("Cleared {} album ratings", result.rows_affected());
         cleared.insert("album_ratings".into(), json!(result.rows_affected()));
+    }
+
+    if body.album_tags == Some(true) {
+        let result = sqlx::query("UPDATE albums SET ai_moods = '[]', ai_descriptors = '[]', ai_keywords = '[]' WHERE ai_moods != '[]'")
+            .execute(&state.db)
+            .await?;
+        tracing::info!("Cleared {} album tags", result.rows_affected());
+        cleared.insert("album_tags".into(), json!(result.rows_affected()));
     }
 
     if body.album_recommendations == Some(true) {

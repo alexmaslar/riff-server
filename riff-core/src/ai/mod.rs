@@ -7,7 +7,7 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::config::AiConfig;
-use prompt::{AlbumContext, AlbumSummaryCompact, ArtistSummaryCompact, CreditInfo, TrackInfo, SYSTEM_PROMPT, RATING_SYSTEM_PROMPT, RECOMMEND_SYSTEM_PROMPT, ARTIST_RECOMMEND_SYSTEM_PROMPT, ARTIST_BIO_SYSTEM_PROMPT, build_album_prompt, build_rating_prompt, build_recommend_prompt, build_recommend_prompt_incremental, build_artist_recommend_prompt, build_artist_recommend_prompt_incremental, build_artist_bio_prompt};
+use prompt::{AlbumContext, AlbumSummaryCompact, ArtistSummaryCompact, CreditInfo, TrackInfo, SYSTEM_PROMPT, RATING_SYSTEM_PROMPT, RECOMMEND_SYSTEM_PROMPT, ARTIST_RECOMMEND_SYSTEM_PROMPT, ARTIST_BIO_SYSTEM_PROMPT, TAG_EXTRACTION_SYSTEM_PROMPT, build_album_prompt, build_rating_prompt, build_recommend_prompt, build_recommend_prompt_incremental, build_artist_recommend_prompt, build_artist_recommend_prompt_incremental, build_artist_bio_prompt, build_tag_extraction_prompt};
 use provider::{GenerateOptions, create_provider, create_provider_with_model};
 
 pub struct SummarizationResult {
@@ -363,6 +363,218 @@ pub async fn rate_album(
     }
 }
 
+// --- Tag Extraction ---
+
+/// Extract the first N sentences from a text.
+/// Splits on sentence-ending punctuation followed by whitespace.
+fn truncate_to_sentences(text: &str, max_sentences: usize) -> String {
+    let mut count = 0;
+    let mut end = 0;
+    let bytes = text.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+
+    while i < len {
+        if (bytes[i] == b'.' || bytes[i] == b'!' || bytes[i] == b'?')
+            && (i + 1 >= len || bytes[i + 1].is_ascii_whitespace())
+        {
+            // Skip trailing punctuation (e.g. "..." or "?!")
+            while i + 1 < len && (bytes[i + 1] == b'.' || bytes[i + 1] == b'!' || bytes[i + 1] == b'?') {
+                i += 1;
+            }
+            count += 1;
+            end = i + 1;
+            if count >= max_sentences {
+                break;
+            }
+        }
+        i += 1;
+    }
+
+    if count == 0 {
+        // No sentence boundary found — return the whole thing
+        text.to_string()
+    } else {
+        text[..end].trim().to_string()
+    }
+}
+
+#[derive(Deserialize)]
+struct TagExtractionResponse {
+    #[serde(default)]
+    moods: Vec<String>,
+    #[serde(default)]
+    descriptors: Vec<String>,
+    #[serde(default)]
+    keywords: Vec<String>,
+}
+
+pub struct TagExtractionResult {
+    pub albums_tagged: u32,
+    pub albums_skipped: u32,
+    pub errors: Vec<String>,
+}
+
+pub async fn extract_tags_library(
+    pool: &SqlitePool,
+    config: &AiConfig,
+) -> anyhow::Result<TagExtractionResult> {
+    let provider = create_provider_with_model(config, config.fast_model.as_deref())?;
+
+    let mut result = TagExtractionResult {
+        albums_tagged: 0,
+        albums_skipped: 0,
+        errors: Vec::new(),
+    };
+
+    let rows: Vec<(String, String, String, Option<i32>, String, String, String)> =
+        sqlx::query_as(
+            "SELECT a.id, a.title, ar.name, a.year, a.genre, a.style, a.ai_summary \
+             FROM albums a JOIN artists ar ON a.artist_id = ar.id \
+             JOIN libraries l ON a.library_id = l.id \
+             WHERE a.ai_summary IS NOT NULL AND a.ai_moods = '[]' \
+             AND COALESCE(l.album_tags, 1) = 1"
+        )
+        .fetch_all(pool)
+        .await?;
+
+    info!("extracting tags for {} albums", rows.len());
+
+    let opts = GenerateOptions {
+        max_tokens: 256,
+        temperature: Some(0.0),
+        web_search: false,
+        json_output: true,
+    };
+
+    for (album_id, title, artist, year, genre_json, style_json, summary) in &rows {
+        let genre: Vec<String> = serde_json::from_str(genre_json).unwrap_or_default();
+        let style: Vec<String> = serde_json::from_str(style_json).unwrap_or_default();
+        let user_prompt = build_tag_extraction_prompt(title, artist, *year, &genre, &style, summary);
+
+        match provider.generate(TAG_EXTRACTION_SYSTEM_PROMPT, &user_prompt, &opts).await {
+            Ok(response) => {
+                let json_str = strip_code_fences(&response);
+                match serde_json::from_str::<TagExtractionResponse>(json_str) {
+                    Ok(tags) => {
+                        let moods = normalize_tags(tags.moods, 5);
+                        let descriptors = normalize_tags(tags.descriptors, 5);
+                        let keywords = normalize_tags(tags.keywords, 5);
+
+                        let moods_json = serde_json::to_string(&moods).unwrap_or_else(|_| "[]".to_string());
+                        let descriptors_json = serde_json::to_string(&descriptors).unwrap_or_else(|_| "[]".to_string());
+                        let keywords_json = serde_json::to_string(&keywords).unwrap_or_else(|_| "[]".to_string());
+
+                        if let Err(e) = sqlx::query(
+                            "UPDATE albums SET ai_moods = ?, ai_descriptors = ?, ai_keywords = ? WHERE id = ?"
+                        )
+                        .bind(&moods_json)
+                        .bind(&descriptors_json)
+                        .bind(&keywords_json)
+                        .bind(album_id)
+                        .execute(pool)
+                        .await
+                        {
+                            result.errors.push(format!("{}: db update failed: {}", title, e));
+                            continue;
+                        }
+                        info!("tagged '{}': moods={:?}, descriptors={:?}, keywords={:?}", title, moods, descriptors, keywords);
+                        result.albums_tagged += 1;
+                    }
+                    Err(e) => {
+                        warn!("could not parse tags for '{}': {} — raw: {}", title, e, &json_str[..json_str.len().min(300)]);
+                        result.errors.push(format!("{}: parse error: {}", title, e));
+                    }
+                }
+            }
+            Err(e) => {
+                warn!("AI tag extraction failed for '{}': {}", title, e);
+                result.errors.push(format!("{}: {}", title, e));
+            }
+        }
+    }
+
+    info!(
+        "tag extraction complete: {} tagged, {} skipped, {} errors",
+        result.albums_tagged, result.albums_skipped, result.errors.len()
+    );
+
+    Ok(result)
+}
+
+pub async fn extract_tags_album(
+    pool: &SqlitePool,
+    config: &AiConfig,
+    album_id: &str,
+) -> anyhow::Result<bool> {
+    let row: Option<(String, String, Option<i32>, String, String, Option<String>)> =
+        sqlx::query_as(
+            "SELECT a.title, ar.name, a.year, a.genre, a.style, a.ai_summary \
+             FROM albums a JOIN artists ar ON a.artist_id = ar.id \
+             WHERE a.id = ?"
+        )
+        .bind(album_id)
+        .fetch_optional(pool)
+        .await?;
+
+    let (title, artist, year, genre_json, style_json, summary) = match row {
+        Some(r) => r,
+        None => anyhow::bail!("album not found: {}", album_id),
+    };
+
+    let summary = match summary {
+        Some(s) => s,
+        None => anyhow::bail!("album '{}' has no AI summary — summarize first", title),
+    };
+
+    let genre: Vec<String> = serde_json::from_str(&genre_json).unwrap_or_default();
+    let style: Vec<String> = serde_json::from_str(&style_json).unwrap_or_default();
+
+    let provider = create_provider_with_model(config, config.fast_model.as_deref())?;
+    let user_prompt = build_tag_extraction_prompt(&title, &artist, year, &genre, &style, &summary);
+
+    let opts = GenerateOptions {
+        max_tokens: 256,
+        temperature: Some(0.0),
+        web_search: false,
+        json_output: true,
+    };
+
+    let response = provider.generate(TAG_EXTRACTION_SYSTEM_PROMPT, &user_prompt, &opts).await?;
+    let json_str = strip_code_fences(&response);
+    let tags: TagExtractionResponse = serde_json::from_str(json_str)
+        .map_err(|e| anyhow::anyhow!("failed to parse tag extraction response for '{}': {}", title, e))?;
+
+    let moods = normalize_tags(tags.moods, 5);
+    let descriptors = normalize_tags(tags.descriptors, 5);
+    let keywords = normalize_tags(tags.keywords, 5);
+
+    let moods_json = serde_json::to_string(&moods)?;
+    let descriptors_json = serde_json::to_string(&descriptors)?;
+    let keywords_json = serde_json::to_string(&keywords)?;
+
+    sqlx::query("UPDATE albums SET ai_moods = ?, ai_descriptors = ?, ai_keywords = ? WHERE id = ?")
+        .bind(&moods_json)
+        .bind(&descriptors_json)
+        .bind(&keywords_json)
+        .bind(album_id)
+        .execute(pool)
+        .await?;
+
+    info!("tagged '{}': moods={:?}, descriptors={:?}, keywords={:?}", title, moods, descriptors, keywords);
+    Ok(true)
+}
+
+/// Normalize tags: lowercase, trim, deduplicate, cap at max_count.
+fn normalize_tags(tags: Vec<String>, max_count: usize) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    tags.into_iter()
+        .map(|t| t.trim().to_lowercase())
+        .filter(|t| !t.is_empty() && seen.insert(t.clone()))
+        .take(max_count)
+        .collect()
+}
+
 // --- Artist Bios ---
 
 pub struct ArtistBioResult {
@@ -584,9 +796,10 @@ async fn recommend_library_partitioned(
     let mut total = RecommendResult { albums_processed: 0, recommendations_generated: 0 };
 
     // Non-isolated libraries grouped together
-    let non_isolated: Vec<(String, String, String, Option<i32>, String, String, Option<String>)> =
+    let non_isolated: Vec<(String, String, String, Option<i32>, String, String, Option<String>, String, String, String, Option<String>)> =
         sqlx::query_as(
-            "SELECT a.id, a.title, ar.name, a.year, a.genre, a.style, a.label \
+            "SELECT a.id, a.title, ar.name, a.year, a.genre, a.style, a.label, \
+                    a.ai_moods, a.ai_descriptors, a.ai_keywords, a.ai_summary \
              FROM albums a JOIN artists ar ON a.artist_id = ar.id \
              JOIN libraries l ON a.library_id = l.id \
              WHERE COALESCE(l.album_recommendations, 1) = 1 AND l.isolated = 0"
@@ -608,9 +821,10 @@ async fn recommend_library_partitioned(
     .await?;
 
     for (lib_id,) in &isolated_libs {
-        let albums: Vec<(String, String, String, Option<i32>, String, String, Option<String>)> =
+        let albums: Vec<(String, String, String, Option<i32>, String, String, Option<String>, String, String, String, Option<String>)> =
             sqlx::query_as(
-                "SELECT a.id, a.title, ar.name, a.year, a.genre, a.style, a.label \
+                "SELECT a.id, a.title, ar.name, a.year, a.genre, a.style, a.label, \
+                        a.ai_moods, a.ai_descriptors, a.ai_keywords, a.ai_summary \
                  FROM albums a JOIN artists ar ON a.artist_id = ar.id \
                  JOIN libraries l ON a.library_id = l.id \
                  WHERE COALESCE(l.album_recommendations, 1) = 1 AND a.library_id = ?"
@@ -632,16 +846,20 @@ async fn recommend_library_partitioned(
 async fn recommend_library_inner(
     pool: &SqlitePool,
     config: &AiConfig,
-    albums: &[(String, String, String, Option<i32>, String, String, Option<String>)],
+    albums: &[(String, String, String, Option<i32>, String, String, Option<String>, String, String, String, Option<String>)],
     force_full: bool,
 ) -> anyhow::Result<RecommendResult> {
     let provider = create_provider_with_model(config, config.fast_model.as_deref())?;
 
     let album_ids: std::collections::HashSet<&str> = albums.iter().map(|(id, ..)| id.as_str()).collect();
 
-    let summaries: Vec<AlbumSummaryCompact> = albums.iter().map(|(id, title, artist, year, genre_json, style_json, label)| {
+    let summaries: Vec<AlbumSummaryCompact> = albums.iter().map(|(id, title, artist, year, genre_json, style_json, label, moods_json, descriptors_json, keywords_json, summary)| {
         let genre: Vec<String> = serde_json::from_str(genre_json).unwrap_or_default();
         let style: Vec<String> = serde_json::from_str(style_json).unwrap_or_default();
+        let moods: Vec<String> = serde_json::from_str(moods_json).unwrap_or_default();
+        let descriptors: Vec<String> = serde_json::from_str(descriptors_json).unwrap_or_default();
+        let keywords: Vec<String> = serde_json::from_str(keywords_json).unwrap_or_default();
+        let summary_excerpt = summary.as_deref().map(|s| truncate_to_sentences(s, 2)).unwrap_or_default();
         AlbumSummaryCompact {
             id: id.clone(),
             title: title.clone(),
@@ -650,6 +868,10 @@ async fn recommend_library_inner(
             genre: genre.join(", "),
             style: style.join(", "),
             label: label.clone().unwrap_or_default(),
+            moods: moods.join(", "),
+            descriptors: descriptors.join(", "),
+            keywords: keywords.join(", "),
+            summary_excerpt,
         }
     }).collect();
 
@@ -870,7 +1092,7 @@ async fn recommend_artists_inner(
 
     let artist_ids: std::collections::HashSet<&str> = artists.iter().map(|(id, _)| id.as_str()).collect();
 
-    // Build compact artist list with albums, genres, styles
+    // Build compact artist list with albums, genres, styles, aggregated tags, bio excerpt
     let mut summaries = Vec::new();
     for (artist_id, name) in artists {
         let albums: Vec<(String, Option<i32>)> = sqlx::query_as(
@@ -911,12 +1133,55 @@ async fn recommend_artists_inner(
             .into_iter()
             .collect();
 
+        // Aggregate AI tags from all albums by this artist
+        let tag_rows: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT ai_moods, ai_descriptors, ai_keywords FROM albums \
+             WHERE artist_id = ? AND ai_moods != '[]'"
+        )
+        .bind(artist_id)
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default();
+
+        let mut all_moods = std::collections::HashSet::new();
+        let mut all_descriptors = std::collections::HashSet::new();
+        let mut all_keywords = std::collections::HashSet::new();
+        for (m, d, k) in &tag_rows {
+            for tag in serde_json::from_str::<Vec<String>>(m).unwrap_or_default() {
+                all_moods.insert(tag);
+            }
+            for tag in serde_json::from_str::<Vec<String>>(d).unwrap_or_default() {
+                all_descriptors.insert(tag);
+            }
+            for tag in serde_json::from_str::<Vec<String>>(k).unwrap_or_default() {
+                all_keywords.insert(tag);
+            }
+        }
+
+        // Fetch artist bio excerpt (first 2 sentences)
+        let bio_row: Option<(Option<String>,)> = sqlx::query_as(
+            "SELECT ai_bio FROM artists WHERE id = ?"
+        )
+        .bind(artist_id)
+        .fetch_optional(pool)
+        .await
+        .unwrap_or(None);
+
+        let bio_excerpt = bio_row
+            .and_then(|(bio,)| bio)
+            .map(|b| truncate_to_sentences(&b, 2))
+            .unwrap_or_default();
+
         summaries.push(ArtistSummaryCompact {
             id: artist_id.clone(),
             name: name.clone(),
             genres: genres.join(", "),
             styles: styles.join(", "),
             albums,
+            moods: all_moods.into_iter().collect::<Vec<_>>().join(", "),
+            descriptors: all_descriptors.into_iter().collect::<Vec<_>>().join(", "),
+            keywords: all_keywords.into_iter().collect::<Vec<_>>().join(", "),
+            bio_excerpt,
         });
     }
 

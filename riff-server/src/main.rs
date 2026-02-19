@@ -38,6 +38,7 @@ pub struct AppState {
     pub analysis_running: AtomicBool,
     pub summarization_running: AtomicBool,
     pub rating_running: AtomicBool,
+    pub tag_extraction_running: AtomicBool,
     pub recommendation_running: AtomicBool,
     pub artist_bio_running: AtomicBool,
     pub artist_recommendation_running: AtomicBool,
@@ -89,6 +90,15 @@ async fn run_background_pipeline(state: Arc<AppState>) {
                     let ai_config = ai_config.clone();
                     let db = db.clone();
                     async move { ai::rate_library(&db, &ai_config).await }
+                })
+                .await;
+            }
+
+            if ai_config.album_tags {
+                run_stage(&state.tag_extraction_running, "tag extraction", {
+                    let ai_config = ai_config.clone();
+                    let db = db.clone();
+                    async move { ai::extract_tags_library(&db, &ai_config).await }
                 })
                 .await;
             }
@@ -407,6 +417,7 @@ async fn main() -> Result<()> {
         analysis_running: AtomicBool::new(false),
         summarization_running: AtomicBool::new(false),
         rating_running: AtomicBool::new(false),
+        tag_extraction_running: AtomicBool::new(false),
         recommendation_running: AtomicBool::new(false),
         artist_bio_running: AtomicBool::new(false),
         artist_recommendation_running: AtomicBool::new(false),
@@ -580,6 +591,7 @@ async fn main() -> Result<()> {
         .route("/library/summarize/{album_id}", post(routes::library::summarize_album))
         .route("/library/rate", post(routes::library::trigger_rating))
         .route("/library/rate/{album_id}", post(routes::library::rate_album))
+        .route("/library/tags", post(routes::library::trigger_tag_extraction))
         .route("/library/recommend", post(routes::library::trigger_recommendations))
         .route("/library/artist-recommendations", post(routes::library::trigger_artist_recommendations))
         .route("/library/artist-bios", post(routes::library::trigger_artist_bios))

@@ -73,7 +73,7 @@ pub async fn sync_libraries(pool: &SqlitePool, libraries: &[LibraryEntry]) -> an
                 "UPDATE libraries SET name = ?, isolated = ?, display_order = ?, \
                  auto_enrich = ?, album_summaries = ?, album_ratings = ?, \
                  album_recommendations = ?, artist_bios = ?, artist_recommendations = ?, \
-                 scan_interval = ? \
+                 album_tags = ?, scan_interval = ? \
                  WHERE id = ?",
             )
             .bind(&entry.name)
@@ -85,6 +85,7 @@ pub async fn sync_libraries(pool: &SqlitePool, libraries: &[LibraryEntry]) -> an
             .bind(entry.album_recommendations)
             .bind(entry.artist_bios)
             .bind(entry.artist_recommendations)
+            .bind(entry.album_tags)
             .bind(entry.scan_interval.map(|v| v as i64))
             .bind(db_id)
             .execute(pool)
@@ -96,8 +97,8 @@ pub async fn sync_libraries(pool: &SqlitePool, libraries: &[LibraryEntry]) -> an
                 "INSERT INTO libraries (id, name, path, isolated, display_order, \
                  auto_enrich, album_summaries, album_ratings, \
                  album_recommendations, artist_bios, artist_recommendations, \
-                 scan_interval) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                 album_tags, scan_interval) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&id)
             .bind(&entry.name)
@@ -110,6 +111,7 @@ pub async fn sync_libraries(pool: &SqlitePool, libraries: &[LibraryEntry]) -> an
             .bind(entry.album_recommendations)
             .bind(entry.artist_bios)
             .bind(entry.artist_recommendations)
+            .bind(entry.album_tags)
             .bind(entry.scan_interval.map(|v| v as i64))
             .execute(pool)
             .await?;

@@ -101,7 +101,7 @@ You are a knowledgeable music expert analyzing a personal music library to find 
 
 <instructions>
 - For each album, identify the most similar/related albums WITHIN THIS LIBRARY ONLY
-- Consider: shared genres and styles, same era/decade, similar production aesthetics, shared personnel, musical lineage and influence, label affinity, mood and sonic characteristics
+- Consider: shared genres and styles, same era/decade, similar production aesthetics, shared personnel, musical lineage and influence, label affinity, mood and sonic characteristics, shared AI-extracted moods/descriptors/keywords, and summary descriptions when available
 - Only recommend albums present in the provided library (use exact IDs)
 - Max 6 similar albums per album, ordered by score descending
 - Skip albums with no meaningful connections in the library
@@ -140,6 +140,32 @@ pub struct AlbumSummaryCompact {
     pub genre: String,
     pub style: String,
     pub label: String,
+    pub moods: String,
+    pub descriptors: String,
+    pub keywords: String,
+    pub summary_excerpt: String,
+}
+
+fn format_album_xml(a: &AlbumSummaryCompact) -> String {
+    let year_str = a.year.map(|y| y.to_string()).unwrap_or_default();
+    let mut xml = format!(
+        "<album id=\"{}\"><title>{}</title><artist>{}</artist><year>{}</year><genre>{}</genre><style>{}</style><label>{}</label>",
+        a.id, a.title, a.artist, year_str, a.genre, a.style, a.label
+    );
+    if !a.moods.is_empty() {
+        xml.push_str(&format!("<moods>{}</moods>", a.moods));
+    }
+    if !a.descriptors.is_empty() {
+        xml.push_str(&format!("<descriptors>{}</descriptors>", a.descriptors));
+    }
+    if !a.keywords.is_empty() {
+        xml.push_str(&format!("<keywords>{}</keywords>", a.keywords));
+    }
+    if !a.summary_excerpt.is_empty() {
+        xml.push_str(&format!("<summary>{}</summary>", a.summary_excerpt));
+    }
+    xml.push_str("</album>");
+    xml
 }
 
 pub fn build_recommend_prompt(albums: &[AlbumSummaryCompact]) -> String {
@@ -148,11 +174,7 @@ pub fn build_recommend_prompt(albums: &[AlbumSummaryCompact]) -> String {
     parts.push("<library>".to_string());
 
     for a in albums {
-        let year_str = a.year.map(|y| y.to_string()).unwrap_or_default();
-        parts.push(format!(
-            "<album id=\"{}\"><title>{}</title><artist>{}</artist><year>{}</year><genre>{}</genre><style>{}</style><label>{}</label></album>",
-            a.id, a.title, a.artist, year_str, a.genre, a.style, a.label
-        ));
+        parts.push(format_album_xml(a));
     }
 
     parts.push("</library>".to_string());
@@ -167,11 +189,7 @@ pub fn build_recommend_prompt_incremental(albums: &[AlbumSummaryCompact], target
     parts.push("<library>".to_string());
 
     for a in albums {
-        let year_str = a.year.map(|y| y.to_string()).unwrap_or_default();
-        parts.push(format!(
-            "<album id=\"{}\"><title>{}</title><artist>{}</artist><year>{}</year><genre>{}</genre><style>{}</style><label>{}</label></album>",
-            a.id, a.title, a.artist, year_str, a.genre, a.style, a.label
-        ));
+        parts.push(format_album_xml(a));
     }
 
     parts.push("</library>".to_string());
@@ -248,7 +266,7 @@ You are a knowledgeable music expert analyzing a personal music library to find 
 
 <instructions>
 - For each artist, identify the most similar/related artists WITHIN THIS LIBRARY ONLY
-- Consider: shared genres and styles, overlapping eras, similar sonic aesthetics, collaboration history, shared scene or movement, musical lineage and influence, label affinity
+- Consider: shared genres and styles, overlapping eras, similar sonic aesthetics, collaboration history, shared scene or movement, musical lineage and influence, label affinity, shared AI-extracted moods/descriptors/keywords, and bio descriptions when available
 - Only recommend artists present in the provided library (use exact IDs)
 - Max 6 similar artists per artist, ordered by score descending
 - Skip artists with no meaningful connections in the library
@@ -285,6 +303,39 @@ pub struct ArtistSummaryCompact {
     pub genres: String,
     pub styles: String,
     pub albums: Vec<(String, Option<i32>)>,
+    pub moods: String,
+    pub descriptors: String,
+    pub keywords: String,
+    pub bio_excerpt: String,
+}
+
+fn format_artist_xml(a: &ArtistSummaryCompact) -> String {
+    let albums_str: String = a.albums.iter().map(|(title, year)| {
+        if let Some(y) = year {
+            format!("{} ({})", title, y)
+        } else {
+            title.clone()
+        }
+    }).collect::<Vec<_>>().join(", ");
+
+    let mut xml = format!(
+        "<artist id=\"{}\"><name>{}</name><genres>{}</genres><styles>{}</styles><albums>{}</albums>",
+        a.id, a.name, a.genres, a.styles, albums_str
+    );
+    if !a.moods.is_empty() {
+        xml.push_str(&format!("<moods>{}</moods>", a.moods));
+    }
+    if !a.descriptors.is_empty() {
+        xml.push_str(&format!("<descriptors>{}</descriptors>", a.descriptors));
+    }
+    if !a.keywords.is_empty() {
+        xml.push_str(&format!("<keywords>{}</keywords>", a.keywords));
+    }
+    if !a.bio_excerpt.is_empty() {
+        xml.push_str(&format!("<bio>{}</bio>", a.bio_excerpt));
+    }
+    xml.push_str("</artist>");
+    xml
 }
 
 pub fn build_artist_recommend_prompt(artists: &[ArtistSummaryCompact]) -> String {
@@ -293,18 +344,7 @@ pub fn build_artist_recommend_prompt(artists: &[ArtistSummaryCompact]) -> String
     parts.push("<library>".to_string());
 
     for a in artists {
-        let albums_str: String = a.albums.iter().map(|(title, year)| {
-            if let Some(y) = year {
-                format!("{} ({})", title, y)
-            } else {
-                title.clone()
-            }
-        }).collect::<Vec<_>>().join(", ");
-
-        parts.push(format!(
-            "<artist id=\"{}\"><name>{}</name><genres>{}</genres><styles>{}</styles><albums>{}</albums></artist>",
-            a.id, a.name, a.genres, a.styles, albums_str
-        ));
+        parts.push(format_artist_xml(a));
     }
 
     parts.push("</library>".to_string());
@@ -319,18 +359,7 @@ pub fn build_artist_recommend_prompt_incremental(artists: &[ArtistSummaryCompact
     parts.push("<library>".to_string());
 
     for a in artists {
-        let albums_str: String = a.albums.iter().map(|(title, year)| {
-            if let Some(y) = year {
-                format!("{} ({})", title, y)
-            } else {
-                title.clone()
-            }
-        }).collect::<Vec<_>>().join(", ");
-
-        parts.push(format!(
-            "<artist id=\"{}\"><name>{}</name><genres>{}</genres><styles>{}</styles><albums>{}</albums></artist>",
-            a.id, a.name, a.genres, a.styles, albums_str
-        ));
+        parts.push(format_artist_xml(a));
     }
 
     parts.push("</library>".to_string());
@@ -338,6 +367,62 @@ pub fn build_artist_recommend_prompt_incremental(artists: &[ArtistSummaryCompact
     parts.push(format!("<generate_for>{}</generate_for>", target_ids.join(", ")));
     parts.push(String::new());
     parts.push("Return the recommendations as JSON for only the artists in <generate_for>.".to_string());
+    parts.join("\n")
+}
+
+// ─── Tag Extraction Prompts ──────────────────────────────────────────────────
+
+pub const TAG_EXTRACTION_SYSTEM_PROMPT: &str = "\
+<identity>
+You are a music analyst extracting structured tags from album descriptions for a music library app.
+</identity>
+
+<instructions>
+- Read the album's existing AI summary and metadata
+- Extract tags that go BEYOND what genre and style already capture
+- Moods: emotional qualities (melancholic, euphoric, contemplative, anxious, triumphant, wistful, aggressive, serene, etc.)
+- Descriptors: sonic/production qualities (lo-fi, lush, sparse, atmospheric, abrasive, polished, raw, warm, cold, orchestral, minimalist, etc.)
+- Keywords: thematic/contextual terms (introspective, political, romantic, nocturnal, urban, pastoral, psychedelic, cinematic, etc.)
+- 2-5 tags per category, all lowercase
+- Do not repeat genre or style tags that are already in the metadata
+- Respond with ONLY a JSON object
+</instructions>
+
+<output_format>
+{\"moods\":[\"string\"],\"descriptors\":[\"string\"],\"keywords\":[\"string\"]}
+</output_format>
+
+<example>
+<input>
+Album: Blonde by Frank Ocean, Year: 2016, Genre: R&B, Art Pop, Style: Neo-Soul
+Summary: Blonde is Frank Ocean's masterwork — a fractured, deeply personal meditation on memory and desire that redefined what contemporary R&B could be. The production strips back excess in favor of spare keyboards, pitch-shifted vocals, and unexpected guitar textures.
+</input>
+<output>
+{\"moods\":[\"melancholic\",\"contemplative\",\"wistful\"],\"descriptors\":[\"sparse\",\"pitch-shifted\",\"impressionistic\"],\"keywords\":[\"introspective\",\"desire\",\"memory\"]}
+</output>
+</example>";
+
+pub fn build_tag_extraction_prompt(
+    title: &str,
+    artist: &str,
+    year: Option<i32>,
+    genre: &[String],
+    style: &[String],
+    summary: &str,
+) -> String {
+    let mut parts = Vec::new();
+    parts.push(format!("Album: {} by {}", title, artist));
+    if let Some(y) = year {
+        parts.push(format!("Year: {}", y));
+    }
+    if !genre.is_empty() {
+        parts.push(format!("Genre: {}", genre.join(", ")));
+    }
+    if !style.is_empty() {
+        parts.push(format!("Style: {}", style.join(", ")));
+    }
+    parts.push(format!("Summary: {}", summary));
+    parts.push("Extract the tags as JSON.".to_string());
     parts.join("\n")
 }
 
@@ -421,6 +506,8 @@ pub struct TrackCandidate {
     pub key: Option<String>,
     pub mood: Option<String>,
     pub duration_seconds: i32,
+    pub album_moods: String,
+    pub album_descriptors: String,
 }
 
 pub fn build_smart_playlist_prompt(prompt: &str, candidates: &[TrackCandidate], track_count: u32) -> String {
@@ -438,10 +525,18 @@ pub fn build_smart_playlist_prompt(prompt: &str, candidates: &[TrackCandidate], 
         let mood_str = c.mood.as_deref().unwrap_or("");
         let mins = c.duration_seconds / 60;
         let secs = c.duration_seconds % 60;
-        parts.push(format!(
-            "<track id=\"{}\"><title>{}</title><artist>{}</artist><album>{}</album><genre>{}</genre><year>{}</year><bpm>{}</bpm><key>{}</key><mood>{}</mood><duration>{}:{:02}</duration></track>",
+        let mut xml = format!(
+            "<track id=\"{}\"><title>{}</title><artist>{}</artist><album>{}</album><genre>{}</genre><year>{}</year><bpm>{}</bpm><key>{}</key><mood>{}</mood><duration>{}:{:02}</duration>",
             c.id, c.title, c.artist, c.album, c.genre, year_str, bpm_str, key_str, mood_str, mins, secs
-        ));
+        );
+        if !c.album_moods.is_empty() {
+            xml.push_str(&format!("<album_moods>{}</album_moods>", c.album_moods));
+        }
+        if !c.album_descriptors.is_empty() {
+            xml.push_str(&format!("<album_descriptors>{}</album_descriptors>", c.album_descriptors));
+        }
+        xml.push_str("</track>");
+        parts.push(xml);
     }
 
     parts.push("</candidates>".to_string());
@@ -480,10 +575,18 @@ pub fn build_smart_playlist_refine_prompt(
         let mood_str = c.mood.as_deref().unwrap_or("");
         let mins = c.duration_seconds / 60;
         let secs = c.duration_seconds % 60;
-        parts.push(format!(
-            "<track id=\"{}\"><title>{}</title><artist>{}</artist><album>{}</album><genre>{}</genre><year>{}</year><bpm>{}</bpm><key>{}</key><mood>{}</mood><duration>{}:{:02}</duration></track>",
+        let mut xml = format!(
+            "<track id=\"{}\"><title>{}</title><artist>{}</artist><album>{}</album><genre>{}</genre><year>{}</year><bpm>{}</bpm><key>{}</key><mood>{}</mood><duration>{}:{:02}</duration>",
             c.id, c.title, c.artist, c.album, c.genre, year_str, bpm_str, key_str, mood_str, mins, secs
-        ));
+        );
+        if !c.album_moods.is_empty() {
+            xml.push_str(&format!("<album_moods>{}</album_moods>", c.album_moods));
+        }
+        if !c.album_descriptors.is_empty() {
+            xml.push_str(&format!("<album_descriptors>{}</album_descriptors>", c.album_descriptors));
+        }
+        xml.push_str("</track>");
+        parts.push(xml);
     }
     parts.push("</additional_candidates>".to_string());
 

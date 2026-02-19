@@ -8,8 +8,8 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 const MAX_TRACKS_PER_MIX: usize = 25;
-const MAX_TRACKS_PER_ALBUM: usize = 3;
-const MAX_TRACKS_PER_ARTIST: usize = 5;
+const MAX_TRACKS_PER_ALBUM: usize = 2;
+const MAX_TRACKS_PER_ARTIST: usize = 3;
 const MIN_DISTINCT_ARTISTS: usize = 3;
 
 // Scoring weights
@@ -39,6 +39,7 @@ pub struct MixTrack {
     pub bliss: Option<Vec<f64>>,
     pub duration_seconds: Option<i32>,
     pub mood: Option<String>,
+    pub album_moods: Vec<String>,
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -395,7 +396,7 @@ async fn build_artist_mix(
                     t.key_analyzed, t.loudness_lufs,
                     t.bliss_features, t.mood,
                     COALESCE(a.ai_rating, 5.0) as rating,
-                    a.play_count, a.is_compilation
+                    a.play_count, a.is_compilation, a.ai_moods
              FROM tracks t
              JOIN albums a ON t.album_id = a.id
              JOIN artists ar ON a.artist_id = ar.id
@@ -418,7 +419,7 @@ async fn build_artist_mix(
                     t.key_analyzed, t.loudness_lufs,
                     t.bliss_features, t.mood,
                     COALESCE(a.ai_rating, 5.0) as rating,
-                    a.play_count, a.is_compilation
+                    a.play_count, a.is_compilation, a.ai_moods
              FROM tracks t
              JOIN albums a ON t.album_id = a.id
              JOIN artists ar ON a.artist_id = ar.id
@@ -545,7 +546,7 @@ async fn generate_genre_mix(
                 t.key_analyzed, t.loudness_lufs,
                 t.bliss_features, t.mood,
                 COALESCE(a.ai_rating, 5.0) as rating,
-                a.play_count, a.is_compilation
+                a.play_count, a.is_compilation, a.ai_moods
          FROM tracks t
          JOIN albums a ON t.album_id = a.id
          JOIN artists ar ON a.artist_id = ar.id
@@ -611,7 +612,7 @@ async fn generate_deep_cuts_mix(
                 t.key_analyzed, t.loudness_lufs,
                 t.bliss_features, t.mood,
                 COALESCE(a.ai_rating, 5.0) as rating,
-                a.play_count, a.is_compilation
+                a.play_count, a.is_compilation, a.ai_moods
          FROM tracks t
          JOIN albums a ON t.album_id = a.id
          JOIN artists ar ON a.artist_id = ar.id
@@ -639,7 +640,7 @@ async fn generate_deep_cuts_mix(
                     t.key_analyzed, t.loudness_lufs,
                     t.bliss_features, t.mood,
                     COALESCE(a.ai_rating, 5.0) as rating,
-                    a.play_count, a.is_compilation
+                    a.play_count, a.is_compilation, a.ai_moods
              FROM tracks t
              JOIN albums a ON t.album_id = a.id
              JOIN artists ar ON a.artist_id = ar.id
@@ -762,7 +763,7 @@ async fn generate_decade_mix(
                 t.key_analyzed, t.loudness_lufs,
                 t.bliss_features, t.mood,
                 COALESCE(a.ai_rating, 5.0) as rating,
-                a.play_count, a.is_compilation
+                a.play_count, a.is_compilation, a.ai_moods
          FROM tracks t
          JOIN albums a ON t.album_id = a.id
          JOIN artists ar ON a.artist_id = ar.id
@@ -817,6 +818,7 @@ struct ScoredTrack {
     bliss: Option<Vec<f64>>,
     duration_seconds: Option<i32>,
     mood: Option<String>,
+    album_moods: Vec<String>,
     is_compilation: bool,
 }
 
@@ -949,6 +951,8 @@ pub async fn score_and_select(
             let bliss = parse_bliss(row);
             let duration_seconds: Option<i32> = row.try_get("duration_seconds").ok().flatten();
             let mood: Option<String> = row.try_get("mood").ok().flatten();
+            let album_moods_json: String = row.try_get("ai_moods").unwrap_or_default();
+            let album_moods: Vec<String> = serde_json::from_str(&album_moods_json).unwrap_or_default();
             let is_compilation: bool = row.try_get::<i32, _>("is_compilation")
                 .ok()
                 .map(|v| v != 0)
@@ -1019,7 +1023,7 @@ pub async fn score_and_select(
 
             ScoredTrack {
                 id, album_id, artist_id, score, bpm, key, loudness,
-                bliss, duration_seconds, mood, is_compilation,
+                bliss, duration_seconds, mood, album_moods, is_compilation,
             }
         })
         .collect();
@@ -1070,6 +1074,7 @@ pub async fn score_and_select(
             bliss: track.bliss.clone(),
             duration_seconds: track.duration_seconds,
             mood: track.mood.clone(),
+            album_moods: track.album_moods.clone(),
         });
     }
 
@@ -1269,7 +1274,12 @@ pub fn order_for_flow(tracks: &mut Vec<MixTrack>) {
             }
 
             // Mood adjacency penalty (FLOW_MOOD_PENALTY)
-            if let (Some(ref prev_mood), Some(ref cand_mood)) = (&prev.mood, &candidate.mood) {
+            // Fall back to album-level AI moods when track mood is NULL
+            let prev_effective_mood = prev.mood.as_deref()
+                .or_else(|| prev.album_moods.first().map(|s| s.as_str()));
+            let cand_effective_mood = candidate.mood.as_deref()
+                .or_else(|| candidate.album_moods.first().map(|s| s.as_str()));
+            if let (Some(prev_mood), Some(cand_mood)) = (prev_effective_mood, cand_effective_mood) {
                 if prev_mood != cand_mood {
                     cost += FLOW_MOOD_PENALTY;
                 }
@@ -1284,22 +1294,28 @@ pub fn order_for_flow(tracks: &mut Vec<MixTrack>) {
                 }
             }
 
-            // Artist adjacency penalties
+            // Artist adjacency — HARD constraint: never consecutive
             if candidate.artist_id == prev.artist_id {
-                cost += 10.0;
+                cost = f64::MAX;
             } else if let Some(sp) = second_prev {
                 if candidate.artist_id == sp.artist_id {
                     cost += 3.0;
                 }
             }
 
-            // Album adjacency penalties
-            if candidate.album_id == prev.album_id {
-                cost += 8.0;
-            } else if let Some(sp) = second_prev {
-                if candidate.album_id == sp.album_id {
-                    cost += 2.0;
+            // Album adjacency — HARD constraint: never consecutive
+            if cost < f64::MAX && candidate.album_id == prev.album_id {
+                cost = f64::MAX;
+            } else if cost < f64::MAX {
+                if let Some(sp) = second_prev {
+                    if candidate.album_id == sp.album_id {
+                        cost += 2.0;
+                    }
                 }
+            }
+
+            if cost == f64::MAX {
+                continue;
             }
 
             // Energy arc bias (weight 0.2) — BPM target curve
