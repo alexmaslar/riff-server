@@ -30,3 +30,9 @@ ebur128 = "0.1"
 stratum-dsp = "1.0"
 async-trait = "0.1"
 image = { version = "0.25", features = ["png", "jpeg"] }
+urlencoding = "2"
+base64 = "0.22"
+lofty = "0.22"
+
+[dev-dependencies]
+tempfile = "3"

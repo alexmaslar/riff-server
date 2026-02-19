@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -14,6 +16,8 @@ pub struct Config {
     pub remote_access: RemoteAccessConfig,
     #[serde(default)]
     pub streaming: StreamingConfig,
+    #[serde(default)]
+    pub plugins: HashMap<String, PluginConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -179,6 +183,14 @@ fn default_max_transcode_processes() -> usize {
     2
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(flatten)]
+    pub settings: HashMap<String, serde_json::Value>,
+}
+
 fn default_remote_method() -> String {
     "upnp".to_string()
 }
@@ -273,6 +285,7 @@ impl Default for Config {
             metadata: MetadataConfig::default(),
             remote_access: RemoteAccessConfig::default(),
             streaming: StreamingConfig::default(),
+            plugins: HashMap::new(),
         }
     }
 }
@@ -511,5 +524,48 @@ streaming:
         assert_eq!(config.server.https_port, roundtripped.server.https_port);
         assert_eq!(config.library.scan_interval, roundtripped.library.scan_interval);
         assert_eq!(config.streaming.remote_bitrate, roundtripped.streaming.remote_bitrate);
+    }
+
+    #[test]
+    fn test_default_config_has_no_plugins() {
+        let config = Config::default();
+        assert!(config.plugins.is_empty());
+    }
+
+    #[test]
+    fn test_plugin_config_deserialize() {
+        let yaml = r#"
+plugins:
+  lastfm:
+    enabled: true
+    api_key: "abc123"
+    api_secret: "secret456"
+  listenbrainz:
+    enabled: false
+"#;
+        let config = Config::load_from_str(yaml).unwrap();
+        assert_eq!(config.plugins.len(), 2);
+
+        let lastfm = &config.plugins["lastfm"];
+        assert!(lastfm.enabled);
+        assert_eq!(lastfm.settings["api_key"], "abc123");
+        assert_eq!(lastfm.settings["api_secret"], "secret456");
+
+        let lb = &config.plugins["listenbrainz"];
+        assert!(!lb.enabled);
+        assert!(lb.settings.is_empty());
+    }
+
+    #[test]
+    fn test_plugin_config_enabled_defaults_true() {
+        let yaml = r#"
+plugins:
+  genius:
+    api_key: "token"
+"#;
+        let config = Config::load_from_str(yaml).unwrap();
+        let genius = &config.plugins["genius"];
+        assert!(genius.enabled);
+        assert_eq!(genius.settings["api_key"], "token");
     }
 }

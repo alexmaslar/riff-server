@@ -14,7 +14,8 @@ use axum::{
     routing::{delete, get, post, put},
     BoxError, Json, Router,
 };
-use riff_core::{ai, analysis, auth, config::Config, daily_mixes, db, musicbrainz, scanner};
+use riff_core::{ai, analysis, auth, config::Config, daily_mixes, db, musicbrainz, plugin, scanner::{self, metadata::{detect_library_convention, build_album_dir, build_track_filename, write_flac_tags}}};
+use riff_core::plugin::Plugin as _;
 use serde_json::{json, Value};
 use socket2::{Domain, Protocol, Socket, TcpKeepalive, Type};
 use sqlx::SqlitePool;
@@ -51,6 +52,8 @@ pub struct AppState {
     pub transcode_semaphore: Arc<tokio::sync::Semaphore>,
     pub hls_generating: tokio::sync::Mutex<std::collections::HashSet<String>>,
     pub login_guard: tokio::sync::Mutex<routes::auth::LoginGuard>,
+    pub plugin_registry: RwLock<plugin::registry::PluginRegistry>,
+    pub event_bus: plugin::events::EventBus,
 }
 
 async fn run_background_pipeline(state: Arc<AppState>) {
@@ -409,6 +412,48 @@ async fn main() -> Result<()> {
     tracing::info!("TLS cert fingerprint: {}", cert_fingerprint);
 
     let max_transcodes = config.streaming.max_transcode_processes;
+    let event_bus = plugin::events::EventBus::new(512);
+    let mut plugin_registry = plugin::registry::PluginRegistry::new();
+
+    // Initialize configured plugins
+    for (name, plugin_config) in &config.plugins {
+        if !plugin_config.enabled {
+            continue;
+        }
+        let ctx = plugin::PluginContext {
+            db: pool.clone(),
+            http: reqwest::Client::new(),
+            config: plugin_config.settings.clone(),
+        };
+        match name.as_str() {
+            "tidal" => {
+                let mut p = plugin::tidal::TidalPlugin::new();
+                if let Err(e) = p.init(ctx).await {
+                    tracing::warn!("tidal init failed: {e}");
+                    continue;
+                }
+                let p = Arc::new(p);
+                plugin_registry.register_base(p.clone());
+                plugin_registry.register_streaming(p);
+                tracing::info!("tidal plugin initialized");
+            }
+            "qobuz" => {
+                let mut p = plugin::qobuz::QobuzPlugin::new();
+                if let Err(e) = p.init(ctx).await {
+                    tracing::warn!("qobuz init failed: {e}");
+                    continue;
+                }
+                let p = Arc::new(p);
+                plugin_registry.register_base(p.clone());
+                plugin_registry.register_streaming(p);
+                tracing::info!("qobuz plugin initialized");
+            }
+            _ => {
+                tracing::debug!("unknown plugin: {name}");
+            }
+        }
+    }
+
     let state = Arc::new(AppState {
         db: pool,
         config: RwLock::new(config.clone()),
@@ -430,6 +475,8 @@ async fn main() -> Result<()> {
         transcode_semaphore: Arc::new(tokio::sync::Semaphore::new(max_transcodes)),
         hls_generating: tokio::sync::Mutex::new(std::collections::HashSet::new()),
         login_guard: tokio::sync::Mutex::new(routes::auth::LoginGuard::new()),
+        plugin_registry: RwLock::new(plugin_registry),
+        event_bus,
     });
 
     // Set cert fingerprint on the remote access manager
@@ -459,6 +506,14 @@ async fn main() -> Result<()> {
         let daily_state = state.clone();
         tokio::spawn(async move {
             run_daily_refresh(daily_state).await;
+        });
+    }
+
+    // Download queue processor (streaming provider downloads)
+    {
+        let dl_state = state.clone();
+        tokio::spawn(async move {
+            run_download_processor(dl_state).await;
         });
     }
 
@@ -514,6 +569,8 @@ async fn main() -> Result<()> {
         .route("/tracks/{id}/hls/playlist.m3u8", get(routes::hls::master_playlist))
         .route("/tracks/{id}/hls/{variant}/playlist.m3u8", get(routes::hls::variant_playlist))
         .route("/tracks/{id}/hls/{variant}/{segment}", get(routes::hls::serve_segment))
+        // Streaming provider proxy (Tidal/Qobuz CDN)
+        .route("/streaming/tracks/{provider}/{id}/stream", get(routes::streaming::stream_track))
         .route_layer(axum_mw::from_fn_with_state(
             state.clone(),
             middleware::require_auth,
@@ -569,6 +626,13 @@ async fn main() -> Result<()> {
         .route("/mixes/daily", get(routes::daily_mixes::list_daily_mixes))
         .route("/mixes/daily/{id}", get(routes::daily_mixes::get_daily_mix))
         .route("/mixes/daily/{id}/save", post(routes::daily_mixes::save_mix_as_playlist))
+        // Streaming providers (Tidal/Qobuz)
+        .route("/streaming/search", get(routes::streaming::search))
+        .route("/streaming/albums/{provider}/{id}", get(routes::streaming::get_album))
+        .route("/streaming/artists/{provider}/{id}/albums", get(routes::streaming::get_artist_albums))
+        // Downloads
+        .route("/downloads", get(routes::downloads::list_downloads).post(routes::downloads::add_download))
+        .route("/downloads/{id}", delete(routes::downloads::cancel_download))
         // User account (self-service)
         .route("/user/account", put(routes::users::update_account))
         // Libraries (read-only for non-admin)
@@ -602,6 +666,8 @@ async fn main() -> Result<()> {
         .route("/libraries/{id}", put(routes::libraries::update_library).delete(routes::libraries::remove_library))
         .route("/libraries/{id}/scan", post(routes::libraries::scan_single_library))
         .route("/config", get(routes::config::get_config).put(routes::config::update_config))
+        .route("/plugins/catalog", get(routes::plugins::catalog))
+        .route("/plugins/status", get(routes::plugins::status))
         .route("/users", get(routes::users::list_users))
         .route("/users", post(routes::users::create_user))
         .route("/users/{id}", delete(routes::users::delete_user))
@@ -720,6 +786,213 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+async fn run_download_processor(state: Arc<AppState>) {
+    loop {
+        tokio::time::sleep(Duration::from_secs(10)).await;
+
+        // Fetch next queued download
+        let row: Option<(String, String, String, String, Option<String>)> = sqlx::query_as(
+            "SELECT id, provider, provider_album_id, quality, library_id FROM download_queue WHERE status = 'queued' ORDER BY created_at ASC LIMIT 1"
+        )
+        .fetch_optional(&state.db)
+        .await
+        .unwrap_or(None);
+
+        let Some((dl_id, provider_name, album_id, quality, library_id)) = row else {
+            continue;
+        };
+
+        // Mark as downloading
+        let _ = sqlx::query("UPDATE download_queue SET status = 'downloading' WHERE id = ?")
+            .bind(&dl_id)
+            .execute(&state.db)
+            .await;
+
+        // Find the provider
+        let registry = state.plugin_registry.read().await;
+        let provider = registry
+            .streaming_providers()
+            .iter()
+            .find(|p| p.provider_name() == provider_name)
+            .cloned();
+        drop(registry);
+
+        let Some(provider) = provider else {
+            let _ = sqlx::query("UPDATE download_queue SET status = 'failed', error = ? WHERE id = ?")
+                .bind(format!("provider '{provider_name}' not loaded"))
+                .bind(&dl_id)
+                .execute(&state.db)
+                .await;
+            continue;
+        };
+
+        // Fetch album detail
+        let detail = match provider.get_album(&album_id).await {
+            Ok(d) => d,
+            Err(e) => {
+                let _ = sqlx::query("UPDATE download_queue SET status = 'failed', error = ? WHERE id = ?")
+                    .bind(format!("album fetch failed: {e}"))
+                    .bind(&dl_id)
+                    .execute(&state.db)
+                    .await;
+                continue;
+            }
+        };
+
+        // Determine library (id, path) — use the requested library, fall back to largest
+        let resolved_lib: Option<(String, String)> = if let Some(ref lib_id) = library_id {
+            sqlx::query_as::<_, (String, String)>("SELECT id, path FROM libraries WHERE id = ?")
+                .bind(lib_id)
+                .fetch_optional(&state.db)
+                .await
+                .ok()
+                .flatten()
+        } else {
+            None
+        };
+        let (resolved_library_id, library_path) = match resolved_lib {
+            Some((id, path)) => (id, path),
+            None => {
+                sqlx::query_as::<_, (String, String)>(
+                    "SELECT l.id, l.path FROM libraries l
+                     LEFT JOIN albums a ON a.library_id = l.id
+                     GROUP BY l.id ORDER BY COUNT(a.id) DESC LIMIT 1"
+                )
+                .fetch_optional(&state.db)
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| ("".to_string(), "/tmp/riff-downloads".to_string()))
+            }
+        };
+
+        let streaming_quality = match quality.to_lowercase().as_str() {
+            "hires" | "hi_res" | "hi_res_lossless" | "27" => riff_core::plugin::capabilities::StreamingQuality::HiRes,
+            "lossless" | "6" => riff_core::plugin::capabilities::StreamingQuality::Lossless,
+            "high" | "5" => riff_core::plugin::capabilities::StreamingQuality::High,
+            _ => riff_core::plugin::capabilities::StreamingQuality::Lossless,
+        };
+
+        let lib_path = std::path::Path::new(&library_path);
+        let convention = detect_library_convention(lib_path);
+        let album_dir = build_album_dir(lib_path, &detail.album.artist.name, &detail.album.title, convention);
+
+        let mut completed = 0i64;
+        let mut failed = false;
+
+        for track in &detail.tracks {
+            // Check if cancelled
+            let status: Option<(String,)> =
+                sqlx::query_as("SELECT status FROM download_queue WHERE id = ?")
+                    .bind(&dl_id)
+                    .fetch_optional(&state.db)
+                    .await
+                    .unwrap_or(None);
+            if status.as_ref().map(|s| s.0.as_str()) == Some("cancelled") {
+                break;
+            }
+
+            let filename = build_track_filename(
+                &detail.album.artist.name,
+                &detail.album.title,
+                track.track_number as i32,
+                &track.title,
+                "flac",
+                convention,
+            );
+            let dest = album_dir.join(&filename);
+
+            // Update current track
+            let _ = sqlx::query("UPDATE download_queue SET current_track = ? WHERE id = ?")
+                .bind(&track.title)
+                .bind(&dl_id)
+                .execute(&state.db)
+                .await;
+
+            match provider.download_track(&track.provider_id, streaming_quality, &dest).await {
+                Ok(()) => {
+                    // Write metadata tags so the scanner reads proper title/track numbers
+                    if let Err(e) = write_flac_tags(
+                        &dest,
+                        &detail.album.artist.name,
+                        &detail.album.title,
+                        &track.title,
+                        track.track_number,
+                        track.disc_number,
+                        detail.album.year,
+                    ) {
+                        tracing::warn!("failed to write tags for {}: {e}", track.title);
+                    }
+                    completed += 1;
+                    let _ = sqlx::query("UPDATE download_queue SET tracks_completed = ? WHERE id = ?")
+                        .bind(completed)
+                        .bind(&dl_id)
+                        .execute(&state.db)
+                        .await;
+                }
+                Err(e) => {
+                    tracing::warn!("download track {} failed: {e}", track.title);
+                    let _ = sqlx::query("UPDATE download_queue SET status = 'failed', error = ? WHERE id = ?")
+                        .bind(format!("track '{}' failed: {e}", track.title))
+                        .bind(&dl_id)
+                        .execute(&state.db)
+                        .await;
+                    failed = true;
+                    break;
+                }
+            }
+        }
+
+        if failed {
+            continue;
+        }
+
+        // Download cover art
+        if let Some(ref cover_url) = detail.album.cover_url {
+            let cover_dest = album_dir.join("cover.jpg");
+            if let Ok(resp) = reqwest::get(cover_url).await {
+                if let Ok(bytes) = resp.bytes().await {
+                    let _ = tokio::fs::create_dir_all(&album_dir).await;
+                    let _ = tokio::fs::write(&cover_dest, &bytes).await;
+                }
+            }
+        }
+
+        // Mark complete
+        let _ = sqlx::query(
+            "UPDATE download_queue SET status = 'completed', current_track = NULL, completed_at = datetime('now') WHERE id = ?"
+        )
+        .bind(&dl_id)
+        .execute(&state.db)
+        .await;
+
+        tracing::info!(
+            "download complete: {} - {} ({} tracks)",
+            detail.album.artist.name,
+            detail.album.title,
+            completed
+        );
+
+        // Scan library so the new album appears in the DB immediately
+        if !resolved_library_id.is_empty() {
+            match scanner::scan_library(&state.db, &library_path, &resolved_library_id).await {
+                Ok(result) => {
+                    tracing::info!(
+                        "post-download scan: +{} artists, +{} albums, +{} tracks",
+                        result.artists_added, result.albums_added, result.tracks_added
+                    );
+                    state.event_bus.emit(plugin::events::ServerEvent::ScanCompleted {
+                        library_id: resolved_library_id.clone(),
+                        tracks_added: result.tracks_added,
+                        tracks_removed: result.tracks_removed,
+                    });
+                }
+                Err(e) => tracing::warn!("post-download scan failed: {e}"),
+            }
+        }
+    }
 }
 
 async fn health(State(_state): State<Arc<AppState>>) -> Json<Value> {

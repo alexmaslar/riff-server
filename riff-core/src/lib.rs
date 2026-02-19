@@ -10,5 +10,6 @@ pub mod deezer;
 pub mod discogs;
 pub mod mix_collage;
 pub mod models;
+pub mod plugin;
 pub mod scanner;
 pub mod smart_playlist;

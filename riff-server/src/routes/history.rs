@@ -2,6 +2,7 @@ use axum::{
     extract::{Query, State},
     Extension, Json,
 };
+use chrono::Utc;
 use riff_core::auth::Claims;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -50,6 +51,32 @@ pub async fn record_play(
     .bind(completed)
     .execute(&state.db)
     .await?;
+
+    // Emit event for plugins (scrobbling, etc.)
+    if body.completed {
+        if let Ok(row) = sqlx::query(
+            "SELECT t.title, t.duration_seconds, ar.name as artist, al.title as album
+             FROM tracks t
+             JOIN albums al ON t.album_id = al.id
+             JOIN artists ar ON al.artist_id = ar.id
+             WHERE t.id = ?",
+        )
+        .bind(&body.track_id)
+        .fetch_one(&state.db)
+        .await
+        {
+            use riff_core::plugin::events::ServerEvent;
+            state.event_bus.emit(ServerEvent::TrackCompleted {
+                user_id: claims.sub.clone(),
+                track_id: body.track_id.clone(),
+                title: row.get("title"),
+                artist: row.get("artist"),
+                album: row.get("album"),
+                duration_secs: row.get::<i32, _>("duration_seconds") as u32,
+                played_at: Utc::now().timestamp(),
+            });
+        }
+    }
 
     Ok(Json(json!({ "ok": true })))
 }

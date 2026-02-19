@@ -1,10 +1,143 @@
+use lofty::config::WriteOptions;
+use lofty::prelude::*;
+use lofty::tag::{ItemKey, Tag as LoftyTag, TagType};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use symphonia::core::codecs::CodecType;
 use symphonia::core::formats::FormatOptions;
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::{MetadataOptions, StandardTagKey, Tag};
 use symphonia::core::probe::Hint;
+
+/// How albums are organized on disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LibraryConvention {
+    /// `Artist - Album/Artist - Album - NN Title.ext`
+    Flat,
+    /// `Artist/Album/NN - Title.ext`
+    Nested,
+}
+
+/// Sample a library directory to determine its naming convention.
+///
+/// Looks at direct children of the library root. If the majority of
+/// directories use `Artist - Album` style names (containing ` - `),
+/// returns `Flat`. Otherwise returns `Nested`. Defaults to `Flat`
+/// when the library is empty.
+pub fn detect_library_convention(library_path: &Path) -> LibraryConvention {
+    let entries = match fs::read_dir(library_path) {
+        Ok(entries) => entries,
+        Err(_) => return LibraryConvention::Flat,
+    };
+
+    let mut flat_count = 0u32;
+    let mut nested_count = 0u32;
+
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n,
+            None => continue,
+        };
+        if name.contains(" - ") {
+            flat_count += 1;
+        } else {
+            nested_count += 1;
+        }
+    }
+
+    if flat_count >= nested_count {
+        LibraryConvention::Flat
+    } else {
+        LibraryConvention::Nested
+    }
+}
+
+/// Build the album directory path for a given convention.
+pub fn build_album_dir(
+    library_path: &Path,
+    artist: &str,
+    album: &str,
+    convention: LibraryConvention,
+) -> PathBuf {
+    let artist = sanitize_filename(artist);
+    let album = sanitize_filename(album);
+    match convention {
+        LibraryConvention::Flat => library_path.join(format!("{artist} - {album}")),
+        LibraryConvention::Nested => library_path.join(&artist).join(&album),
+    }
+}
+
+/// Build a track filename for a given convention.
+pub fn build_track_filename(
+    artist: &str,
+    album: &str,
+    track_number: i32,
+    title: &str,
+    ext: &str,
+    convention: LibraryConvention,
+) -> String {
+    let artist = sanitize_filename(artist);
+    let album = sanitize_filename(album);
+    let title = sanitize_filename(title);
+    match convention {
+        LibraryConvention::Flat => {
+            format!("{artist} - {album} - {track_number:02} {title}.{ext}")
+        }
+        LibraryConvention::Nested => {
+            format!("{track_number:02} - {title}.{ext}")
+        }
+    }
+}
+
+/// Replace filesystem-unsafe characters with underscores.
+pub fn sanitize_filename(name: &str) -> String {
+    name.chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            _ => c,
+        })
+        .collect()
+}
+
+/// Write standard Vorbis comment tags into a FLAC file.
+///
+/// Called after downloading a track so the scanner picks up proper metadata
+/// instead of falling back to filename parsing.
+pub fn write_flac_tags(
+    path: &Path,
+    artist: &str,
+    album: &str,
+    title: &str,
+    track_number: u32,
+    disc_number: u32,
+    year: Option<i32>,
+) -> anyhow::Result<()> {
+    let mut tagged_file = lofty::probe::Probe::open(path)?.read()?;
+
+    let tag = match tagged_file.tag_mut(TagType::VorbisComments) {
+        Some(t) => t,
+        None => {
+            tagged_file.insert_tag(LoftyTag::new(TagType::VorbisComments));
+            tagged_file.tag_mut(TagType::VorbisComments).unwrap()
+        }
+    };
+
+    tag.set_title(title.to_string());
+    tag.set_artist(artist.to_string());
+    tag.set_album(album.to_string());
+    tag.set_track(track_number);
+    tag.set_disk(disc_number);
+    if let Some(y) = year {
+        tag.insert_text(ItemKey::Year, y.to_string());
+    }
+
+    tag.save_to_path(path, WriteOptions::default())?;
+    Ok(())
+}
 
 #[derive(Debug, Clone)]
 pub struct TrackMetadata {
@@ -641,5 +774,103 @@ mod tests {
         let meta = metadata_from_path(&path, &library).unwrap();
         assert_eq!(meta.disc_number, 2);
         assert_eq!(meta.track_number, 5);
+    }
+
+    // -- sanitize_filename --
+
+    #[test]
+    fn test_sanitize_filename() {
+        assert_eq!(sanitize_filename("Hello/World"), "Hello_World");
+        assert_eq!(sanitize_filename("a:b*c?d"), "a_b_c_d");
+        assert_eq!(sanitize_filename("Normal Name"), "Normal Name");
+    }
+
+    // -- detect_library_convention --
+
+    #[test]
+    fn test_detect_convention_empty_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(detect_library_convention(dir.path()), LibraryConvention::Flat);
+    }
+
+    #[test]
+    fn test_detect_convention_flat() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("Artist - Album One")).unwrap();
+        fs::create_dir(dir.path().join("Artist - Album Two")).unwrap();
+        fs::create_dir(dir.path().join("Radiohead")).unwrap(); // one nested outlier
+        assert_eq!(detect_library_convention(dir.path()), LibraryConvention::Flat);
+    }
+
+    #[test]
+    fn test_detect_convention_nested() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("Radiohead")).unwrap();
+        fs::create_dir(dir.path().join("Pink Floyd")).unwrap();
+        fs::create_dir(dir.path().join("Bad Bunny")).unwrap();
+        assert_eq!(detect_library_convention(dir.path()), LibraryConvention::Nested);
+    }
+
+    #[test]
+    fn test_detect_convention_nonexistent_path() {
+        assert_eq!(
+            detect_library_convention(Path::new("/nonexistent/path")),
+            LibraryConvention::Flat
+        );
+    }
+
+    // -- build_album_dir --
+
+    #[test]
+    fn test_build_album_dir_flat() {
+        let dir = build_album_dir(
+            Path::new("/music"),
+            "Radiohead",
+            "OK Computer",
+            LibraryConvention::Flat,
+        );
+        assert_eq!(dir, PathBuf::from("/music/Radiohead - OK Computer"));
+    }
+
+    #[test]
+    fn test_build_album_dir_nested() {
+        let dir = build_album_dir(
+            Path::new("/music"),
+            "Radiohead",
+            "OK Computer",
+            LibraryConvention::Nested,
+        );
+        assert_eq!(dir, PathBuf::from("/music/Radiohead/OK Computer"));
+    }
+
+    #[test]
+    fn test_build_album_dir_sanitizes() {
+        let dir = build_album_dir(
+            Path::new("/music"),
+            "AC/DC",
+            "Back In Black",
+            LibraryConvention::Flat,
+        );
+        assert_eq!(dir, PathBuf::from("/music/AC_DC - Back In Black"));
+    }
+
+    // -- build_track_filename --
+
+    #[test]
+    fn test_build_track_filename_flat() {
+        let name = build_track_filename("Radiohead", "OK Computer", 1, "Airbag", "flac", LibraryConvention::Flat);
+        assert_eq!(name, "Radiohead - OK Computer - 01 Airbag.flac");
+    }
+
+    #[test]
+    fn test_build_track_filename_nested() {
+        let name = build_track_filename("Radiohead", "OK Computer", 3, "Subterranean Homesick Alien", "flac", LibraryConvention::Nested);
+        assert_eq!(name, "03 - Subterranean Homesick Alien.flac");
+    }
+
+    #[test]
+    fn test_build_track_filename_sanitizes() {
+        let name = build_track_filename("Test", "Album", 1, "What?", "flac", LibraryConvention::Flat);
+        assert_eq!(name, "Test - Album - 01 What_.flac");
     }
 }

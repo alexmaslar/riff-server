@@ -1,8 +1,10 @@
 use axum::{extract::State, http::header, Extension, Json};
 use riff_core::auth::Claims;
 use riff_core::config::AiProvider;
+use riff_core::plugin::catalog::{plugin_catalog, FieldType};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::error::AppError;
@@ -29,6 +31,9 @@ pub async fn get_config(
     State(state): State<Arc<AppState>>,
 ) -> Result<([(header::HeaderName, &'static str); 1], Json<Value>), AppError> {
     let config = state.config.read().await;
+
+    // Build plugins JSON with secret masking
+    let plugins_json = build_plugins_json(&config.plugins);
 
     Ok((
         [(header::CACHE_CONTROL, "private, max-age=3600")],
@@ -65,9 +70,61 @@ pub async fn get_config(
                 "remote_bitrate": config.streaming.remote_bitrate,
                 "remote_format": config.streaming.remote_format,
                 "ffmpeg_available": state.ffmpeg_available,
-            }
+            },
+            "plugins": plugins_json,
         })),
     ))
+}
+
+/// Build plugins JSON from config, masking secret fields using the catalog.
+/// API format nests settings under a "settings" key (unlike the flat YAML format).
+fn build_plugins_json(
+    plugins: &HashMap<String, riff_core::config::PluginConfig>,
+) -> Value {
+    let catalog = plugin_catalog();
+    // Build lookup: plugin_name -> set of secret field keys
+    let secret_keys: HashMap<&str, Vec<&str>> = catalog
+        .iter()
+        .map(|def| {
+            let secrets: Vec<&str> = def
+                .settings
+                .iter()
+                .filter(|s| matches!(s.field_type, FieldType::Secret))
+                .map(|s| s.key)
+                .collect();
+            (def.name, secrets)
+        })
+        .collect();
+
+    let mut result = serde_json::Map::new();
+    for (name, plugin_cfg) in plugins {
+        let mut settings = serde_json::Map::new();
+        let is_secret_field = |key: &str| -> bool {
+            secret_keys
+                .get(name.as_str())
+                .map(|keys| keys.contains(&key))
+                .unwrap_or(false)
+        };
+        for (key, value) in &plugin_cfg.settings {
+            if is_secret_field(key) {
+                if let Some(s) = value.as_str() {
+                    if !s.is_empty() {
+                        settings.insert(key.clone(), Value::String(mask_secret(s)));
+                    }
+                }
+            } else {
+                settings.insert(key.clone(), value.clone());
+            }
+        }
+        result.insert(
+            name.clone(),
+            json!({
+                "enabled": plugin_cfg.enabled,
+                "settings": settings,
+            }),
+        );
+    }
+    Value::Object(result)
 }
 
 #[derive(Debug, Deserialize)]
@@ -76,6 +133,13 @@ pub struct ConfigUpdate {
     pub library: Option<LibraryUpdate>,
     pub metadata: Option<MetadataUpdate>,
     pub streaming: Option<StreamingUpdate>,
+    pub plugins: Option<HashMap<String, PluginUpdate>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PluginUpdate {
+    pub enabled: Option<bool>,
+    pub settings: Option<HashMap<String, serde_json::Value>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -131,7 +195,7 @@ pub async fn update_config(
     Json(update): Json<ConfigUpdate>,
 ) -> Result<Json<Value>, AppError> {
     // Clone config under write lock, apply mutations, then drop lock before disk I/O
-    let (config_snapshot, any_newly_enabled, https_port_changed, discogs_key_changed) = {
+    let (config_snapshot, any_newly_enabled, https_port_changed, discogs_key_changed, plugins_changed) = {
         let mut config = state.config.write().await;
 
         // Snapshot AI flags before mutations
@@ -223,6 +287,38 @@ pub async fn update_config(
 
         }
 
+        // Plugins
+        let mut plugins_changed = false;
+        if let Some(plugin_updates) = update.plugins {
+            for (name, pu) in plugin_updates {
+                let entry = config.plugins.entry(name).or_insert_with(|| {
+                    riff_core::config::PluginConfig {
+                        enabled: false,
+                        settings: HashMap::new(),
+                    }
+                });
+                if let Some(enabled) = pu.enabled {
+                    if enabled != entry.enabled {
+                        entry.enabled = enabled;
+                        plugins_changed = true;
+                    }
+                }
+                if let Some(new_settings) = pu.settings {
+                    for (key, value) in new_settings {
+                        // Empty string removes the key
+                        if value.as_str() == Some("") {
+                            if entry.settings.remove(&key).is_some() {
+                                plugins_changed = true;
+                            }
+                        } else if entry.settings.get(&key) != Some(&value) {
+                            entry.settings.insert(key, value);
+                            plugins_changed = true;
+                        }
+                    }
+                }
+            }
+        }
+
         if let Some(streaming) = update.streaming {
             if let Some(bitrate) = streaming.remote_bitrate {
                 config.streaming.remote_bitrate = bitrate.clamp(64, 320);
@@ -260,7 +356,7 @@ pub async fn update_config(
         }
 
         let snapshot = config.clone();
-        (snapshot, any_newly_enabled, https_port_changed, discogs_key_changed)
+        (snapshot, any_newly_enabled, https_port_changed, discogs_key_changed, plugins_changed)
     }; // write lock dropped before disk I/O
 
     // Save to disk outside the lock
@@ -277,6 +373,9 @@ pub async fn update_config(
         }
         if discogs_key_changed {
             changed.push("discogs_api_key".to_string());
+        }
+        if plugins_changed {
+            changed.push("plugins".to_string());
         }
         let details = if changed.is_empty() {
             "config updated".to_string()
@@ -306,6 +405,8 @@ pub async fn update_config(
             restart_state.restart.notify_one();
         });
     }
+
+    let plugins_json = build_plugins_json(&config_snapshot.plugins);
 
     let response = json!({
         "restarting": https_port_changed,
@@ -341,7 +442,8 @@ pub async fn update_config(
             "remote_bitrate": config_snapshot.streaming.remote_bitrate,
             "remote_format": config_snapshot.streaming.remote_format,
             "ffmpeg_available": state.ffmpeg_available,
-        }
+        },
+        "plugins": plugins_json,
     });
 
     if any_newly_enabled {
