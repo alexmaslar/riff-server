@@ -593,7 +593,7 @@ async fn main() -> Result<()> {
         .route("/albums", get(routes::albums::list_albums))
         .route("/albums/filters", get(routes::albums::list_filters))
         .route("/genres", get(routes::albums::list_genres))
-        .route("/albums/{id}", get(routes::albums::get_album).delete(routes::albums::delete_album))
+        .route("/albums/{id}", get(routes::albums::get_album))
         .route("/albums/{id}/play", post(routes::albums::increment_play_count))
         .route("/playlists", get(routes::playlists::list_playlists).post(routes::playlists::create_playlist))
         .route("/playlists/{id}", get(routes::playlists::get_playlist).delete(routes::playlists::delete_playlist))
@@ -666,6 +666,8 @@ async fn main() -> Result<()> {
         .route("/libraries", post(routes::libraries::add_library))
         .route("/libraries/{id}", put(routes::libraries::update_library).delete(routes::libraries::remove_library))
         .route("/libraries/{id}/scan", post(routes::libraries::scan_single_library))
+        .route("/albums/{id}", delete(routes::albums::delete_album))
+        .route("/albums/{id}/refresh-cover", post(routes::albums::refresh_cover))
         .route("/config", get(routes::config::get_config).put(routes::config::update_config))
         .route("/plugins/catalog", get(routes::plugins::catalog))
         .route("/plugins/status", get(routes::plugins::status))
@@ -800,6 +802,19 @@ async fn run_download_processor(state: Arc<AppState>) {
         )
         .execute(&state.db)
         .await;
+
+        // Re-queue downloads stuck in 'downloading' for >10 min (e.g. server crashed mid-download)
+        let recovered = sqlx::query(
+            "UPDATE download_queue SET status = 'queued', tracks_completed = 0, current_track = NULL, error = NULL \
+             WHERE status = 'downloading' AND created_at < datetime('now', '-10 minutes')"
+        )
+        .execute(&state.db)
+        .await;
+        if let Ok(r) = recovered {
+            if r.rows_affected() > 0 {
+                tracing::info!("re-queued {} interrupted download(s)", r.rows_affected());
+            }
+        }
 
         // Fetch next queued download
         let row: Option<(String, String, String, String, Option<String>)> = sqlx::query_as(

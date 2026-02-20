@@ -5,7 +5,7 @@ use axum::{
     response::{IntoResponse, Response},
     Extension, Json,
 };
-use riff_core::auth::Claims;
+use riff_core::{auth::Claims, musicbrainz};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::{QueryBuilder, Row, Sqlite, SqlitePool};
@@ -13,6 +13,7 @@ use std::sync::Arc;
 use tokio::fs::File;
 use crate::error::AppError;
 use crate::AppState;
+use std::path::Path as StdPath;
 
 #[derive(Debug, Deserialize)]
 pub struct CoverParams {
@@ -918,6 +919,110 @@ pub async fn list_genres(
     Ok(Json(json!({ "genres": genres })))
 }
 
+pub async fn refresh_cover(
+    State(state): State<Arc<AppState>>,
+    Extension(_claims): Extension<Claims>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, AppError> {
+    // Look up album info
+    let (external_id, title, artist_name): (Option<String>, String, String) = sqlx::query_as(
+        "SELECT a.external_id, a.title, ar.name \
+         FROM albums a JOIN artists ar ON a.artist_id = ar.id WHERE a.id = ?",
+    )
+    .bind(&id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or(AppError::NotFound("album not found".into()))?;
+
+    let mut mbid = external_id.filter(|s| !s.is_empty());
+
+    // If no MusicBrainz ID yet, try enriching the album first
+    if mbid.is_none() {
+        let _ = musicbrainz::enrich_album(&state.db, &id).await;
+        let updated: Option<(Option<String>,)> = sqlx::query_as(
+            "SELECT external_id FROM albums WHERE id = ?",
+        )
+        .bind(&id)
+        .fetch_optional(&state.db)
+        .await?;
+        mbid = updated.and_then(|(eid,)| eid).filter(|s| !s.is_empty());
+    }
+
+    // Try Cover Art Archive first (if we have a MusicBrainz ID)
+    let mut cover_bytes: Option<Vec<u8>> = None;
+    if let Some(ref mbid) = mbid {
+        let caa_url = format!("https://coverartarchive.org/release/{}/front", mbid);
+        if let Ok(resp) = reqwest::get(&caa_url).await {
+            if resp.status().is_success() {
+                if let Ok(bytes) = resp.bytes().await {
+                    if !bytes.is_empty() {
+                        cover_bytes = Some(bytes.to_vec());
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback: try Discogs if configured
+    if cover_bytes.is_none() {
+        let config = state.config.read().await;
+        if let Some(ref token) = config.metadata.discogs_api_key {
+            let client = reqwest::Client::new();
+            match riff_core::discogs::fetch_album_cover(&client, &artist_name, &title, token).await
+            {
+                Ok(Some(bytes)) => cover_bytes = Some(bytes),
+                Ok(None) => {}
+                Err(e) => tracing::warn!("Discogs cover search failed: {e}"),
+            }
+        }
+    }
+
+    let bytes = cover_bytes.ok_or(AppError::NotFound("no cover art found".into()))?;
+
+    // Determine album directory from first track's file_path
+    let track_path: Option<(String,)> = sqlx::query_as(
+        "SELECT file_path FROM tracks WHERE album_id = ? LIMIT 1",
+    )
+    .bind(&id)
+    .fetch_optional(&state.db)
+    .await?;
+
+    let album_dir = track_path
+        .and_then(|(p,)| StdPath::new(&p).parent().map(|d| d.to_path_buf()))
+        .ok_or(AppError::Internal(
+            "could not determine album directory".to_string(),
+        ))?;
+
+    // Write cover.jpg to album directory
+    let cover_path = album_dir.join("cover.jpg");
+    tokio::fs::write(&cover_path, &bytes)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+    // Update DB
+    let cover_str = cover_path.to_string_lossy().to_string();
+    sqlx::query("UPDATE albums SET cover_art_path = ? WHERE id = ?")
+        .bind(&cover_str)
+        .bind(&id)
+        .execute(&state.db)
+        .await?;
+
+    // Delete cached thumbnails
+    if let Some(data_dir) = dirs::data_dir() {
+        let thumbs_dir = data_dir.join("riff").join("thumbs");
+        if let Ok(mut entries) = tokio::fs::read_dir(&thumbs_dir).await {
+            let prefix = format!("{}_", id);
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                if entry.file_name().to_string_lossy().starts_with(&prefix) {
+                    let _ = tokio::fs::remove_file(entry.path()).await;
+                }
+            }
+        }
+    }
+
+    Ok(Json(json!({"ok": true})))
+}
+
 pub async fn delete_album(
     State(state): State<Arc<AppState>>,
     Extension(_claims): Extension<Claims>,
@@ -931,6 +1036,18 @@ pub async fn delete_album(
     .fetch_optional(&state.db)
     .await?
     .ok_or(AppError::NotFound("album not found".into()))?;
+
+    // Gather track file paths before deleting DB records
+    let track_paths: Vec<(String,)> = sqlx::query_as(
+        "SELECT file_path FROM tracks WHERE album_id = ?",
+    )
+    .bind(&id)
+    .fetch_all(&state.db)
+    .await?;
+
+    let album_dir = track_paths
+        .first()
+        .and_then(|(p,)| StdPath::new(p).parent().map(|d| d.to_path_buf()));
 
     // Delete related rows (no FK cascade enforced at runtime)
     sqlx::query("DELETE FROM favorites WHERE entity_type = 'album' AND entity_id = ?")
@@ -966,11 +1083,6 @@ pub async fn delete_album(
         .execute(&state.db)
         .await?;
 
-    sqlx::query("DELETE FROM album_art_cache WHERE album_id = ?")
-        .bind(&id)
-        .execute(&state.db)
-        .await?;
-
     sqlx::query("DELETE FROM tracks WHERE album_id = ?")
         .bind(&id)
         .execute(&state.db)
@@ -999,6 +1111,26 @@ pub async fn delete_album(
             .bind(&artist_id)
             .execute(&state.db)
             .await?;
+    }
+
+    // Delete album files from disk
+    if let Some(dir) = album_dir {
+        if let Err(e) = tokio::fs::remove_dir_all(&dir).await {
+            tracing::warn!("failed to remove album directory {:?}: {}", dir, e);
+        }
+    }
+
+    // Delete cached thumbnails
+    if let Some(data_dir) = dirs::data_dir() {
+        let thumbs_dir = data_dir.join("riff").join("thumbs");
+        if let Ok(mut entries) = tokio::fs::read_dir(&thumbs_dir).await {
+            let prefix = format!("{}_", id);
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                if entry.file_name().to_string_lossy().starts_with(&prefix) {
+                    let _ = tokio::fs::remove_file(entry.path()).await;
+                }
+            }
+        }
     }
 
     Ok(Json(json!({"ok": true})))

@@ -17,6 +17,63 @@ struct SearchResult {
     style: Vec<String>,
 }
 
+/// Search Discogs for an album cover image by artist + title.
+/// Returns the image bytes if found, or None.
+pub async fn fetch_album_cover(
+    client: &reqwest::Client,
+    artist_name: &str,
+    album_title: &str,
+    token: &str,
+) -> anyhow::Result<Option<Vec<u8>>> {
+    debug!("Discogs: searching for album '{}' by '{}'", album_title, artist_name);
+
+    let query = format!("{} {}", artist_name, album_title);
+    let resp = client
+        .get("https://api.discogs.com/database/search")
+        .query(&[
+            ("q", query.as_str()),
+            ("type", "release"),
+            ("per_page", "3"),
+            ("token", token),
+        ])
+        .send()
+        .await?;
+
+    if !resp.status().is_success() {
+        anyhow::bail!("Discogs search returned status {}", resp.status());
+    }
+
+    let body: SearchResponse = resp.json().await?;
+
+    let cover_url = body
+        .results
+        .iter()
+        .find_map(|r| r.cover_image.clone())
+        .filter(|url| !url.is_empty());
+
+    let Some(url) = cover_url else {
+        return Ok(None);
+    };
+
+    // Download the image
+    let img_resp = client
+        .get(&url)
+        .header("Authorization", format!("Discogs token={}", token))
+        .send()
+        .await?;
+
+    if !img_resp.status().is_success() {
+        return Ok(None);
+    }
+
+    let bytes = img_resp.bytes().await?.to_vec();
+    if bytes.is_empty() {
+        return Ok(None);
+    }
+
+    Ok(Some(bytes))
+}
+
 /// Fetch an artist image directly by Discogs artist ID (exact, no ambiguity).
 pub async fn fetch_artist_image_by_id(
     client: &reqwest::Client,
