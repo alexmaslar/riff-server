@@ -589,6 +589,7 @@ async fn main() -> Result<()> {
         .route("/artists", get(routes::artists::list_artists))
         .route("/artists/stories", get(routes::artists::artist_stories))
         .route("/artists/{id}", get(routes::artists::get_artist))
+        .route("/artists/{id}/streaming-albums", get(routes::artists::get_streaming_albums))
         .route("/albums", get(routes::albums::list_albums))
         .route("/albums/filters", get(routes::albums::list_filters))
         .route("/genres", get(routes::albums::list_genres))
