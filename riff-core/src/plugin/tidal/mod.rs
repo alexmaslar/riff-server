@@ -69,6 +69,7 @@ fn convert_album(a: &TidalAlbum) -> StreamingAlbum {
             StreamingQuality::High,
             StreamingQuality::Low,
         ],
+        album_type: a.album_type.clone(),
     }
 }
 
@@ -218,6 +219,7 @@ impl StreamingProvider for TidalPlugin {
                 StreamingQuality::High,
                 StreamingQuality::Low,
             ],
+            album_type: None,
         };
 
         let tracks: Vec<StreamingTrack> =

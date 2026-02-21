@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::SqlitePool;
 use std::sync::Arc;
+use unicode_normalization::UnicodeNormalization;
 
 use crate::error::AppError;
 use crate::AppState;
@@ -71,6 +72,7 @@ pub struct AlbumSummary {
     pub year: Option<i32>,
     pub cover_art_path: Option<String>,
     pub play_count: i64,
+    pub track_count: i64,
 }
 
 pub async fn list_artists(
@@ -284,9 +286,10 @@ pub async fn get_streaming_albums(
     .fetch_all(&state.db)
     .await?;
 
-    // Normalize: lowercase, alphanumeric only
+    // Normalize: NFKD decompose (splits accents from base chars), lowercase, ASCII alphanumeric only.
+    // This ensures "DeBÍ" matches regardless of whether Í is NFC (U+00CD) or NFD (I + combining accent).
     fn normalize(s: &str) -> String {
-        s.to_lowercase().chars().filter(|c| c.is_alphanumeric()).collect()
+        s.nfkd().collect::<String>().to_lowercase().chars().filter(|c| c.is_ascii_alphanumeric()).collect()
     }
 
     // Build merged album list
@@ -325,6 +328,7 @@ pub async fn get_streaming_albums(
                 "available_qualities": qualities,
                 "in_library": in_library,
                 "library_album_id": library_album_id,
+                "album_type": album.album_type,
             })
         })
         .collect();
@@ -350,8 +354,10 @@ pub async fn build_artist_detail(
 
     // Run independent queries concurrently
     let (albums_result, fav_result, similar_result, top_tracks_result) = tokio::join!(
-        sqlx::query_as::<_, (String, String, Option<i32>, Option<String>, i64)>(
-            "SELECT id, title, year, cover_art_path, play_count FROM albums WHERE artist_id = ? ORDER BY year, title",
+        sqlx::query_as::<_, (String, String, Option<i32>, Option<String>, i64, i64)>(
+            "SELECT a.id, a.title, a.year, a.cover_art_path, a.play_count, \
+             (SELECT COUNT(*) FROM tracks t WHERE t.album_id = a.id) as track_count \
+             FROM albums a WHERE a.artist_id = ? ORDER BY a.year, a.title",
         )
         .bind(artist_id)
         .fetch_all(db),
@@ -402,12 +408,13 @@ pub async fn build_artist_detail(
 
     let album_summaries: Vec<AlbumSummary> = albums
         .into_iter()
-        .map(|(id, title, year, cover_art_path, play_count)| AlbumSummary {
+        .map(|(id, title, year, cover_art_path, play_count, track_count)| AlbumSummary {
             id,
             title,
             year,
             cover_art_path,
             play_count,
+            track_count,
         })
         .collect();
 

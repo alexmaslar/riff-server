@@ -83,6 +83,7 @@ fn convert_album(a: &QobuzAlbum) -> StreamingAlbum {
             StreamingQuality::Lossless,
             StreamingQuality::High,
         ],
+        album_type: None,
     }
 }
 

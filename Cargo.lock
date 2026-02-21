@@ -2952,6 +2952,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+ "unicode-normalization",
  "urlencoding",
  "uuid",
  "walkdir",
@@ -2990,6 +2991,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "unicode-normalization",
  "uuid",
 ]
 

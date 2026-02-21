@@ -36,3 +36,4 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 rustls-pemfile = "2"
 socket2 = { version = "0.5", features = ["all"] }
 filetime = "0.2"
+unicode-normalization = "0.1"

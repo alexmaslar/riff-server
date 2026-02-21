@@ -393,10 +393,6 @@ async fn remove_stale_entries(
             .bind(album_id)
             .execute(pool)
             .await?;
-        sqlx::query("DELETE FROM album_art_cache WHERE album_id = ?")
-            .bind(album_id)
-            .execute(pool)
-            .await?;
         sqlx::query("DELETE FROM albums WHERE id = ?")
             .bind(album_id)
             .execute(pool)

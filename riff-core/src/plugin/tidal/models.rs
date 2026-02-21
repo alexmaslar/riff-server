@@ -32,6 +32,8 @@ pub struct TidalAlbum {
     pub release_date: Option<String>,
     pub duration: Option<u32>,
     pub explicit: Option<bool>,
+    #[serde(rename = "type", default)]
+    pub album_type: Option<String>,
     /// Present in album detail responses but NOT in search results.
     /// Search results only have `artists` (array). Use `primary_artist()` helper.
     #[serde(default)]

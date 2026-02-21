@@ -30,6 +30,7 @@ pub struct StreamingAlbum {
     pub cover_url: Option<String>,
     pub track_count: u32,
     pub available_qualities: Vec<StreamingQuality>,
+    pub album_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
