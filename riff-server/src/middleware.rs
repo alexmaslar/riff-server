@@ -14,7 +14,7 @@ use std::sync::Arc;
 use crate::AppState;
 
 /// Marker inserted into request extensions to indicate whether the client
-/// connected via HTTPS (remote) or HTTP (local LAN).
+/// is remote (public internet) or local (private LAN / loopback).
 #[derive(Debug, Clone, Copy)]
 pub struct IsRemote(pub bool);
 
@@ -39,9 +39,22 @@ fn extract_client_ip(req: &Request<Body>) -> String {
     "unknown".to_string()
 }
 
+fn is_private_ip(ip: &str) -> bool {
+    use std::net::IpAddr;
+    match ip.parse::<IpAddr>() {
+        Ok(IpAddr::V4(v4)) => v4.is_loopback() || v4.is_private() || v4.is_link_local(),
+        Ok(IpAddr::V6(v6)) => v6.is_loopback() || (v6.segments()[0] & 0xffc0) == 0xfe80,
+        Err(_) => false,
+    }
+}
+
 pub async fn mark_remote(mut req: Request<Body>, next: Next) -> Response {
-    req.extensions_mut().insert(IsRemote(true));
     let ip = extract_client_ip(&req);
+    let is_remote = !is_private_ip(&ip);
+    if !is_remote {
+        tracing::debug!("HTTPS client {ip} is on private network, treating as local");
+    }
+    req.extensions_mut().insert(IsRemote(is_remote));
     req.extensions_mut().insert(ClientIp(ip));
     next.run(req).await
 }

@@ -321,7 +321,7 @@ async fn main() -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info,lofty=error".into()))
+        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
 
     let config = Config::load()?;
@@ -746,7 +746,7 @@ async fn main() -> Result<()> {
             .handshake_timeout(Duration::from_secs(10));
         let mut server = axum_server::Server::from_tcp(https_listener).acceptor(acceptor);
         server.http_builder().http1().keep_alive(true);
-        match server.serve(https_app.into_make_service()).await {
+        match server.serve(https_app.into_make_service_with_connect_info::<SocketAddr>()).await {
             Ok(()) => tracing::error!("HTTPS serve loop exited without error (should not happen)"),
             Err(e) => tracing::error!("HTTPS serve loop exited unexpectedly: {e}"),
         }

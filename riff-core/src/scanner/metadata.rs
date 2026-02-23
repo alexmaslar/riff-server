@@ -1,6 +1,3 @@
-use lofty::config::WriteOptions;
-use lofty::prelude::*;
-use lofty::tag::{ItemKey, Tag as LoftyTag, TagType};
 use std::fs;
 use std::path::{Path, PathBuf};
 use symphonia::core::codecs::CodecType;
@@ -103,10 +100,15 @@ pub fn sanitize_filename(name: &str) -> String {
         .collect()
 }
 
-/// Write standard Vorbis comment tags into a FLAC file.
+/// Write standard Vorbis Comment tags into a FLAC file.
 ///
 /// Called after downloading a track so the scanner picks up proper metadata
 /// instead of falling back to filename parsing.
+///
+/// Parses the FLAC metadata block chain directly, ignoring premature
+/// `last-metadata-block` flags to handle files corrupted by lofty 0.22.
+/// Replaces the VORBIS_COMMENT block and rewrites the file with a correct
+/// block chain.
 pub fn write_flac_tags(
     path: &Path,
     artist: &str,
@@ -116,27 +118,158 @@ pub fn write_flac_tags(
     disc_number: u32,
     year: Option<i32>,
 ) -> anyhow::Result<()> {
-    let mut tagged_file = lofty::probe::Probe::open(path)?.read()?;
+    let data = fs::read(path)?;
+    anyhow::ensure!(data.len() >= 8 && &data[..4] == b"fLaC", "not a FLAC file");
 
-    let tag = match tagged_file.tag_mut(TagType::VorbisComments) {
-        Some(t) => t,
-        None => {
-            tagged_file.insert_tag(LoftyTag::new(TagType::VorbisComments));
-            tagged_file.tag_mut(TagType::VorbisComments).unwrap()
-        }
-    };
+    let (mut blocks, audio_offset) = parse_flac_metadata_blocks(&data)?;
 
-    tag.set_title(title.to_string());
-    tag.set_artist(artist.to_string());
-    tag.set_album(album.to_string());
-    tag.set_track(track_number);
-    tag.set_disk(disc_number);
+    // Remove existing VORBIS_COMMENT (type 4) and PADDING (type 1)
+    blocks.retain(|(btype, _)| *btype != 4 && *btype != 1);
+
+    // Build and append new VORBIS_COMMENT
+    let mut comments = vec![
+        format!("TITLE={title}"),
+        format!("ARTIST={artist}"),
+        format!("ALBUM={album}"),
+        format!("TRACKNUMBER={track_number}"),
+        format!("DISCNUMBER={disc_number}"),
+    ];
     if let Some(y) = year {
-        tag.insert_text(ItemKey::Year, y.to_string());
+        comments.push(format!("YEAR={y}"));
+    }
+    blocks.push((4, encode_vorbis_comment(&comments)));
+
+    let out = rebuild_flac(&blocks, &data[audio_offset..]);
+    fs::write(path, &out)?;
+    Ok(())
+}
+
+/// Repair a corrupted FLAC file in-place.
+///
+/// Rebuilds the metadata block chain with correct `last-metadata-block` flags,
+/// preserving all existing tags and metadata blocks (except PADDING).
+pub fn repair_flac(path: &Path) -> anyhow::Result<()> {
+    let data = fs::read(path)?;
+    anyhow::ensure!(data.len() >= 8 && &data[..4] == b"fLaC", "not a FLAC file");
+
+    let (mut blocks, audio_offset) = parse_flac_metadata_blocks(&data)?;
+    blocks.retain(|(btype, _)| *btype != 1); // drop PADDING
+
+    let out = rebuild_flac(&blocks, &data[audio_offset..]);
+    fs::write(path, &out)?;
+    Ok(())
+}
+
+/// Parse FLAC metadata blocks and locate the audio frame boundary.
+///
+/// Handles files corrupted by lofty 0.22 where the `last-metadata-block` flag
+/// is set prematurely, orphaning subsequent blocks. Parses blocks up to the
+/// first `last=1` flag, then scans for the FLAC frame sync (`0xFFF8`/`0xFFF9`)
+/// to find where audio actually begins. Any valid metadata blocks in the
+/// orphaned region between the two are also recovered.
+///
+/// Returns `(blocks, audio_offset)` where each block is `(type, data)` and
+/// `audio_offset` is the byte position where audio frames begin.
+fn parse_flac_metadata_blocks(data: &[u8]) -> anyhow::Result<(Vec<(u8, Vec<u8>)>, usize)> {
+    let mut pos = 4; // skip fLaC magic
+    let mut blocks = Vec::new();
+
+    // Phase 1: parse blocks until we see last=1 or hit an invalid header
+    loop {
+        if pos + 4 > data.len() {
+            anyhow::bail!("unexpected EOF in metadata block chain");
+        }
+
+        let is_last = (data[pos] >> 7) & 1 == 1;
+        let block_type = data[pos] & 0x7F;
+
+        if block_type > 6 {
+            break;
+        }
+
+        let length =
+            u32::from_be_bytes([0, data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
+
+        if pos + 4 + length > data.len() {
+            break;
+        }
+
+        blocks.push((block_type, data[pos + 4..pos + 4 + length].to_vec()));
+        pos += 4 + length;
+
+        if is_last {
+            break;
+        }
     }
 
-    tag.save_to_path(path, WriteOptions::default())?;
-    Ok(())
+    // Phase 2: find the actual audio frame boundary by scanning for the
+    // FLAC frame sync code (0xFFF8 or 0xFFF9). In a well-formed file this
+    // is exactly at `pos`; in a corrupted file there may be orphaned blocks
+    // or garbage between `pos` and the first audio frame.
+    let audio_offset = find_frame_sync(data, pos)
+        .ok_or_else(|| anyhow::anyhow!("no FLAC frame sync found after metadata"))?;
+
+    // Phase 3: try to recover valid metadata blocks in the orphaned region
+    let mut orphan_pos = pos;
+    while orphan_pos + 4 <= audio_offset {
+        let block_type = data[orphan_pos] & 0x7F;
+        if block_type > 6 {
+            break;
+        }
+
+        let length =
+            u32::from_be_bytes([0, data[orphan_pos + 1], data[orphan_pos + 2], data[orphan_pos + 3]])
+                as usize;
+
+        // Block must fit within the orphaned region (before audio)
+        if orphan_pos + 4 + length > audio_offset {
+            break;
+        }
+
+        blocks.push((block_type, data[orphan_pos + 4..orphan_pos + 4 + length].to_vec()));
+        orphan_pos += 4 + length;
+    }
+
+    Ok((blocks, audio_offset))
+}
+
+/// Scan for the first FLAC frame sync code (`0xFFF8` or `0xFFF9`) starting
+/// at `from`. Returns the byte offset if found.
+fn find_frame_sync(data: &[u8], from: usize) -> Option<usize> {
+    data[from..]
+        .windows(2)
+        .position(|w| w[0] == 0xFF && (w[1] == 0xF8 || w[1] == 0xF9))
+        .map(|pos| from + pos)
+}
+
+/// Encode a Vorbis Comment block body from a list of `KEY=value` strings.
+fn encode_vorbis_comment(comments: &[String]) -> Vec<u8> {
+    let vendor = b"riff";
+    let mut buf = Vec::new();
+    buf.extend_from_slice(&(vendor.len() as u32).to_le_bytes());
+    buf.extend_from_slice(vendor);
+    buf.extend_from_slice(&(comments.len() as u32).to_le_bytes());
+    for c in comments {
+        let bytes = c.as_bytes();
+        buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+        buf.extend_from_slice(bytes);
+    }
+    buf
+}
+
+/// Reassemble a FLAC file from metadata blocks and audio frame data.
+fn rebuild_flac(blocks: &[(u8, Vec<u8>)], audio_data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(4 + blocks.iter().map(|(_, d)| 4 + d.len()).sum::<usize>() + audio_data.len());
+    out.extend_from_slice(b"fLaC");
+    for (i, (btype, bdata)) in blocks.iter().enumerate() {
+        let is_last = i == blocks.len() - 1;
+        out.push(if is_last { 0x80 | btype } else { *btype });
+        let len = bdata.len() as u32;
+        out.extend_from_slice(&len.to_be_bytes()[1..4]);
+        out.extend_from_slice(bdata);
+    }
+    out.extend_from_slice(audio_data);
+    out
 }
 
 #[derive(Debug, Clone)]
@@ -872,5 +1005,181 @@ mod tests {
     fn test_build_track_filename_sanitizes() {
         let name = build_track_filename("Test", "Album", 1, "What?", "flac", LibraryConvention::Flat);
         assert_eq!(name, "Test - Album - 01 What_.flac");
+    }
+
+    // -- FLAC tag writing --
+
+    /// Build a minimal valid FLAC file: fLaC + STREAMINFO + one silent audio frame.
+    fn make_minimal_flac() -> Vec<u8> {
+        // STREAMINFO: 34 bytes (min/max block=4096, min/max frame=0,
+        // sample_rate=44100, channels=1(mono), bps=16, total_samples=4096, md5=0)
+        let streaminfo: [u8; 34] = [
+            0x10, 0x00, 0x10, 0x00, // min/max block size = 4096
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // min/max frame size = 0
+            0x0A, 0xC4, 0x42, 0xF0, 0x00, 0x00, 0x10, 0x00,
+            // ^^^^^ sample_rate=44100, channels=1(0), bps=16(15)
+            // total_samples = 4096
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            // MD5 = all zeros
+        ];
+
+        // Minimal FLAC frame: sync + header + subframe + footer
+        // Use a constant silent frame: fff8 6918 00 00(silence) + CRC
+        let audio_frame: [u8; 11] = [
+            0xFF, 0xF8, 0x69, 0x18, // sync(14b) + blocking(1b=fixed) + blocksize(4b) + samplerate(4b) + channel(4b) + bps(3b) + reserved(1b)
+            0x00, // frame number = 0 (UTF-8 coded)
+            0xA8, // blocksize-1 uncommon = read 8-bit -> 0xA8 ... simplified
+            0x00, // constant subframe (SUBFRAME_CONSTANT, all zeros)
+            0x00, 0x00, // padding to byte align
+            0xDB, 0xFC, // CRC-16 (placeholder)
+        ];
+
+        let mut data = Vec::new();
+        data.extend_from_slice(b"fLaC");
+        // STREAMINFO block header: last=1, type=0, length=34
+        data.push(0x80);
+        data.extend_from_slice(&34u32.to_be_bytes()[1..4]);
+        data.extend_from_slice(&streaminfo);
+        // Audio frame
+        data.extend_from_slice(&audio_frame);
+        data
+    }
+
+    #[test]
+    fn test_write_flac_tags_creates_vorbis_comment() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.flac");
+        fs::write(&path, make_minimal_flac()).unwrap();
+
+        write_flac_tags(&path, "Artist", "Album", "Title", 3, 1, Some(2025)).unwrap();
+
+        let data = fs::read(&path).unwrap();
+        assert_eq!(&data[..4], b"fLaC");
+
+        // Parse blocks
+        let (blocks, _) = parse_flac_metadata_blocks(&data).unwrap();
+        assert!(blocks.iter().any(|(t, _)| *t == 0), "STREAMINFO present");
+        assert!(blocks.iter().any(|(t, _)| *t == 4), "VORBIS_COMMENT present");
+
+        // Verify tag content
+        let vc_data = &blocks.iter().find(|(t, _)| *t == 4).unwrap().1;
+        let vc_str = String::from_utf8_lossy(vc_data);
+        assert!(vc_str.contains("TITLE=Title"));
+        assert!(vc_str.contains("ARTIST=Artist"));
+        assert!(vc_str.contains("ALBUM=Album"));
+        assert!(vc_str.contains("TRACKNUMBER=3"));
+        assert!(vc_str.contains("YEAR=2025"));
+    }
+
+    #[test]
+    fn test_write_flac_tags_replaces_existing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.flac");
+        fs::write(&path, make_minimal_flac()).unwrap();
+
+        // Write once
+        write_flac_tags(&path, "A1", "B1", "T1", 1, 1, None).unwrap();
+        // Write again with different values
+        write_flac_tags(&path, "A2", "B2", "T2", 5, 2, Some(2020)).unwrap();
+
+        let data = fs::read(&path).unwrap();
+        let (blocks, _) = parse_flac_metadata_blocks(&data).unwrap();
+
+        // Only one VORBIS_COMMENT block
+        let vc_count = blocks.iter().filter(|(t, _)| *t == 4).count();
+        assert_eq!(vc_count, 1);
+
+        let vc_data = &blocks.iter().find(|(t, _)| *t == 4).unwrap().1;
+        let vc_str = String::from_utf8_lossy(vc_data);
+        assert!(vc_str.contains("ARTIST=A2"));
+        assert!(vc_str.contains("ALBUM=B2"));
+        assert!(!vc_str.contains("ARTIST=A1"));
+    }
+
+    #[test]
+    fn test_write_flac_tags_correct_last_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.flac");
+        fs::write(&path, make_minimal_flac()).unwrap();
+
+        write_flac_tags(&path, "A", "B", "T", 1, 1, None).unwrap();
+
+        let data = fs::read(&path).unwrap();
+        // Walk block headers and verify only the last has the last flag
+        let mut pos = 4usize;
+        let mut last_flags = Vec::new();
+        while pos + 4 <= data.len() {
+            let is_last = (data[pos] >> 7) & 1 == 1;
+            let block_type = data[pos] & 0x7F;
+            if block_type > 6 {
+                break;
+            }
+            let length = u32::from_be_bytes([0, data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
+            last_flags.push(is_last);
+            pos += 4 + length;
+            if is_last {
+                break;
+            }
+        }
+        // All blocks except the last should have last=false
+        assert!(last_flags.len() >= 2);
+        for flag in &last_flags[..last_flags.len() - 1] {
+            assert!(!flag, "non-final block should not have last flag");
+        }
+        assert!(last_flags.last().unwrap(), "final block should have last flag");
+    }
+
+    #[test]
+    fn test_repair_flac_fixes_premature_last_flag() {
+        // Build a FLAC with premature last=1 on STREAMINFO, followed by PADDING then audio
+        let streaminfo = [0u8; 34];
+        let padding = [0u8; 64];
+
+        let mut corrupted = Vec::new();
+        corrupted.extend_from_slice(b"fLaC");
+        // STREAMINFO: last=1 (premature!), type=0, length=34
+        corrupted.push(0x80);
+        corrupted.extend_from_slice(&34u32.to_be_bytes()[1..4]);
+        corrupted.extend_from_slice(&streaminfo);
+        // PADDING: last=1, type=1, length=64 (orphaned)
+        corrupted.push(0x81);
+        corrupted.extend_from_slice(&64u32.to_be_bytes()[1..4]);
+        corrupted.extend_from_slice(&padding);
+        // Audio frame sync
+        corrupted.extend_from_slice(&[0xFF, 0xF8, 0x00, 0x00]);
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("corrupt.flac");
+        fs::write(&path, &corrupted).unwrap();
+
+        repair_flac(&path).unwrap();
+
+        let data = fs::read(&path).unwrap();
+        assert_eq!(&data[..4], b"fLaC");
+
+        let (blocks, audio_offset) = parse_flac_metadata_blocks(&data).unwrap();
+        // PADDING should be stripped
+        assert!(blocks.iter().all(|(t, _)| *t != 1));
+        // STREAMINFO should be present
+        assert_eq!(blocks[0].0, 0);
+        // Audio should follow immediately
+        assert_eq!(data[audio_offset], 0xFF);
+        assert_eq!(data[audio_offset + 1], 0xF8);
+    }
+
+    #[test]
+    fn test_encode_vorbis_comment() {
+        let comments = vec!["TITLE=Test".to_string(), "ARTIST=Me".to_string()];
+        let data = encode_vorbis_comment(&comments);
+
+        // Vendor: "riff" (4 bytes LE length + 4 bytes string)
+        assert_eq!(&data[0..4], &4u32.to_le_bytes());
+        assert_eq!(&data[4..8], b"riff");
+        // 2 comments
+        assert_eq!(&data[8..12], &2u32.to_le_bytes());
+        // First comment: "TITLE=Test" (10 bytes)
+        assert_eq!(&data[12..16], &10u32.to_le_bytes());
+        assert_eq!(&data[16..26], b"TITLE=Test");
     }
 }

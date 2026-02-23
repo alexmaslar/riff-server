@@ -33,7 +33,6 @@ extism = "1"
 image = { version = "0.25", features = ["png", "jpeg"] }
 urlencoding = "2"
 base64 = "0.22"
-lofty = "0.22"
 unicode-normalization = "0.1"
 
 [dev-dependencies]
