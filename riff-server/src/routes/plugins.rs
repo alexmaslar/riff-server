@@ -1,4 +1,4 @@
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::Json;
 use serde_json::{json, Value};
 use std::collections::HashSet;
@@ -9,9 +9,11 @@ use crate::AppState;
 
 /// GET /plugins/status — list loaded plugins + health
 pub async fn status(State(state): State<Arc<AppState>>) -> Result<Json<Value>, AppError> {
+    let dev_names = state.dev_plugin_names.read().await;
     let registry = state.plugin_registry.read().await;
     let mut plugins = Vec::new();
     for p in registry.all_plugins() {
+        let is_dev = dev_names.contains(p.name());
         let health = p.health_check().await;
         plugins.push(json!({
             "name": p.name(),
@@ -20,17 +22,20 @@ pub async fn status(State(state): State<Arc<AppState>>) -> Result<Json<Value>, A
             "capabilities": p.capabilities(),
             "healthy": health.healthy,
             "message": health.message,
+            "dev": is_dev,
         }));
     }
     Ok(Json(json!({ "plugins": plugins })))
 }
 
-/// GET /plugins/catalog — all known plugins from the community registry.
+/// GET /plugins/catalog — all known plugins from the community registry,
+/// plus dev plugins loaded from local paths.
 /// Compiled-in plugins (loaded in registry without a WASM file) get `wasm: false`.
 /// WASM plugins get `wasm: true` with `installed` based on whether the file exists on disk.
 pub async fn catalog(State(state): State<Arc<AppState>>) -> Json<Value> {
     let config = state.config.read().await;
     let plugin_dir = config.plugin_directory();
+    let dev_entries = config.dev_plugins.clone();
     drop(config);
 
     // Collect names of plugins currently loaded in the registry
@@ -42,8 +47,10 @@ pub async fn catalog(State(state): State<Arc<AppState>>) -> Json<Value> {
         .collect();
     drop(registry);
 
+    let dev_names = state.dev_plugin_names.read().await;
+
     let remote = state.remote_catalog.read().await;
-    let plugins: Vec<Value> = remote
+    let mut plugins: Vec<Value> = remote
         .iter()
         .map(|entry| {
             let wasm_on_disk = plugin_dir.join(&entry.name).join("plugin.wasm").exists();
@@ -63,9 +70,63 @@ pub async fn catalog(State(state): State<Arc<AppState>>) -> Json<Value> {
                 "settings": entry.settings,
                 "wasm": wasm,
                 "installed": installed,
+                "dev": false,
             })
         })
         .collect();
 
+    // Append dev plugins by reading their manifest.json
+    for (name, dev_config) in &dev_entries {
+        // Skip if already in the remote catalog
+        if remote.iter().any(|e| e.name == *name) {
+            continue;
+        }
+        let manifest_path = dev_config.path.join("manifest.json");
+        if let Ok(manifest_str) = std::fs::read_to_string(&manifest_path) {
+            if let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&manifest_str) {
+                plugins.push(json!({
+                    "name": name,
+                    "display_name": manifest.get("display_name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(name),
+                    "description": manifest.get("description")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(""),
+                    "capabilities": manifest.get("capabilities")
+                        .unwrap_or(&json!([])),
+                    "settings": manifest.get("settings")
+                        .unwrap_or(&json!([])),
+                    "wasm": true,
+                    "installed": dev_names.contains(name),
+                    "dev": true,
+                }));
+            }
+        }
+    }
+
     Json(json!({ "plugins": plugins }))
+}
+
+/// POST /plugins/{name}/reload — reload a dev plugin from its local path.
+/// Admin-only. Only works for plugins listed in dev_plugins config.
+pub async fn reload_dev_plugin(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> Result<Json<Value>, AppError> {
+    let dev_names = state.dev_plugin_names.read().await;
+    if !dev_names.contains(&name) {
+        return Err(AppError::BadRequest(format!(
+            "'{name}' is not a dev plugin"
+        )));
+    }
+    drop(dev_names);
+
+    let result = crate::plugin_reload::reload_single_dev_plugin(&state, &name).await;
+
+    Ok(Json(json!({
+        "name": name,
+        "loaded": result.loaded,
+        "healthy": result.healthy,
+        "message": result.message,
+    })))
 }

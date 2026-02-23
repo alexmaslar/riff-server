@@ -405,7 +405,12 @@ pub async fn update_config(
 
     // Reload plugins synchronously so we can report health in the response
     let plugin_results = if plugins_changed {
-        Some(crate::plugin_reload::reload_wasm_plugins(&state).await)
+        let mut results = crate::plugin_reload::reload_wasm_plugins(&state).await;
+        // Also reload dev plugins when plugin config changes
+        let (dev_results, dev_names) = crate::plugin_reload::reload_dev_plugins(&state).await;
+        *state.dev_plugin_names.write().await = dev_names;
+        results.extend(dev_results);
+        Some(results)
     } else {
         None
     };

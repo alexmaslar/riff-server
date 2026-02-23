@@ -56,6 +56,8 @@ pub struct AppState {
     pub plugin_registry: RwLock<plugin::registry::PluginRegistry>,
     pub remote_catalog: RwLock<Vec<RemotePluginEntry>>,
     pub event_bus: plugin::events::EventBus,
+    /// Names of plugins loaded from dev_plugins config (invisible to non-admin users).
+    pub dev_plugin_names: RwLock<std::collections::HashSet<String>>,
 }
 
 async fn run_background_pipeline(state: Arc<AppState>) {
@@ -444,6 +446,7 @@ async fn main() -> Result<()> {
         plugin_registry: RwLock::new(plugin_registry),
         remote_catalog: RwLock::new(remote_catalog),
         event_bus,
+        dev_plugin_names: RwLock::new(std::collections::HashSet::new()),
     });
 
     // Set cert fingerprint on the remote access manager
@@ -462,6 +465,20 @@ async fn main() -> Result<()> {
             );
         }
     }
+
+    // Load dev plugins from local paths
+    let (dev_results, dev_names) = plugin_reload::reload_dev_plugins(&state).await;
+    for (name, result) in &dev_results {
+        if result.loaded {
+            tracing::info!("dev plugin {name}: loaded (healthy={})", result.healthy);
+        } else {
+            tracing::warn!(
+                "dev plugin {name}: {}",
+                result.message.as_deref().unwrap_or("failed to load")
+            );
+        }
+    }
+    *state.dev_plugin_names.write().await = dev_names;
 
     // Background pipeline: enrich → summarize → rate → analyze
     {
@@ -661,6 +678,7 @@ async fn main() -> Result<()> {
         .route("/config", get(routes::config::get_config).put(routes::config::update_config))
         .route("/plugins/catalog", get(routes::plugins::catalog))
         .route("/plugins/status", get(routes::plugins::status))
+        .route("/plugins/{name}/reload", post(routes::plugins::reload_dev_plugin))
         .route("/users", get(routes::users::list_users))
         .route("/users", post(routes::users::create_user))
         .route("/users/{id}", delete(routes::users::delete_user))

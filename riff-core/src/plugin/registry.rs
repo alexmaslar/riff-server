@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use super::Plugin;
@@ -79,15 +80,21 @@ impl PluginRegistry {
     // --- Convenience ---
 
     /// Fan out a search query to all streaming providers concurrently,
-    /// returning merged results.
+    /// returning merged results. Providers in `exclude` are skipped.
     pub async fn search_all_streaming(
         &self,
         query: &str,
         limit: u32,
+        exclude: Option<&HashSet<String>>,
     ) -> Vec<(String, anyhow::Result<StreamingSearchResults>)> {
         let mut handles = Vec::new();
 
         for provider in &self.streaming {
+            if let Some(excl) = exclude {
+                if excl.contains(provider.provider_name()) {
+                    continue;
+                }
+            }
             let provider = provider.clone();
             let query = query.to_string();
             handles.push(tokio::spawn(async move {
@@ -250,7 +257,7 @@ mod tests {
     #[tokio::test]
     async fn test_search_all_streaming_empty() {
         let registry = PluginRegistry::new();
-        let results = registry.search_all_streaming("test", 10).await;
+        let results = registry.search_all_streaming("test", 10, None).await;
         assert!(results.is_empty());
     }
 
@@ -258,10 +265,20 @@ mod tests {
     async fn test_search_all_streaming_with_provider() {
         let mut registry = PluginRegistry::new();
         registry.register_streaming(Arc::new(TestStreamingProvider));
-        let results = registry.search_all_streaming("test", 10).await;
+        let results = registry.search_all_streaming("test", 10, None).await;
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, "test-streaming");
         assert!(results[0].1.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_search_all_streaming_with_exclude() {
+        let mut registry = PluginRegistry::new();
+        registry.register_streaming(Arc::new(TestStreamingProvider));
+        let mut exclude = HashSet::new();
+        exclude.insert("test-streaming".to_string());
+        let results = registry.search_all_streaming("test", 10, Some(&exclude)).await;
+        assert!(results.is_empty());
     }
 
     #[test]

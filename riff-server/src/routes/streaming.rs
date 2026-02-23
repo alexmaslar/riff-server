@@ -3,9 +3,10 @@ use axum::{
     extract::{Path, Query, State},
     http::{header, StatusCode},
     response::Response,
-    Json,
+    Extension, Json,
 };
 use futures::TryStreamExt;
+use riff_core::auth::Claims;
 use riff_core::plugin::capabilities::StreamingQuality;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -28,6 +29,7 @@ pub struct StreamParams {
 /// GET /streaming/search?q=&limit=
 pub async fn search(
     State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<Claims>,
     Query(params): Query<SearchParams>,
 ) -> Result<Json<Value>, AppError> {
     let registry = state.plugin_registry.read().await;
@@ -36,7 +38,19 @@ pub async fn search(
     }
 
     let limit = params.limit.unwrap_or(20);
-    let results = registry.search_all_streaming(&params.q, limit).await;
+    let exclude = if claims.role != "admin" {
+        let dev_names = state.dev_plugin_names.read().await;
+        if dev_names.is_empty() {
+            None
+        } else {
+            Some(dev_names.clone())
+        }
+    } else {
+        None
+    };
+    let results = registry
+        .search_all_streaming(&params.q, limit, exclude.as_ref())
+        .await;
 
     let providers: Vec<Value> = results
         .into_iter()
@@ -63,8 +77,19 @@ pub async fn search(
 /// GET /streaming/albums/{provider}/{id}
 pub async fn get_album(
     State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<Claims>,
     Path((provider, id)): Path<(String, String)>,
 ) -> Result<Json<Value>, AppError> {
+    // Block non-admin access to dev providers
+    if claims.role != "admin" {
+        let dev_names = state.dev_plugin_names.read().await;
+        if dev_names.contains(&provider) {
+            return Err(AppError::NotFound(format!(
+                "streaming provider '{provider}' not found"
+            )));
+        }
+    }
+
     let registry = state.plugin_registry.read().await;
     let streaming = registry
         .streaming_providers()
@@ -88,8 +113,19 @@ pub async fn get_album(
 /// GET /streaming/artists/{provider}/{id}/albums
 pub async fn get_artist_albums(
     State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<Claims>,
     Path((provider, id)): Path<(String, String)>,
 ) -> Result<Json<Value>, AppError> {
+    // Block non-admin access to dev providers
+    if claims.role != "admin" {
+        let dev_names = state.dev_plugin_names.read().await;
+        if dev_names.contains(&provider) {
+            return Err(AppError::NotFound(format!(
+                "streaming provider '{provider}' not found"
+            )));
+        }
+    }
+
     let registry = state.plugin_registry.read().await;
     let streaming = registry
         .streaming_providers()
@@ -113,10 +149,21 @@ pub async fn get_artist_albums(
 /// Proxies audio from the streaming provider's CDN.
 pub async fn stream_track(
     State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<Claims>,
     Path((provider, id)): Path<(String, String)>,
     Query(params): Query<StreamParams>,
     request: axum::extract::Request,
 ) -> Result<Response, AppError> {
+    // Block non-admin access to dev providers
+    if claims.role != "admin" {
+        let dev_names = state.dev_plugin_names.read().await;
+        if dev_names.contains(&provider) {
+            return Err(AppError::NotFound(format!(
+                "streaming provider '{provider}' not found"
+            )));
+        }
+    }
+
     let registry = state.plugin_registry.read().await;
     let streaming = registry
         .streaming_providers()

@@ -21,6 +21,13 @@ pub struct Config {
     pub plugins: HashMap<String, PluginConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plugin_directory: Option<PathBuf>,
+    #[serde(default)]
+    pub dev_plugins: HashMap<String, DevPluginConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DevPluginConfig {
+    pub path: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -290,6 +297,7 @@ impl Default for Config {
             streaming: StreamingConfig::default(),
             plugins: HashMap::new(),
             plugin_directory: None,
+            dev_plugins: HashMap::new(),
         }
     }
 }
@@ -567,6 +575,39 @@ plugins:
         let lb = &config.plugins["listenbrainz"];
         assert!(!lb.enabled);
         assert!(lb.settings.is_empty());
+    }
+
+    #[test]
+    fn test_dev_plugins_config_deserialize() {
+        let yaml = r#"
+dev_plugins:
+  my-plugin:
+    path: /tmp/my-plugin
+  another:
+    path: /home/user/plugins/another
+plugins:
+  my-plugin:
+    enabled: true
+    api_key: "test-key"
+"#;
+        let config = Config::load_from_str(yaml).unwrap();
+        assert_eq!(config.dev_plugins.len(), 2);
+        assert_eq!(
+            config.dev_plugins["my-plugin"].path,
+            std::path::PathBuf::from("/tmp/my-plugin")
+        );
+        assert_eq!(
+            config.dev_plugins["another"].path,
+            std::path::PathBuf::from("/home/user/plugins/another")
+        );
+        // Plugin settings still in normal plugins section
+        assert!(config.plugins["my-plugin"].enabled);
+    }
+
+    #[test]
+    fn test_default_config_has_no_dev_plugins() {
+        let config = Config::default();
+        assert!(config.dev_plugins.is_empty());
     }
 
     #[test]
