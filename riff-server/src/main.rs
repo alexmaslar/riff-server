@@ -1,6 +1,7 @@
 pub mod error;
 mod discovery;
 mod middleware;
+mod plugin_reload;
 mod routes;
 mod tls;
 mod transcode;
@@ -14,8 +15,8 @@ use axum::{
     routing::{delete, get, post, put},
     BoxError, Json, Router,
 };
+use riff_core::plugin::catalog::RemotePluginEntry;
 use riff_core::{ai, analysis, auth, config::Config, daily_mixes, db, musicbrainz, plugin, scanner::{self, metadata::{detect_library_convention, build_album_dir, build_track_filename, write_flac_tags}}};
-use riff_core::plugin::Plugin as _;
 use serde_json::{json, Value};
 use socket2::{Domain, Protocol, Socket, TcpKeepalive, Type};
 use sqlx::SqlitePool;
@@ -53,6 +54,7 @@ pub struct AppState {
     pub hls_generating: tokio::sync::Mutex<std::collections::HashSet<String>>,
     pub login_guard: tokio::sync::Mutex<routes::auth::LoginGuard>,
     pub plugin_registry: RwLock<plugin::registry::PluginRegistry>,
+    pub remote_catalog: RwLock<Vec<RemotePluginEntry>>,
     pub event_bus: plugin::events::EventBus,
 }
 
@@ -413,46 +415,10 @@ async fn main() -> Result<()> {
 
     let max_transcodes = config.streaming.max_transcode_processes;
     let event_bus = plugin::events::EventBus::new(512);
-    let mut plugin_registry = plugin::registry::PluginRegistry::new();
+    let plugin_registry = plugin::registry::PluginRegistry::new();
 
-    // Initialize configured plugins
-    for (name, plugin_config) in &config.plugins {
-        if !plugin_config.enabled {
-            continue;
-        }
-        let ctx = plugin::PluginContext {
-            db: pool.clone(),
-            http: reqwest::Client::new(),
-            config: plugin_config.settings.clone(),
-        };
-        match name.as_str() {
-            "tidal" => {
-                let mut p = plugin::tidal::TidalPlugin::new();
-                if let Err(e) = p.init(ctx).await {
-                    tracing::warn!("tidal init failed: {e}");
-                    continue;
-                }
-                let p = Arc::new(p);
-                plugin_registry.register_base(p.clone());
-                plugin_registry.register_streaming(p);
-                tracing::info!("tidal plugin initialized");
-            }
-            "qobuz" => {
-                let mut p = plugin::qobuz::QobuzPlugin::new();
-                if let Err(e) = p.init(ctx).await {
-                    tracing::warn!("qobuz init failed: {e}");
-                    continue;
-                }
-                let p = Arc::new(p);
-                plugin_registry.register_base(p.clone());
-                plugin_registry.register_streaming(p);
-                tracing::info!("qobuz plugin initialized");
-            }
-            _ => {
-                tracing::debug!("unknown plugin: {name}");
-            }
-        }
-    }
+    // Fetch community plugin catalog (non-blocking, empty on failure)
+    let remote_catalog = plugin::catalog::fetch_remote_catalog().await;
 
     let state = Arc::new(AppState {
         db: pool,
@@ -476,6 +442,7 @@ async fn main() -> Result<()> {
         hls_generating: tokio::sync::Mutex::new(std::collections::HashSet::new()),
         login_guard: tokio::sync::Mutex::new(routes::auth::LoginGuard::new()),
         plugin_registry: RwLock::new(plugin_registry),
+        remote_catalog: RwLock::new(remote_catalog),
         event_bus,
     });
 
@@ -484,6 +451,17 @@ async fn main() -> Result<()> {
         .remote_access
         .set_cert_fingerprint(cert_fingerprint)
         .await;
+
+    // Download and load enabled WASM plugins from the remote catalog
+    let plugin_results = plugin_reload::reload_wasm_plugins(&state).await;
+    for (name, result) in &plugin_results {
+        if !result.healthy {
+            tracing::warn!(
+                "plugin {name} is unhealthy: {}",
+                result.message.as_deref().unwrap_or("unknown error")
+            );
+        }
+    }
 
     // Background pipeline: enrich → summarize → rate → analyze
     {
@@ -514,6 +492,18 @@ async fn main() -> Result<()> {
         let dl_state = state.clone();
         tokio::spawn(async move {
             run_download_processor(dl_state).await;
+        });
+    }
+
+    // Periodic remote catalog refresh (every 6 hours)
+    {
+        let catalog_state = state.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(6 * 3600)).await;
+                let entries = plugin::catalog::fetch_remote_catalog().await;
+                *catalog_state.remote_catalog.write().await = entries;
+            }
         });
     }
 

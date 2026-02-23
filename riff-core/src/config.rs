@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
@@ -18,6 +19,8 @@ pub struct Config {
     pub streaming: StreamingConfig,
     #[serde(default)]
     pub plugins: HashMap<String, PluginConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_directory: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -286,6 +289,7 @@ impl Default for Config {
             remote_access: RemoteAccessConfig::default(),
             streaming: StreamingConfig::default(),
             plugins: HashMap::new(),
+            plugin_directory: None,
         }
     }
 }
@@ -361,6 +365,15 @@ impl Config {
         raw.into_iter()
             .filter(|entry| seen.insert(entry.path.clone()))
             .collect()
+    }
+
+    pub fn plugin_directory(&self) -> PathBuf {
+        self.plugin_directory.clone().unwrap_or_else(|| {
+            dirs::config_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join("riff")
+                .join("plugins")
+        })
     }
 
     pub fn save(&self) -> anyhow::Result<()> {

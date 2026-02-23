@@ -1,9 +1,11 @@
 pub mod capabilities;
 pub mod catalog;
 pub mod events;
-pub mod qobuz;
+pub mod manifest;
 pub mod registry;
-pub mod tidal;
+pub mod wasm_host;
+pub mod wasm_loader;
+pub mod wasm_streaming;
 
 use std::collections::HashMap;
 

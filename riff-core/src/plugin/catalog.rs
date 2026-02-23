@@ -1,160 +1,78 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-use super::Capability;
-
-#[derive(Debug, Clone, Serialize)]
-pub struct PluginDefinition {
-    pub name: &'static str,
-    pub display_name: &'static str,
-    pub description: &'static str,
-    pub capabilities: Vec<Capability>,
-    pub settings: Vec<SettingField>,
+/// A plugin entry from the community registry (fetched from GitHub).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RemotePluginEntry {
+    pub name: String,
+    pub display_name: String,
+    pub description: String,
+    pub author: String,
+    pub capabilities: Vec<String>,
+    pub settings: Vec<serde_json::Value>,
+    pub wasm_url: String,
+    pub manifest_url: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct SettingField {
-    pub key: &'static str,
-    pub label: &'static str,
-    pub field_type: FieldType,
-    pub required: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub help_text: Option<&'static str>,
-}
+pub const REMOTE_CATALOG_URL: &str =
+    "https://raw.githubusercontent.com/alexmaslar/riff-plugins/master/catalog.json";
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "lowercase", tag = "type")]
-pub enum FieldType {
-    String,
-    Secret,
-    Select { options: Vec<SelectOption> },
-}
+/// Fetch the community plugin catalog from GitHub.
+/// Returns an empty vec on any failure (network, parse, etc.).
+pub async fn fetch_remote_catalog() -> Vec<RemotePluginEntry> {
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
 
-#[derive(Debug, Clone, Serialize)]
-pub struct SelectOption {
-    pub value: &'static str,
-    pub label: &'static str,
-}
+    let resp = match client.get(REMOTE_CATALOG_URL).send().await {
+        Ok(r) if r.status().is_success() => r,
+        Ok(r) => {
+            tracing::warn!("remote plugin catalog returned HTTP {}", r.status());
+            return Vec::new();
+        }
+        Err(e) => {
+            tracing::warn!("failed to fetch remote plugin catalog: {e}");
+            return Vec::new();
+        }
+    };
 
-impl SettingField {
-    pub fn is_secret(&self) -> bool {
-        matches!(self.field_type, FieldType::Secret)
+    let text = match resp.text().await {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!("failed to read remote plugin catalog body: {e}");
+            return Vec::new();
+        }
+    };
+
+    match serde_json::from_str::<Vec<RemotePluginEntry>>(&text) {
+        Ok(entries) => {
+            tracing::info!("fetched remote plugin catalog ({} entries)", entries.len());
+            entries
+        }
+        Err(e) => {
+            tracing::warn!("failed to parse remote plugin catalog: {e}");
+            Vec::new()
+        }
     }
 }
 
-pub fn plugin_catalog() -> Vec<PluginDefinition> {
-    vec![
-        PluginDefinition {
-            name: "lastfm",
-            display_name: "Last.fm",
-            description: "Scrobble tracks to Last.fm and enrich metadata with listening stats and tags.",
-            capabilities: vec![Capability::Scrobble, Capability::Metadata],
-            settings: vec![
-                SettingField {
-                    key: "api_key",
-                    label: "API Key",
-                    field_type: FieldType::Secret,
-                    required: true,
-                    help_text: Some("Create an API account at last.fm/api/account/create"),
-                },
-                SettingField {
-                    key: "api_secret",
-                    label: "API Secret",
-                    field_type: FieldType::Secret,
-                    required: true,
-                    help_text: None,
-                },
-            ],
-        },
-        PluginDefinition {
-            name: "listenbrainz",
-            display_name: "ListenBrainz",
-            description: "Scrobble tracks to ListenBrainz, the open-source listening history service.",
-            capabilities: vec![Capability::Scrobble],
-            settings: vec![SettingField {
-                key: "token",
-                label: "User Token",
-                field_type: FieldType::Secret,
-                required: true,
-                help_text: Some("Find your token at listenbrainz.org/profile"),
-            }],
-        },
-        PluginDefinition {
-            name: "genius",
-            display_name: "Genius",
-            description: "Fetch song lyrics from Genius.",
-            capabilities: vec![Capability::Lyrics],
-            settings: vec![SettingField {
-                key: "api_key",
-                label: "API Key",
-                field_type: FieldType::Secret,
-                required: true,
-                help_text: Some("Create an API client at genius.com/api-clients"),
-            }],
-        },
-        PluginDefinition {
-            name: "qobuz",
-            display_name: "Qobuz",
-            description: "Stream hi-res audio from Qobuz via SquidWTF proxy.",
-            capabilities: vec![Capability::Streaming],
-            settings: vec![
-                SettingField {
-                    key: "quality",
-                    label: "Audio Quality",
-                    field_type: FieldType::Select {
-                        options: vec![
-                            SelectOption { value: "27", label: "Hi-Res (24-bit, 192kHz)" },
-                            SelectOption { value: "7", label: "Hi-Res (24-bit, 96kHz)" },
-                            SelectOption { value: "6", label: "Lossless (16-bit, 44.1kHz)" },
-                            SelectOption { value: "5", label: "High (MP3 320kbps)" },
-                        ],
-                    },
-                    required: false,
-                    help_text: Some("Default: Lossless"),
-                },
-                SettingField {
-                    key: "country",
-                    label: "Country Code",
-                    field_type: FieldType::String,
-                    required: false,
-                    help_text: Some("Two-letter country code. Default: US"),
-                },
-            ],
-        },
-        PluginDefinition {
-            name: "tidal",
-            display_name: "Tidal",
-            description: "Stream lossless audio from Tidal via SquidWTF proxy.",
-            capabilities: vec![Capability::Streaming],
-            settings: vec![
-                SettingField {
-                    key: "quality",
-                    label: "Audio Quality",
-                    field_type: FieldType::Select {
-                        options: vec![
-                            SelectOption { value: "HI_RES_LOSSLESS", label: "Hi-Res (24-bit, up to 192kHz)" },
-                            SelectOption { value: "LOSSLESS", label: "Lossless (16-bit, 44.1kHz)" },
-                            SelectOption { value: "HIGH", label: "High (AAC 320kbps)" },
-                            SelectOption { value: "LOW", label: "Low (AAC 96kbps)" },
-                        ],
-                    },
-                    required: false,
-                    help_text: Some("Default: Lossless"),
-                },
-                SettingField {
-                    key: "instance_timeout",
-                    label: "Instance Timeout",
-                    field_type: FieldType::Select {
-                        options: vec![
-                            SelectOption { value: "3", label: "3 seconds" },
-                            SelectOption { value: "5", label: "5 seconds" },
-                            SelectOption { value: "10", label: "10 seconds" },
-                            SelectOption { value: "15", label: "15 seconds" },
-                        ],
-                    },
-                    required: false,
-                    help_text: Some("Default: 5 seconds"),
-                },
-            ],
-        },
-    ]
+impl RemotePluginEntry {
+    /// Return the keys of settings whose field_type.type is "secret".
+    pub fn secret_keys(&self) -> Vec<String> {
+        self.settings
+            .iter()
+            .filter_map(|s| {
+                let ft = s.get("field_type")?;
+                let t = ft.get("type")?.as_str()?;
+                if t == "secret" {
+                    s.get("key")?.as_str().map(|k| k.to_string())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
 }

@@ -1,7 +1,7 @@
 use axum::{extract::State, http::header, Extension, Json};
 use riff_core::auth::Claims;
 use riff_core::config::AiProvider;
-use riff_core::plugin::catalog::{plugin_catalog, FieldType};
+use riff_core::plugin::catalog::RemotePluginEntry;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -31,9 +31,10 @@ pub async fn get_config(
     State(state): State<Arc<AppState>>,
 ) -> Result<([(header::HeaderName, &'static str); 1], Json<Value>), AppError> {
     let config = state.config.read().await;
+    let remote_catalog = state.remote_catalog.read().await;
 
     // Build plugins JSON with secret masking
-    let plugins_json = build_plugins_json(&config.plugins);
+    let plugins_json = build_plugins_json(&config.plugins, &remote_catalog);
 
     Ok((
         [(header::CACHE_CONTROL, "private, max-age=3600")],
@@ -76,24 +77,16 @@ pub async fn get_config(
     ))
 }
 
-/// Build plugins JSON from config, masking secret fields using the catalog.
+/// Build plugins JSON from config, masking secret fields using the remote catalog.
 /// API format nests settings under a "settings" key (unlike the flat YAML format).
 fn build_plugins_json(
     plugins: &HashMap<String, riff_core::config::PluginConfig>,
+    remote_catalog: &[RemotePluginEntry],
 ) -> Value {
-    let catalog = plugin_catalog();
     // Build lookup: plugin_name -> set of secret field keys
-    let secret_keys: HashMap<&str, Vec<&str>> = catalog
+    let secret_keys: HashMap<&str, Vec<String>> = remote_catalog
         .iter()
-        .map(|def| {
-            let secrets: Vec<&str> = def
-                .settings
-                .iter()
-                .filter(|s| matches!(s.field_type, FieldType::Secret))
-                .map(|s| s.key)
-                .collect();
-            (def.name, secrets)
-        })
+        .map(|entry| (entry.name.as_str(), entry.secret_keys()))
         .collect();
 
     let mut result = serde_json::Map::new();
@@ -102,7 +95,7 @@ fn build_plugins_json(
         let is_secret_field = |key: &str| -> bool {
             secret_keys
                 .get(name.as_str())
-                .map(|keys| keys.contains(&key))
+                .map(|keys| keys.iter().any(|k| k == key))
                 .unwrap_or(false)
         };
         for (key, value) in &plugin_cfg.settings {
@@ -406,7 +399,16 @@ pub async fn update_config(
         });
     }
 
-    let plugins_json = build_plugins_json(&config_snapshot.plugins);
+    let remote_catalog = state.remote_catalog.read().await;
+    let plugins_json = build_plugins_json(&config_snapshot.plugins, &remote_catalog);
+    drop(remote_catalog);
+
+    // Reload plugins synchronously so we can report health in the response
+    let plugin_results = if plugins_changed {
+        Some(crate::plugin_reload::reload_wasm_plugins(&state).await)
+    } else {
+        None
+    };
 
     let response = json!({
         "restarting": https_port_changed,
@@ -444,6 +446,7 @@ pub async fn update_config(
             "ffmpeg_available": state.ffmpeg_available,
         },
         "plugins": plugins_json,
+        "plugin_health": plugin_results,
     });
 
     if any_newly_enabled {

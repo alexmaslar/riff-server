@@ -44,6 +44,16 @@ impl PluginRegistry {
         self.metadata.push(provider);
     }
 
+    /// Remove all registrations for a plugin by name.
+    /// Used for hot-reloading WASM plugins.
+    pub fn unregister_by_name(&mut self, name: &str) {
+        self.plugins.retain(|p| p.name() != name);
+        self.streaming.retain(|p| p.provider_name() != name);
+        self.lyrics.retain(|p| p.provider_name() != name);
+        self.scrobble.retain(|p| p.provider_name() != name);
+        self.metadata.retain(|p| p.provider_name() != name);
+    }
+
     // --- Accessors ---
 
     pub fn all_plugins(&self) -> &[Arc<dyn Plugin>] {
@@ -252,6 +262,25 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, "test-streaming");
         assert!(results[0].1.is_ok());
+    }
+
+    #[test]
+    fn test_unregister_by_name() {
+        let mut registry = PluginRegistry::new();
+        registry.register_base(Arc::new(TestPlugin {
+            test_name: "tidal".to_string(),
+        }));
+        registry.register_base(Arc::new(TestPlugin {
+            test_name: "qobuz".to_string(),
+        }));
+        registry.register_streaming(Arc::new(TestStreamingProvider));
+        assert_eq!(registry.all_plugins().len(), 2);
+
+        registry.unregister_by_name("tidal");
+        assert_eq!(registry.all_plugins().len(), 1);
+        assert_eq!(registry.all_plugins()[0].name(), "qobuz");
+        // streaming provider name doesn't match "tidal", so it stays
+        assert_eq!(registry.streaming_providers().len(), 1);
     }
 
     #[tokio::test]
