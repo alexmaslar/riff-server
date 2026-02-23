@@ -52,6 +52,17 @@ pub async fn record_play(
     .execute(&state.db)
     .await?;
 
+    // Increment album play count for completed plays
+    if body.completed {
+        sqlx::query(
+            "UPDATE albums SET play_count = play_count + 1
+             WHERE id = (SELECT album_id FROM tracks WHERE id = ?)",
+        )
+        .bind(&body.track_id)
+        .execute(&state.db)
+        .await?;
+    }
+
     // Emit event for plugins (scrobbling, etc.)
     if body.completed {
         if let Ok(row) = sqlx::query(
