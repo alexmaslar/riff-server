@@ -21,6 +21,7 @@ use serde_json::{json, Value};
 use socket2::{Domain, Protocol, Socket, TcpKeepalive, Type};
 use sqlx::SqlitePool;
 use std::net::SocketAddr;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -799,6 +800,76 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+async fn cleanup_cancelled_download(db: &SqlitePool, album_dir: &Path, local_album_id: Option<&str>) {
+    // Delete album directory from disk
+    if album_dir.exists() {
+        if let Err(e) = tokio::fs::remove_dir_all(album_dir).await {
+            tracing::warn!("cleanup: failed to delete {}: {e}", album_dir.display());
+        }
+    }
+    // Delete DB records if album was already scanned
+    if let Some(album_id) = local_album_id {
+        let artist: Option<(String,)> =
+            sqlx::query_as("SELECT artist_id FROM albums WHERE id = ?")
+                .bind(album_id)
+                .fetch_optional(db)
+                .await
+                .unwrap_or(None);
+
+        let track_ids: Vec<(String,)> =
+            sqlx::query_as("SELECT id FROM tracks WHERE album_id = ?")
+                .bind(album_id)
+                .fetch_all(db)
+                .await
+                .unwrap_or_default();
+
+        // Delete track-referencing rows
+        for (tid,) in &track_ids {
+            sqlx::query("DELETE FROM play_history WHERE track_id = ?")
+                .bind(tid).execute(db).await.ok();
+            sqlx::query("DELETE FROM playlist_tracks WHERE track_id = ?")
+                .bind(tid).execute(db).await.ok();
+            sqlx::query("DELETE FROM daily_mix_tracks WHERE track_id = ?")
+                .bind(tid).execute(db).await.ok();
+            sqlx::query("DELETE FROM favorites WHERE entity_type = 'track' AND entity_id = ?")
+                .bind(tid).execute(db).await.ok();
+        }
+
+        // Delete album-referencing rows (FK cascades not enforced without PRAGMA foreign_keys)
+        sqlx::query("DELETE FROM album_credits WHERE album_id = ?")
+            .bind(album_id).execute(db).await.ok();
+        sqlx::query("DELETE FROM album_recommendations WHERE album_id = ? OR recommended_album_id = ?")
+            .bind(album_id).bind(album_id).execute(db).await.ok();
+        sqlx::query("DELETE FROM favorites WHERE entity_type = 'album' AND entity_id = ?")
+            .bind(album_id).execute(db).await.ok();
+
+        sqlx::query("DELETE FROM tracks WHERE album_id = ?")
+            .bind(album_id).execute(db).await.ok();
+        sqlx::query("DELETE FROM albums WHERE id = ?")
+            .bind(album_id).execute(db).await.ok();
+
+        // Delete artist if orphaned (no remaining albums)
+        if let Some((artist_id,)) = artist {
+            let count: Option<(i64,)> =
+                sqlx::query_as("SELECT COUNT(*) FROM albums WHERE artist_id = ?")
+                    .bind(&artist_id)
+                    .fetch_optional(db)
+                    .await
+                    .unwrap_or(None);
+            if count.map(|c| c.0).unwrap_or(0) == 0 {
+                sqlx::query("DELETE FROM artist_recommendations WHERE artist_id = ? OR recommended_artist_id = ?")
+                    .bind(&artist_id).bind(&artist_id).execute(db).await.ok();
+                sqlx::query("DELETE FROM artist_top_tracks WHERE artist_id = ?")
+                    .bind(&artist_id).execute(db).await.ok();
+                sqlx::query("DELETE FROM favorites WHERE entity_type = 'artist' AND entity_id = ?")
+                    .bind(&artist_id).execute(db).await.ok();
+                sqlx::query("DELETE FROM artists WHERE id = ?")
+                    .bind(&artist_id).execute(db).await.ok();
+            }
+        }
+    }
+}
+
 async fn run_download_processor(state: Arc<AppState>) {
     loop {
         tokio::time::sleep(Duration::from_secs(10)).await;
@@ -981,6 +1052,22 @@ async fn run_download_processor(state: Arc<AppState>) {
             continue;
         }
 
+        // Check if cancelled during track downloads
+        let was_cancelled = {
+            let st: Option<(String,)> =
+                sqlx::query_as("SELECT status FROM download_queue WHERE id = ?")
+                    .bind(&dl_id)
+                    .fetch_optional(&state.db)
+                    .await
+                    .unwrap_or(None);
+            st.as_ref().map(|s| s.0.as_str()) == Some("cancelled")
+        };
+        if was_cancelled {
+            tracing::info!("download {dl_id} cancelled, cleaning up {completed} tracks on disk");
+            cleanup_cancelled_download(&state.db, &album_dir, None).await;
+            continue;
+        }
+
         // Download cover art
         if let Some(ref cover_url) = detail.album.cover_url {
             let cover_dest = album_dir.join("cover.jpg");
@@ -1107,9 +1194,31 @@ async fn run_download_processor(state: Arc<AppState>) {
             }
         }
 
-        // Mark fully completed
+        // Check if cancelled during post-processing
+        let was_cancelled = {
+            let st: Option<(String,)> =
+                sqlx::query_as("SELECT status FROM download_queue WHERE id = ?")
+                    .bind(&dl_id)
+                    .fetch_optional(&state.db)
+                    .await
+                    .unwrap_or(None);
+            st.as_ref().map(|s| s.0.as_str()) == Some("cancelled")
+        };
+        if was_cancelled {
+            tracing::info!("download {dl_id} cancelled during processing, cleaning up");
+            cleanup_cancelled_download(
+                &state.db,
+                &album_dir,
+                new_album.as_ref().map(|(id,)| id.as_str()),
+            )
+            .await;
+            continue;
+        }
+
+        // Mark fully completed (guard against race with cancellation)
         let _ = sqlx::query(
-            "UPDATE download_queue SET status = 'completed', processing_stage = 'complete', completed_at = datetime('now') WHERE id = ?"
+            "UPDATE download_queue SET status = 'completed', processing_stage = 'complete', completed_at = datetime('now') \
+             WHERE id = ? AND status != 'cancelled'"
         )
         .bind(&dl_id)
         .execute(&state.db)
