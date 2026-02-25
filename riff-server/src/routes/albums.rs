@@ -79,6 +79,7 @@ pub struct AlbumDetailResponse {
     pub similar_albums: Vec<SimilarAlbum>,
     pub source: Option<String>,
     pub summary_polished: bool,
+    pub summary_excerpt: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -328,7 +329,7 @@ pub async fn build_album_detail(
     user_id: &str,
 ) -> Result<AlbumDetailResponse, AppError> {
     let album_row = sqlx::query(
-        "SELECT a.id, a.title, a.artist_id, ar.name, a.year, a.genre, a.style, a.label, a.catalog_number, a.cover_art_path, a.summary, a.rating, a.moods, a.descriptors, a.keywords, a.metadata_status, a.added_at, a.country, a.release_notes, a.all_labels, a.is_compilation, a.play_count, a.source, a.summary_source, a.rating_sources, a.summary_polished
+        "SELECT a.id, a.title, a.artist_id, ar.name, a.year, a.genre, a.style, a.label, a.catalog_number, a.cover_art_path, a.summary, a.rating, a.moods, a.descriptors, a.keywords, a.metadata_status, a.added_at, a.country, a.release_notes, a.all_labels, a.is_compilation, a.play_count, a.source, a.summary_source, a.rating_sources, a.summary_polished, a.summary_excerpt
          FROM albums a JOIN artists ar ON a.artist_id = ar.id
          WHERE a.id = ?",
     )
@@ -441,6 +442,7 @@ pub async fn build_album_detail(
     let play_count: i64 = album_row.get(21);
     let rating_sources_str: String = album_row.get(24);
     let summary_polished_int: i32 = album_row.get(25);
+    let summary_excerpt: Option<String> = album_row.get(26);
 
     // Fetch editorial reviews for this album
     let review_rows = sqlx::query_as::<_, (String, Option<String>, String, Option<f64>, Option<i64>, Option<String>)>(
@@ -495,6 +497,7 @@ pub async fn build_album_detail(
         similar_albums,
         source: album_row.get(22),
         summary_polished: summary_polished_int != 0,
+        summary_excerpt,
         reviews,
     })
 }
@@ -1180,7 +1183,8 @@ pub async fn delete_album(
 
 #[derive(Debug, Deserialize)]
 pub struct UpdateSummaryRequest {
-    pub summary: String,
+    pub summary: Option<String>,
+    pub excerpt: Option<String>,
 }
 
 pub async fn update_summary(
@@ -1189,13 +1193,39 @@ pub async fn update_summary(
     Path(id): Path<String>,
     Json(body): Json<UpdateSummaryRequest>,
 ) -> Result<Json<Value>, AppError> {
-    let result = sqlx::query(
-        "UPDATE albums SET summary = ?, summary_polished = 1 WHERE id = ?",
-    )
-    .bind(&body.summary)
-    .bind(&id)
-    .execute(&state.db)
-    .await?;
+    let result = match (&body.summary, &body.excerpt) {
+        (Some(summary), Some(excerpt)) => {
+            sqlx::query(
+                "UPDATE albums SET summary = ?, summary_excerpt = ?, summary_polished = 1 WHERE id = ?",
+            )
+            .bind(summary)
+            .bind(excerpt)
+            .bind(&id)
+            .execute(&state.db)
+            .await?
+        }
+        (Some(summary), None) => {
+            sqlx::query(
+                "UPDATE albums SET summary = ?, summary_excerpt = NULL, summary_polished = 1 WHERE id = ?",
+            )
+            .bind(summary)
+            .bind(&id)
+            .execute(&state.db)
+            .await?
+        }
+        (None, Some(excerpt)) => {
+            sqlx::query(
+                "UPDATE albums SET summary_excerpt = ? WHERE id = ?",
+            )
+            .bind(excerpt)
+            .bind(&id)
+            .execute(&state.db)
+            .await?
+        }
+        (None, None) => {
+            return Err(AppError::BadRequest("summary or excerpt required".into()));
+        }
+    };
 
     if result.rows_affected() == 0 {
         return Err(AppError::NotFound("album not found".into()));

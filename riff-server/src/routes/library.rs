@@ -299,7 +299,7 @@ pub async fn clear_data(
             "UPDATE albums SET summary = NULL, rating = NULL, \
              moods = '[]', descriptors = '[]', keywords = '[]', \
              summary_source = NULL, rating_sources = '[]', summary_updated_at = NULL, \
-             summary_polished = 0 \
+             summary_polished = 0, summary_excerpt = NULL \
              WHERE summary IS NOT NULL OR rating IS NOT NULL OR moods != '[]'"
         )
             .execute(&state.db)
