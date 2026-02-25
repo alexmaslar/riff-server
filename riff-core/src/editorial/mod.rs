@@ -119,6 +119,14 @@ async fn enrich_album(
     let recent = is_recent_release(release_date);
     let mut reviews_added = 0u32;
 
+    // Strip parenthetical suffixes like "(Deluxe Edition)" so search queries
+    // match the canonical album title across all editorial plugins.
+    let clean_title = title
+        .rfind('(')
+        .filter(|&p| p > 0)
+        .map(|p| title[..p].trim_end())
+        .unwrap_or(title);
+
     for provider in editorial_providers {
         let source = provider.provider_name().to_string();
 
@@ -157,40 +165,40 @@ async fn enrich_album(
 
         info!(
             "editorial: querying '{}' for '{}' by '{}'",
-            source, title, artist_name
+            source, clean_title, artist_name
         );
 
         let review_data = match tokio::time::timeout(
             std::time::Duration::from_secs(15),
-            provider.get_album_reviews(title, artist_name, None),
+            provider.get_album_reviews(clean_title, artist_name, None),
         )
         .await
         {
             Ok(Ok(Some(result))) if !result.reviews.is_empty() => {
                 info!(
                     "editorial: '{}' found review for '{}' by '{}'",
-                    source, title, artist_name
+                    source, clean_title, artist_name
                 );
                 result.reviews.into_iter().next()
             }
             Ok(Ok(_)) => {
                 info!(
                     "editorial: '{}' no review found for '{}' by '{}'",
-                    source, title, artist_name
+                    source, clean_title, artist_name
                 );
                 None
             }
             Ok(Err(e)) => {
                 warn!(
                     "editorial: '{}' error for '{}' by '{}': {}",
-                    source, title, artist_name, e
+                    source, clean_title, artist_name, e
                 );
                 None
             }
             Err(_) => {
                 warn!(
                     "editorial: '{}' timed out for '{}' by '{}'",
-                    source, title, artist_name
+                    source, clean_title, artist_name
                 );
                 None
             }

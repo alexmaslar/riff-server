@@ -121,7 +121,14 @@ async fn enrich_one_album(
     year: Option<i32>,
     cover_path: Option<&str>,
 ) -> anyhow::Result<bool> {
-    let results = client.search_release(artist_name, title, year).await?;
+    // Strip trailing parenthetical suffixes like "(Deluxe Edition)" for better search results
+    let clean_title = title
+        .rfind('(')
+        .filter(|&p| p > 0)
+        .map(|p| title[..p].trim_end())
+        .unwrap_or(title);
+
+    let results = client.search_release(artist_name, clean_title, year).await?;
 
     if results.is_empty() {
         debug!(
