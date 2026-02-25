@@ -19,6 +19,7 @@ use crate::AppState;
 pub struct RecordPlayBody {
     pub track_id: String,
     pub completed: bool,
+    pub source: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -42,13 +43,16 @@ pub async fn record_play(
     let id = Uuid::new_v4().to_string();
     let completed = if body.completed { 1 } else { 0 };
 
+    let source = body.source.as_deref().unwrap_or("user");
+
     sqlx::query(
-        "INSERT INTO play_history (id, user_id, track_id, completed) VALUES (?, ?, ?, ?)",
+        "INSERT INTO play_history (id, user_id, track_id, completed, source) VALUES (?, ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(&claims.sub)
     .bind(&body.track_id)
     .bind(completed)
+    .bind(source)
     .execute(&state.db)
     .await?;
 
@@ -110,6 +114,7 @@ pub async fn recently_played_albums(
          JOIN albums a ON t.album_id = a.id
          JOIN artists ar ON a.artist_id = ar.id
          WHERE ph.user_id = ?
+         AND ph.source = 'user'
          AND a.library_id IN (SELECT value FROM json_each(?))
          GROUP BY a.id
          ORDER BY last_played DESC

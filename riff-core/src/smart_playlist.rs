@@ -650,14 +650,14 @@ async fn get_known_artists(pool: &SqlitePool) -> Result<Vec<(String, String)>> {
     Ok(rows)
 }
 
-/// Get distinct AI-extracted tags (moods, descriptors, keywords) from all albums.
+/// Get distinct tags (moods, descriptors, keywords) from all albums.
 async fn get_known_album_tags(pool: &SqlitePool) -> Result<Vec<String>> {
     let rows: Vec<(String,)> = sqlx::query_as(
-        "SELECT DISTINCT j.value FROM albums a, json_each(a.ai_moods) j WHERE j.value IS NOT NULL AND j.value != ''
+        "SELECT DISTINCT j.value FROM albums a, json_each(a.moods) j WHERE j.value IS NOT NULL AND j.value != ''
          UNION
-         SELECT DISTINCT j.value FROM albums a, json_each(a.ai_descriptors) j WHERE j.value IS NOT NULL AND j.value != ''
+         SELECT DISTINCT j.value FROM albums a, json_each(a.descriptors) j WHERE j.value IS NOT NULL AND j.value != ''
          UNION
-         SELECT DISTINCT j.value FROM albums a, json_each(a.ai_keywords) j WHERE j.value IS NOT NULL AND j.value != ''"
+         SELECT DISTINCT j.value FROM albums a, json_each(a.keywords) j WHERE j.value IS NOT NULL AND j.value != ''"
     )
     .fetch_all(pool)
     .await?;
@@ -701,8 +701,8 @@ async fn query_candidates(pool: &SqlitePool, filters: &CandidateFilters) -> Resu
                 COALESCE(t.key_analyzed, t.musical_key) as musical_key,
                 t.mood, t.format, t.track_number, t.disc_number,
                 t.sample_rate, t.bit_depth, t.composer, t.loudness_lufs,
-                a.ai_moods, a.ai_descriptors,
-                COALESCE(a.ai_rating, 5.0) as rating
+                a.moods, a.descriptors,
+                COALESCE(a.rating, 5.0) as rating
          FROM tracks t
          JOIN albums a ON t.album_id = a.id
          JOIN artists ar ON a.artist_id = ar.id
@@ -784,7 +784,7 @@ async fn query_candidates(pool: &SqlitePool, filters: &CandidateFilters) -> Resu
             sep.push_bind(m.clone());
         }
         sep.push_unseparated(")");
-        builder.push(" OR a.id IN (SELECT am.id FROM albums am, json_each(am.ai_moods) jm WHERE jm.value IN (");
+        builder.push(" OR a.id IN (SELECT am.id FROM albums am, json_each(am.moods) jm WHERE jm.value IN (");
         let mut sep = builder.separated(", ");
         for m in &filters.moods {
             sep.push_bind(m.clone());
@@ -804,8 +804,8 @@ async fn query_candidates(pool: &SqlitePool, filters: &CandidateFilters) -> Resu
         .map(|row| {
             let genre_json: String = row.get("genre");
             let genres: Vec<String> = serde_json::from_str(&genre_json).unwrap_or_default();
-            let moods_json: String = row.try_get("ai_moods").unwrap_or_default();
-            let descriptors_json: String = row.try_get("ai_descriptors").unwrap_or_default();
+            let moods_json: String = row.try_get("moods").unwrap_or_default();
+            let descriptors_json: String = row.try_get("descriptors").unwrap_or_default();
 
             CandidateRow {
                 id: row.get("id"),
@@ -849,7 +849,7 @@ async fn fetch_candidates_by_ids(pool: &SqlitePool, ids: &[String]) -> Result<Ve
                 COALESCE(t.key_analyzed, t.musical_key) as musical_key,
                 t.mood, t.format, t.track_number, t.disc_number,
                 t.sample_rate, t.bit_depth, t.composer, t.loudness_lufs,
-                a.ai_moods, a.ai_descriptors
+                a.moods, a.descriptors
          FROM tracks t
          JOIN albums a ON t.album_id = a.id
          JOIN artists ar ON a.artist_id = ar.id
@@ -869,8 +869,8 @@ async fn fetch_candidates_by_ids(pool: &SqlitePool, ids: &[String]) -> Result<Ve
         .map(|row| {
             let genre_json: String = row.get("genre");
             let genres: Vec<String> = serde_json::from_str(&genre_json).unwrap_or_default();
-            let moods_json: String = row.try_get("ai_moods").unwrap_or_default();
-            let descriptors_json: String = row.try_get("ai_descriptors").unwrap_or_default();
+            let moods_json: String = row.try_get("moods").unwrap_or_default();
+            let descriptors_json: String = row.try_get("descriptors").unwrap_or_default();
 
             CandidateRow {
                 id: row.get("id"),

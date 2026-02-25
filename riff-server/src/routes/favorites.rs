@@ -128,7 +128,7 @@ pub async fn list_favorites(
         }
         "artist" => {
             let rows = sqlx::query(
-                "SELECT ar.id, ar.name, COALESCE(ar.ai_bio, ar.bio) as bio, ar.image_url
+                "SELECT ar.id, ar.name, COALESCE(ar.editorial_bio, ar.bio) as bio, ar.image_url
                  FROM favorites f
                  JOIN artists ar ON f.entity_id = ar.id
                  WHERE f.user_id = ? AND f.entity_type = 'artist'

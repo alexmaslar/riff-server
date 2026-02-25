@@ -58,13 +58,9 @@ pub async fn get_config(
                     "model": config.metadata.ai.model,
                     "fast_model": config.metadata.ai.fast_model,
                     "base_url": config.metadata.ai.base_url,
-                    "album_summaries": config.metadata.ai.album_summaries,
-                    "album_ratings": config.metadata.ai.album_ratings,
-                    "album_recommendations": config.metadata.ai.album_recommendations,
-                    "artist_bios": config.metadata.ai.artist_bios,
-                    "artist_recommendations": config.metadata.ai.artist_recommendations,
                     "playlist_generation": config.metadata.ai.playlist_generation,
                 },
+                "lastfm_api_key": config.metadata.lastfm_api_key.as_deref().map(mask_secret),
                 "discogs_api_key": config.metadata.discogs_api_key.as_deref().map(mask_secret),
             },
             "streaming": {
@@ -156,6 +152,7 @@ pub struct LibraryUpdate {
 pub struct MetadataUpdate {
     pub enrichment: Option<EnrichmentUpdate>,
     pub ai: Option<AiUpdate>,
+    pub lastfm_api_key: Option<String>,
     pub discogs_api_key: Option<String>,
 }
 
@@ -173,11 +170,6 @@ pub struct AiUpdate {
     pub model: Option<String>,
     pub fast_model: Option<String>,
     pub base_url: Option<Option<String>>,
-    pub album_summaries: Option<bool>,
-    pub album_ratings: Option<bool>,
-    pub album_recommendations: Option<bool>,
-    pub artist_bios: Option<bool>,
-    pub artist_recommendations: Option<bool>,
     pub playlist_generation: Option<bool>,
 }
 
@@ -193,11 +185,6 @@ pub async fn update_config(
 
         // Snapshot AI flags before mutations
         let old_ai_enabled = config.metadata.ai.enabled;
-        let old_album_summaries = config.metadata.ai.album_summaries;
-        let old_album_ratings = config.metadata.ai.album_ratings;
-        let old_album_recommendations = config.metadata.ai.album_recommendations;
-        let old_artist_bios = config.metadata.ai.artist_bios;
-        let old_artist_recommendations = config.metadata.ai.artist_recommendations;
 
         // Snapshot Discogs key before mutations
         let old_discogs_key = config.metadata.discogs_api_key.clone();
@@ -231,6 +218,9 @@ pub async fn update_config(
                 }
             }
 
+            if let Some(key) = meta.lastfm_api_key {
+                config.metadata.lastfm_api_key = if key.is_empty() { None } else { Some(key) };
+            }
             if let Some(key) = meta.discogs_api_key {
                 config.metadata.discogs_api_key = if key.is_empty() { None } else { Some(key) };
             }
@@ -257,21 +247,6 @@ pub async fn update_config(
                 }
                 if let Some(base_url) = ai.base_url {
                     config.metadata.ai.base_url = base_url.filter(|s| !s.is_empty());
-                }
-                if let Some(v) = ai.album_summaries {
-                    config.metadata.ai.album_summaries = v;
-                }
-                if let Some(v) = ai.album_ratings {
-                    config.metadata.ai.album_ratings = v;
-                }
-                if let Some(v) = ai.album_recommendations {
-                    config.metadata.ai.album_recommendations = v;
-                }
-                if let Some(v) = ai.artist_bios {
-                    config.metadata.ai.artist_bios = v;
-                }
-                if let Some(v) = ai.artist_recommendations {
-                    config.metadata.ai.artist_recommendations = v;
                 }
                 if let Some(v) = ai.playlist_generation {
                     config.metadata.ai.playlist_generation = v;
@@ -329,23 +304,10 @@ pub async fn update_config(
             _ => false,
         };
 
-        let any_newly_enabled =
-            (!old_ai_enabled && config.metadata.ai.enabled) ||
-            (!old_album_summaries && config.metadata.ai.album_summaries) ||
-            (!old_album_ratings && config.metadata.ai.album_ratings) ||
-            (!old_album_recommendations && config.metadata.ai.album_recommendations) ||
-            (!old_artist_bios && config.metadata.ai.artist_bios) ||
-            (!old_artist_recommendations && config.metadata.ai.artist_recommendations);
+        let any_newly_enabled = !old_ai_enabled && config.metadata.ai.enabled;
 
         if any_newly_enabled {
-            let mut enabled = Vec::new();
-            if !old_ai_enabled && config.metadata.ai.enabled { enabled.push("AI"); }
-            if !old_album_summaries && config.metadata.ai.album_summaries { enabled.push("album summaries"); }
-            if !old_album_ratings && config.metadata.ai.album_ratings { enabled.push("album ratings"); }
-            if !old_album_recommendations && config.metadata.ai.album_recommendations { enabled.push("album recommendations"); }
-            if !old_artist_bios && config.metadata.ai.artist_bios { enabled.push("artist bios"); }
-            if !old_artist_recommendations && config.metadata.ai.artist_recommendations { enabled.push("artist recommendations"); }
-            tracing::info!("AI features enabled: {}, starting generation", enabled.join(", "));
+            tracing::info!("AI features enabled");
         }
 
         let snapshot = config.clone();
@@ -436,13 +398,9 @@ pub async fn update_config(
                 "model": config_snapshot.metadata.ai.model,
                 "fast_model": config_snapshot.metadata.ai.fast_model,
                 "base_url": config_snapshot.metadata.ai.base_url,
-                "album_summaries": config_snapshot.metadata.ai.album_summaries,
-                "album_ratings": config_snapshot.metadata.ai.album_ratings,
-                "album_recommendations": config_snapshot.metadata.ai.album_recommendations,
-                "artist_bios": config_snapshot.metadata.ai.artist_bios,
-                "artist_recommendations": config_snapshot.metadata.ai.artist_recommendations,
                 "playlist_generation": config_snapshot.metadata.ai.playlist_generation,
             },
+            "lastfm_api_key": config_snapshot.metadata.lastfm_api_key.as_deref().map(mask_secret),
             "discogs_api_key": config_snapshot.metadata.discogs_api_key.as_deref().map(mask_secret),
         },
         "streaming": {
@@ -454,12 +412,8 @@ pub async fn update_config(
         "plugin_health": plugin_results,
     });
 
-    if any_newly_enabled {
-        let spawn_state = state.clone();
-        tokio::spawn(async move {
-            super::library::maybe_spawn_summarization(&spawn_state).await;
-        });
-    }
+    // AI was enabled — no automatic content generation since editorial enrichment is used instead
+    let _ = any_newly_enabled;
 
     if discogs_key_changed {
         if let Some(ref api_key) = config_snapshot.metadata.discogs_api_key {

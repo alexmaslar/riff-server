@@ -85,7 +85,7 @@ pub async fn get_autoqueue(
                     t.duration_seconds, t.bpm_analyzed, t.bpm_tag,
                     t.key_analyzed, t.loudness_lufs,
                     t.bliss_features, t.mood,
-                    COALESCE(a.ai_rating, 5.0) as rating,
+                    COALESCE(a.rating, 5.0) as rating,
                     a.play_count, a.is_compilation
              FROM tracks t
              JOIN albums a ON t.album_id = a.id
@@ -108,7 +108,7 @@ pub async fn get_autoqueue(
                     t.duration_seconds, t.bpm_analyzed, t.bpm_tag,
                     t.key_analyzed, t.loudness_lufs,
                     t.bliss_features, t.mood,
-                    COALESCE(a.ai_rating, 5.0) as rating,
+                    COALESCE(a.rating, 5.0) as rating,
                     a.play_count, a.is_compilation
              FROM tracks t
              JOIN albums a ON t.album_id = a.id

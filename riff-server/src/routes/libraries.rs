@@ -18,9 +18,7 @@ pub async fn list_libraries(
 ) -> Result<Json<Value>, AppError> {
     let rows = sqlx::query(
         "SELECT l.id, l.name, l.path, l.isolated, l.display_order,
-                l.auto_enrich, l.album_summaries, l.album_ratings,
-                l.album_recommendations, l.artist_bios, l.artist_recommendations,
-                l.scan_interval,
+                l.auto_enrich, l.scan_interval,
                 (SELECT COUNT(*) FROM albums WHERE library_id = l.id) as album_count,
                 (SELECT COUNT(*) FROM tracks WHERE library_id = l.id) as track_count
          FROM libraries l
@@ -40,11 +38,6 @@ pub async fn list_libraries(
                 "albumCount": row.get::<i64, _>("album_count"),
                 "trackCount": row.get::<i64, _>("track_count"),
                 "autoEnrich": row.get::<Option<bool>, _>("auto_enrich"),
-                "albumSummaries": row.get::<Option<bool>, _>("album_summaries"),
-                "albumRatings": row.get::<Option<bool>, _>("album_ratings"),
-                "albumRecommendations": row.get::<Option<bool>, _>("album_recommendations"),
-                "artistBios": row.get::<Option<bool>, _>("artist_bios"),
-                "artistRecommendations": row.get::<Option<bool>, _>("artist_recommendations"),
                 "scanInterval": row.get::<Option<i64>, _>("scan_interval"),
             })
         })
@@ -83,12 +76,6 @@ pub async fn add_library(
             path: body.path.clone(),
             isolated: body.isolated,
             auto_enrich: None,
-            album_summaries: None,
-            album_ratings: None,
-            album_recommendations: None,
-            artist_bios: None,
-            artist_recommendations: None,
-            album_tags: None,
             scan_interval: None,
         });
         config.save().map_err(|e| AppError::Internal(e.to_string()))?;
@@ -147,16 +134,6 @@ pub struct UpdateLibraryBody {
     pub isolated: Option<bool>,
     #[serde(default, deserialize_with = "deserialize_optional_nullable")]
     pub auto_enrich: Option<Option<bool>>,
-    #[serde(default, deserialize_with = "deserialize_optional_nullable")]
-    pub album_summaries: Option<Option<bool>>,
-    #[serde(default, deserialize_with = "deserialize_optional_nullable")]
-    pub album_ratings: Option<Option<bool>>,
-    #[serde(default, deserialize_with = "deserialize_optional_nullable")]
-    pub album_recommendations: Option<Option<bool>>,
-    #[serde(default, deserialize_with = "deserialize_optional_nullable")]
-    pub artist_bios: Option<Option<bool>>,
-    #[serde(default, deserialize_with = "deserialize_optional_nullable")]
-    pub artist_recommendations: Option<Option<bool>>,
     #[serde(default, deserialize_with = "deserialize_optional_nullable_u64")]
     pub scan_interval: Option<Option<u64>>,
 }
@@ -190,12 +167,6 @@ pub async fn update_library(
                     path: legacy_path,
                     isolated: false,
                     auto_enrich: None,
-                    album_summaries: None,
-                    album_ratings: None,
-                    album_recommendations: None,
-                    artist_bios: None,
-                    artist_recommendations: None,
-                    album_tags: None,
                     scan_interval: None,
                 });
             }
@@ -212,21 +183,6 @@ pub async fn update_library(
             }
             if let Some(v) = body.auto_enrich {
                 entry.auto_enrich = v;
-            }
-            if let Some(v) = body.album_summaries {
-                entry.album_summaries = v;
-            }
-            if let Some(v) = body.album_ratings {
-                entry.album_ratings = v;
-            }
-            if let Some(v) = body.album_recommendations {
-                entry.album_recommendations = v;
-            }
-            if let Some(v) = body.artist_bios {
-                entry.artist_bios = v;
-            }
-            if let Some(v) = body.artist_recommendations {
-                entry.artist_recommendations = v;
             }
             if let Some(v) = body.scan_interval {
                 entry.scan_interval = v;
@@ -291,12 +247,6 @@ pub async fn remove_library(
                     path: legacy_path,
                     isolated: false,
                     auto_enrich: None,
-                    album_summaries: None,
-                    album_ratings: None,
-                    album_recommendations: None,
-                    artist_bios: None,
-                    artist_recommendations: None,
-                    album_tags: None,
                     scan_interval: None,
                 });
             }

@@ -71,21 +71,13 @@ pub async fn sync_libraries(pool: &SqlitePool, libraries: &[LibraryEntry]) -> an
             // Update name/isolated/display_order and per-library config if changed
             sqlx::query(
                 "UPDATE libraries SET name = ?, isolated = ?, display_order = ?, \
-                 auto_enrich = ?, album_summaries = ?, album_ratings = ?, \
-                 album_recommendations = ?, artist_bios = ?, artist_recommendations = ?, \
-                 album_tags = ?, scan_interval = ? \
+                 auto_enrich = ?, scan_interval = ? \
                  WHERE id = ?",
             )
             .bind(&entry.name)
             .bind(entry.isolated)
             .bind(i as i64)
             .bind(entry.auto_enrich)
-            .bind(entry.album_summaries)
-            .bind(entry.album_ratings)
-            .bind(entry.album_recommendations)
-            .bind(entry.artist_bios)
-            .bind(entry.artist_recommendations)
-            .bind(entry.album_tags)
             .bind(entry.scan_interval.map(|v| v as i64))
             .bind(db_id)
             .execute(pool)
@@ -95,10 +87,8 @@ pub async fn sync_libraries(pool: &SqlitePool, libraries: &[LibraryEntry]) -> an
             let id = Uuid::new_v4().to_string();
             sqlx::query(
                 "INSERT INTO libraries (id, name, path, isolated, display_order, \
-                 auto_enrich, album_summaries, album_ratings, \
-                 album_recommendations, artist_bios, artist_recommendations, \
-                 album_tags, scan_interval) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                 auto_enrich, scan_interval) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&id)
             .bind(&entry.name)
@@ -106,12 +96,6 @@ pub async fn sync_libraries(pool: &SqlitePool, libraries: &[LibraryEntry]) -> an
             .bind(entry.isolated)
             .bind(i as i64)
             .bind(entry.auto_enrich)
-            .bind(entry.album_summaries)
-            .bind(entry.album_ratings)
-            .bind(entry.album_recommendations)
-            .bind(entry.artist_bios)
-            .bind(entry.artist_recommendations)
-            .bind(entry.album_tags)
             .bind(entry.scan_interval.map(|v| v as i64))
             .execute(pool)
             .await?;

@@ -1,0 +1,2 @@
+ALTER TABLE albums ADD COLUMN summary_polished INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE artists ADD COLUMN editorial_bio_polished INTEGER NOT NULL DEFAULT 0;

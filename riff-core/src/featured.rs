@@ -23,8 +23,8 @@ async fn score_albums(pool: &SqlitePool, user_id: &str, library_ids_json: &str) 
     let rows = sqlx::query(
         "SELECT
             a.id,
-            a.ai_rating,
-            a.ai_summary IS NOT NULL AS has_summary,
+            a.rating,
+            a.summary IS NOT NULL AS has_summary,
             a.cover_art_path IS NOT NULL AS has_cover,
             a.is_compilation,
             julianday('now') - julianday(a.added_at) AS days_since_added,
@@ -64,7 +64,7 @@ async fn score_albums(pool: &SqlitePool, user_id: &str, library_ids_json: &str) 
         .iter()
         .map(|row| {
             let id: String = row.get("id");
-            let ai_rating: Option<f64> = row.get("ai_rating");
+            let album_rating: Option<f64> = row.get("rating");
             let has_summary: bool = row.get("has_summary");
             let has_cover: bool = row.get("has_cover");
             let is_compilation: bool = row.get("is_compilation");
@@ -74,7 +74,7 @@ async fn score_albums(pool: &SqlitePool, user_id: &str, library_ids_json: &str) 
             let skip_rate: f64 = row.get("skip_rate");
             let days_since_last_play: f64 = row.get("days_since_last_play");
 
-            let mut score = ai_rating.unwrap_or(SCORE_DEFAULT_RATING);
+            let mut score = album_rating.unwrap_or(SCORE_DEFAULT_RATING);
 
             if is_favorited != 0 {
                 score += SCORE_FAVORITE;
@@ -133,7 +133,7 @@ async fn score_artists(pool: &SqlitePool, user_id: &str, library_ids_json: &str)
     let rows = sqlx::query(
         "SELECT
             ar.id,
-            ar.ai_bio IS NOT NULL OR ar.bio IS NOT NULL AS has_bio,
+            ar.editorial_bio IS NOT NULL OR ar.bio IS NOT NULL AS has_bio,
             ar.image_url IS NOT NULL AS has_image,
             COUNT(DISTINCT a.id) AS album_count,
             MIN(julianday('now') - julianday(a.added_at)) AS min_days_since_added,

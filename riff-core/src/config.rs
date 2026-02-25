@@ -49,18 +49,6 @@ pub struct LibraryEntry {
     /// Per-library overrides (None = follow global setting)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_enrich: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub album_summaries: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub album_ratings: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub album_recommendations: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub artist_bios: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub artist_recommendations: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub album_tags: Option<bool>,
     /// Per-library scan interval in seconds (None = use global default)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scan_interval: Option<u64>,
@@ -94,6 +82,9 @@ pub struct MetadataConfig {
     pub enrichment: EnrichmentConfig,
     #[serde(default)]
     pub ai: AiConfig,
+    /// Optional Last.fm API key for editorial content (album summaries, artist bios, tags).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lastfm_api_key: Option<String>,
     /// Optional Discogs personal access token for artist images.
     /// If not set, Deezer is used as the sole image source.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -122,18 +113,6 @@ pub struct AiConfig {
     pub fast_model: Option<String>,
     #[serde(default)]
     pub base_url: Option<String>,
-    #[serde(default = "default_true")]
-    pub album_summaries: bool,
-    #[serde(default = "default_true")]
-    pub album_ratings: bool,
-    #[serde(default = "default_true")]
-    pub album_recommendations: bool,
-    #[serde(default = "default_true")]
-    pub artist_bios: bool,
-    #[serde(default = "default_true")]
-    pub artist_recommendations: bool,
-    #[serde(default = "default_true")]
-    pub album_tags: bool,
     #[serde(default = "default_true")]
     pub playlist_generation: bool,
 }
@@ -222,12 +201,6 @@ impl Default for AiConfig {
             model: None,
             fast_model: None,
             base_url: None,
-            album_summaries: true,
-            album_ratings: true,
-            album_recommendations: true,
-            artist_bios: true,
-            artist_recommendations: true,
-            album_tags: true,
             playlist_generation: true,
         }
     }
@@ -238,6 +211,7 @@ impl Default for MetadataConfig {
         Self {
             enrichment: EnrichmentConfig::default(),
             ai: AiConfig::default(),
+            lastfm_api_key: None,
             discogs_api_key: None,
         }
     }
@@ -357,12 +331,6 @@ impl Config {
                 path: path.clone(),
                 isolated: false,
                 auto_enrich: None,
-                album_summaries: None,
-                album_ratings: None,
-                album_recommendations: None,
-                artist_bios: None,
-                artist_recommendations: None,
-                album_tags: None,
                 scan_interval: None,
             }]
         } else {
@@ -435,11 +403,6 @@ mod tests {
         let config = AiConfig::default();
         assert!(!config.enabled);
         assert!(config.api_key.is_none());
-        assert!(config.album_summaries);
-        assert!(config.album_ratings);
-        assert!(config.album_recommendations);
-        assert!(config.artist_bios);
-        assert!(config.artist_recommendations);
         assert!(config.playlist_generation);
     }
 

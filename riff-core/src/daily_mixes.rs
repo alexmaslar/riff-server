@@ -330,9 +330,9 @@ async fn generate_artist_mix(
             "SELECT ar.id, ar.name
              FROM artists ar
              JOIN albums a ON a.artist_id = ar.id
-             WHERE a.ai_rating IS NOT NULL
+             WHERE a.rating IS NOT NULL
                AND ar.library_id IN (SELECT value FROM json_each(?))
-             ORDER BY a.ai_rating DESC
+             ORDER BY a.rating DESC
              LIMIT 20",
         )
         .bind(library_ids_json)
@@ -395,8 +395,8 @@ async fn build_artist_mix(
                     t.duration_seconds, t.bpm_analyzed, t.bpm_tag,
                     t.key_analyzed, t.loudness_lufs,
                     t.bliss_features, t.mood,
-                    COALESCE(a.ai_rating, 5.0) as rating,
-                    a.play_count, a.is_compilation, a.ai_moods
+                    COALESCE(a.rating, 5.0) as rating,
+                    a.play_count, a.is_compilation, a.moods
              FROM tracks t
              JOIN albums a ON t.album_id = a.id
              JOIN artists ar ON a.artist_id = ar.id
@@ -418,8 +418,8 @@ async fn build_artist_mix(
                     t.duration_seconds, t.bpm_analyzed, t.bpm_tag,
                     t.key_analyzed, t.loudness_lufs,
                     t.bliss_features, t.mood,
-                    COALESCE(a.ai_rating, 5.0) as rating,
-                    a.play_count, a.is_compilation, a.ai_moods
+                    COALESCE(a.rating, 5.0) as rating,
+                    a.play_count, a.is_compilation, a.moods
              FROM tracks t
              JOIN albums a ON t.album_id = a.id
              JOIN artists ar ON a.artist_id = ar.id
@@ -545,8 +545,8 @@ async fn generate_genre_mix(
                 t.duration_seconds, t.bpm_analyzed, t.bpm_tag,
                 t.key_analyzed, t.loudness_lufs,
                 t.bliss_features, t.mood,
-                COALESCE(a.ai_rating, 5.0) as rating,
-                a.play_count, a.is_compilation, a.ai_moods
+                COALESCE(a.rating, 5.0) as rating,
+                a.play_count, a.is_compilation, a.moods
          FROM tracks t
          JOIN albums a ON t.album_id = a.id
          JOIN artists ar ON a.artist_id = ar.id
@@ -611,18 +611,18 @@ async fn generate_deep_cuts_mix(
                 t.duration_seconds, t.bpm_analyzed, t.bpm_tag,
                 t.key_analyzed, t.loudness_lufs,
                 t.bliss_features, t.mood,
-                COALESCE(a.ai_rating, 5.0) as rating,
-                a.play_count, a.is_compilation, a.ai_moods
+                COALESCE(a.rating, 5.0) as rating,
+                a.play_count, a.is_compilation, a.moods
          FROM tracks t
          JOIN albums a ON t.album_id = a.id
          JOIN artists ar ON a.artist_id = ar.id
          WHERE t.id NOT IN (
              SELECT track_id FROM play_history WHERE user_id = ?
          )
-         AND a.ai_rating IS NOT NULL
-         AND a.ai_rating >= 6.0
+         AND a.rating IS NOT NULL
+         AND a.rating >= 6.0
          AND t.library_id IN (SELECT value FROM json_each(?))
-         ORDER BY a.ai_rating DESC, RANDOM()
+         ORDER BY a.rating DESC, RANDOM()
          LIMIT 200",
     )
     .bind(user_id)
@@ -639,14 +639,14 @@ async fn generate_deep_cuts_mix(
                     t.duration_seconds, t.bpm_analyzed, t.bpm_tag,
                     t.key_analyzed, t.loudness_lufs,
                     t.bliss_features, t.mood,
-                    COALESCE(a.ai_rating, 5.0) as rating,
-                    a.play_count, a.is_compilation, a.ai_moods
+                    COALESCE(a.rating, 5.0) as rating,
+                    a.play_count, a.is_compilation, a.moods
              FROM tracks t
              JOIN albums a ON t.album_id = a.id
              JOIN artists ar ON a.artist_id = ar.id
              WHERE a.play_count <= 1
                AND t.library_id IN (SELECT value FROM json_each(?))
-             ORDER BY COALESCE(a.ai_rating, 5.0) DESC, RANDOM()
+             ORDER BY COALESCE(a.rating, 5.0) DESC, RANDOM()
              LIMIT 200",
         )
         .bind(library_ids_json)
@@ -762,8 +762,8 @@ async fn generate_decade_mix(
                 t.duration_seconds, t.bpm_analyzed, t.bpm_tag,
                 t.key_analyzed, t.loudness_lufs,
                 t.bliss_features, t.mood,
-                COALESCE(a.ai_rating, 5.0) as rating,
-                a.play_count, a.is_compilation, a.ai_moods
+                COALESCE(a.rating, 5.0) as rating,
+                a.play_count, a.is_compilation, a.moods
          FROM tracks t
          JOIN albums a ON t.album_id = a.id
          JOIN artists ar ON a.artist_id = ar.id
@@ -951,14 +951,14 @@ pub async fn score_and_select(
             let bliss = parse_bliss(row);
             let duration_seconds: Option<i32> = row.try_get("duration_seconds").ok().flatten();
             let mood: Option<String> = row.try_get("mood").ok().flatten();
-            let album_moods_json: String = row.try_get("ai_moods").unwrap_or_default();
+            let album_moods_json: String = row.try_get("moods").unwrap_or_default();
             let album_moods: Vec<String> = serde_json::from_str(&album_moods_json).unwrap_or_default();
             let is_compilation: bool = row.try_get::<i32, _>("is_compilation")
                 .ok()
                 .map(|v| v != 0)
                 .unwrap_or(false);
 
-            // Base score from AI rating (0-10)
+            // Base score from rating (0-10)
             let mut score = rating;
 
             // Favorites bonuses

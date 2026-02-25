@@ -58,11 +58,14 @@ pub struct AlbumDetailResponse {
     pub label: Option<String>,
     pub catalog_number: Option<String>,
     pub cover_art_path: Option<String>,
-    pub ai_summary: Option<String>,
-    pub ai_rating: Option<f64>,
-    pub ai_moods: Vec<String>,
-    pub ai_descriptors: Vec<String>,
-    pub ai_keywords: Vec<String>,
+    pub summary: Option<String>,
+    pub summary_source: Option<String>,
+    pub rating: Option<f64>,
+    pub rating_sources: Vec<serde_json::Value>,
+    pub moods: Vec<String>,
+    pub descriptors: Vec<String>,
+    pub keywords: Vec<String>,
+    pub reviews: Vec<EditorialReview>,
     pub metadata_status: String,
     pub added_at: String,
     pub country: Option<String>,
@@ -75,6 +78,7 @@ pub struct AlbumDetailResponse {
     pub is_favorited: bool,
     pub similar_albums: Vec<SimilarAlbum>,
     pub source: Option<String>,
+    pub summary_polished: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -86,6 +90,16 @@ pub struct SimilarAlbum {
     pub cover_art_path: Option<String>,
     pub reason: String,
     pub play_count: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EditorialReview {
+    pub source: String,
+    pub source_url: Option<String>,
+    pub text: String,
+    pub rating: Option<f64>,
+    pub rating_count: Option<i64>,
+    pub license: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -314,7 +328,7 @@ pub async fn build_album_detail(
     user_id: &str,
 ) -> Result<AlbumDetailResponse, AppError> {
     let album_row = sqlx::query(
-        "SELECT a.id, a.title, a.artist_id, ar.name, a.year, a.genre, a.style, a.label, a.catalog_number, a.cover_art_path, a.ai_summary, a.ai_rating, a.ai_moods, a.ai_descriptors, a.ai_keywords, a.metadata_status, a.added_at, a.country, a.release_notes, a.all_labels, a.is_compilation, a.play_count, a.source
+        "SELECT a.id, a.title, a.artist_id, ar.name, a.year, a.genre, a.style, a.label, a.catalog_number, a.cover_art_path, a.summary, a.rating, a.moods, a.descriptors, a.keywords, a.metadata_status, a.added_at, a.country, a.release_notes, a.all_labels, a.is_compilation, a.play_count, a.source, a.summary_source, a.rating_sources, a.summary_polished
          FROM albums a JOIN artists ar ON a.artist_id = ar.id
          WHERE a.id = ?",
     )
@@ -419,12 +433,36 @@ pub async fn build_album_detail(
 
     let genre_str: String = album_row.get(5);
     let style_str: String = album_row.get(6);
-    let ai_moods_str: String = album_row.get(12);
-    let ai_descriptors_str: String = album_row.get(13);
-    let ai_keywords_str: String = album_row.get(14);
+    let moods_str: String = album_row.get(12);
+    let descriptors_str: String = album_row.get(13);
+    let keywords_str: String = album_row.get(14);
     let all_labels_str: String = album_row.get(19);
     let is_compilation_int: i32 = album_row.get(20);
     let play_count: i64 = album_row.get(21);
+    let rating_sources_str: String = album_row.get(24);
+    let summary_polished_int: i32 = album_row.get(25);
+
+    // Fetch editorial reviews for this album
+    let review_rows = sqlx::query_as::<_, (String, Option<String>, String, Option<f64>, Option<i64>, Option<String>)>(
+        "SELECT source, source_url, text, rating, rating_count, license \
+         FROM editorial_reviews WHERE entity_type = 'album' AND entity_id = ? \
+         ORDER BY created_at DESC"
+    )
+    .bind(album_id)
+    .fetch_all(db)
+    .await?;
+
+    let reviews: Vec<EditorialReview> = review_rows
+        .into_iter()
+        .map(|(source, source_url, text, rating, rating_count, license)| EditorialReview {
+            source,
+            source_url,
+            text,
+            rating,
+            rating_count,
+            license,
+        })
+        .collect();
 
     Ok(AlbumDetailResponse {
         id: album_row.get(0),
@@ -437,11 +475,13 @@ pub async fn build_album_detail(
         label: album_row.get(7),
         catalog_number: album_row.get(8),
         cover_art_path: album_row.get(9),
-        ai_summary: album_row.get(10),
-        ai_rating: album_row.get(11),
-        ai_moods: serde_json::from_str(&ai_moods_str).unwrap_or_default(),
-        ai_descriptors: serde_json::from_str(&ai_descriptors_str).unwrap_or_default(),
-        ai_keywords: serde_json::from_str(&ai_keywords_str).unwrap_or_default(),
+        summary: album_row.get(10),
+        summary_source: album_row.get(23),
+        rating: album_row.get(11),
+        rating_sources: serde_json::from_str(&rating_sources_str).unwrap_or_default(),
+        moods: serde_json::from_str(&moods_str).unwrap_or_default(),
+        descriptors: serde_json::from_str(&descriptors_str).unwrap_or_default(),
+        keywords: serde_json::from_str(&keywords_str).unwrap_or_default(),
         metadata_status: album_row.get(15),
         added_at: album_row.get(16),
         country: album_row.get(17),
@@ -454,6 +494,8 @@ pub async fn build_album_detail(
         is_favorited,
         similar_albums,
         source: album_row.get(22),
+        summary_polished: summary_polished_int != 0,
+        reviews,
     })
 }
 
@@ -1134,6 +1176,32 @@ pub async fn delete_album(
     }
 
     Ok(Json(json!({"ok": true})))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateSummaryRequest {
+    pub summary: String,
+}
+
+pub async fn update_summary(
+    State(state): State<Arc<AppState>>,
+    Extension(_claims): Extension<Claims>,
+    Path(id): Path<String>,
+    Json(body): Json<UpdateSummaryRequest>,
+) -> Result<Json<Value>, AppError> {
+    let result = sqlx::query(
+        "UPDATE albums SET summary = ?, summary_polished = 1 WHERE id = ?",
+    )
+    .bind(&body.summary)
+    .bind(&id)
+    .execute(&state.db)
+    .await?;
+
+    if result.rows_affected() == 0 {
+        return Err(AppError::NotFound("album not found".into()));
+    }
+
+    Ok(Json(json!({ "success": true })))
 }
 
 pub async fn increment_play_count(

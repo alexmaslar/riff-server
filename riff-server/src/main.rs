@@ -16,7 +16,7 @@ use axum::{
     BoxError, Json, Router,
 };
 use riff_core::plugin::catalog::RemotePluginEntry;
-use riff_core::{ai, analysis, auth, config::Config, daily_mixes, db, musicbrainz, plugin, scanner::{self, metadata::{detect_library_convention, build_album_dir, build_track_filename, write_flac_tags}}};
+use riff_core::{analysis, auth, config::Config, daily_mixes, db, musicbrainz, plugin, scanner::{self, metadata::{detect_library_convention, build_album_dir, build_track_filename, write_flac_tags}}};
 use serde_json::{json, Value};
 use socket2::{Domain, Protocol, Socket, TcpKeepalive, Type};
 use sqlx::SqlitePool;
@@ -38,12 +38,9 @@ pub struct AppState {
     pub config: RwLock<Config>,
     pub jwt_secret: String,
     pub enrichment_running: AtomicBool,
+    pub editorial_running: AtomicBool,
     pub analysis_running: AtomicBool,
-    pub summarization_running: AtomicBool,
-    pub rating_running: AtomicBool,
-    pub tag_extraction_running: AtomicBool,
     pub recommendation_running: AtomicBool,
-    pub artist_bio_running: AtomicBool,
     pub artist_recommendation_running: AtomicBool,
     pub top_tracks_running: AtomicBool,
     pub scan_running: AtomicBool,
@@ -75,72 +72,45 @@ async fn run_background_pipeline(state: Arc<AppState>) {
         }
     }
 
-    // Step 2: AI tasks (if AI configured, gated per-task)
+    // Step 1b: Editorial enrichment (Last.fm, Wikipedia, CritiqueBrainz, Discogs)
     {
         let config = state.config.read().await;
-        if config.metadata.ai.enabled {
-            let ai_config = config.metadata.ai.clone();
-            drop(config);
-
-            let db = state.db.clone();
-
-            if ai_config.album_summaries {
-                run_stage(&state.summarization_running, "summarization", {
-                    let ai_config = ai_config.clone();
-                    let db = db.clone();
-                    async move { ai::summarize_library(&db, &ai_config).await }
-                })
-                .await;
-            }
-
-            if ai_config.album_ratings {
-                run_stage(&state.rating_running, "rating", {
-                    let ai_config = ai_config.clone();
-                    let db = db.clone();
-                    async move { ai::rate_library(&db, &ai_config).await }
-                })
-                .await;
-            }
-
-            if ai_config.album_tags {
-                run_stage(&state.tag_extraction_running, "tag extraction", {
-                    let ai_config = ai_config.clone();
-                    let db = db.clone();
-                    async move { ai::extract_tags_library(&db, &ai_config).await }
-                })
-                .await;
-            }
-
-            if ai_config.album_recommendations {
-                run_stage(&state.recommendation_running, "recommendations", {
-                    let ai_config = ai_config.clone();
-                    let db = db.clone();
-                    async move { ai::recommend_library(&db, &ai_config).await }
-                })
-                .await;
-            }
-
-            if ai_config.artist_recommendations {
-                run_stage(&state.artist_recommendation_running, "artist recommendations", {
-                    let ai_config = ai_config.clone();
-                    let db = db.clone();
-                    async move { ai::recommend_artists(&db, &ai_config).await }
-                })
-                .await;
-            }
-
-            if ai_config.artist_bios {
-                run_stage(&state.artist_bio_running, "artist bios", {
-                    let ai_config = ai_config.clone();
-                    let db = db.clone();
-                    async move { ai::bio_artists(&db, &ai_config).await }
-                })
-                .await;
-            }
-        }
+        let metadata_config = config.metadata.clone();
+        drop(config);
+        let db = state.db.clone();
+        run_stage(&state.editorial_running, "editorial enrichment", async move {
+            riff_core::editorial::enrich_library_editorial(&db, &metadata_config).await
+        })
+        .await;
     }
 
-    // Step 3a: Discogs artist images (if API key configured)
+    // Step 2: Album recommendations (metadata-based, always run)
+    run_stage(
+        &state.recommendation_running,
+        "recommendations",
+        {
+            let db = state.db.clone();
+            async move {
+                riff_core::recommendations::generate_recommendations(&db).await
+            }
+        },
+    )
+    .await;
+
+    // Step 2a: Artist recommendations (metadata-based, always run)
+    run_stage(
+        &state.artist_recommendation_running,
+        "artist recommendations",
+        {
+            let db = state.db.clone();
+            async move {
+                riff_core::recommendations::generate_artist_recommendations(&db).await
+            }
+        },
+    )
+    .await;
+
+    // Step 2b: Discogs artist images (if API key configured)
     {
         let config = state.config.read().await;
         if let Some(ref api_key) = config.metadata.discogs_api_key {
@@ -155,27 +125,27 @@ async fn run_background_pipeline(state: Arc<AppState>) {
         }
     }
 
-    // Step 3b: Deezer top tracks + artist images fallback (no API key needed)
+    // Step 2c: Deezer top tracks + artist images fallback (no API key needed)
     run_stage(&state.top_tracks_running, "top tracks", {
         let db = state.db.clone();
         async move { musicbrainz::enrich_artist_top_tracks(&db).await }
     })
     .await;
 
-    // Step 4: Analysis (always)
+    // Step 3: Analysis (always)
     run_stage(&state.analysis_running, "analysis", {
         let db = state.db.clone();
         async move { analysis::analyze_library(&db).await }
     })
     .await;
 
-    // Step 5: Daily mixes (always, after analysis so ratings/BPM are available)
+    // Step 4: Daily mixes (always, after analysis so ratings/BPM are available)
     match daily_mixes::generate_all_daily_mixes(&state.db).await {
         Ok(_) => tracing::info!("daily mixes complete"),
         Err(e) => tracing::warn!("daily mixes failed: {e}"),
     }
 
-    // Step 6: Clean up stale caches (not accessed in 24h)
+    // Step 5: Clean up stale caches (not accessed in 24h)
     routes::hls::cleanup_hls_cache().await;
     transcode::cleanup_cache(std::time::Duration::from_secs(86400)).await;
 }
@@ -333,9 +303,7 @@ async fn main() -> Result<()> {
     }
 
     if config.metadata.ai.enabled {
-        tracing::info!("AI summarization enabled (provider: {:?})", config.metadata.ai.provider);
-    } else {
-        tracing::debug!("AI summarization not configured");
+        tracing::info!("AI playlist generation enabled (provider: {:?})", config.metadata.ai.provider);
     }
 
     let pool = db::init_pool().await?;
@@ -428,12 +396,9 @@ async fn main() -> Result<()> {
         config: RwLock::new(config.clone()),
         jwt_secret: config.auth.jwt_secret.clone(),
         enrichment_running: AtomicBool::new(false),
+        editorial_running: AtomicBool::new(false),
         analysis_running: AtomicBool::new(false),
-        summarization_running: AtomicBool::new(false),
-        rating_running: AtomicBool::new(false),
-        tag_extraction_running: AtomicBool::new(false),
         recommendation_running: AtomicBool::new(false),
-        artist_bio_running: AtomicBool::new(false),
         artist_recommendation_running: AtomicBool::new(false),
         top_tracks_running: AtomicBool::new(false),
         scan_running: AtomicBool::new(false),
@@ -481,7 +446,7 @@ async fn main() -> Result<()> {
     }
     *state.dev_plugin_names.write().await = dev_names;
 
-    // Background pipeline: enrich → summarize → rate → analyze
+    // Background pipeline: enrich → recommend → analyze → daily mixes
     {
         let pipeline_state = state.clone();
         tokio::spawn(async move {
@@ -597,11 +562,13 @@ async fn main() -> Result<()> {
         .route("/artists", get(routes::artists::list_artists))
         .route("/artists/stories", get(routes::artists::artist_stories))
         .route("/artists/{id}", get(routes::artists::get_artist))
+        .route("/artists/{id}/bio", put(routes::artists::update_bio))
         .route("/artists/{id}/streaming-albums", get(routes::artists::get_streaming_albums))
         .route("/albums", get(routes::albums::list_albums))
         .route("/albums/filters", get(routes::albums::list_filters))
         .route("/genres", get(routes::albums::list_genres))
         .route("/albums/{id}", get(routes::albums::get_album))
+        .route("/albums/{id}/summary", put(routes::albums::update_summary))
         .route("/albums/{id}/play", post(routes::albums::increment_play_count))
         .route("/playlists", get(routes::playlists::list_playlists).post(routes::playlists::create_playlist))
         .route("/playlists/{id}", get(routes::playlists::get_playlist).delete(routes::playlists::delete_playlist))
@@ -660,16 +627,11 @@ async fn main() -> Result<()> {
         .route("/library/enrich", post(routes::library::trigger_enrichment))
         .route("/library/enrich/{album_id}", post(routes::library::enrich_album))
         .route("/library/analyze", post(routes::library::trigger_analysis))
-        .route("/library/summarize", post(routes::library::trigger_summarization))
-        .route("/library/summarize/{album_id}", post(routes::library::summarize_album))
-        .route("/library/rate", post(routes::library::trigger_rating))
-        .route("/library/rate/{album_id}", post(routes::library::rate_album))
-        .route("/library/tags", post(routes::library::trigger_tag_extraction))
+        .route("/library/editorial", post(routes::library::trigger_editorial))
         .route("/library/recommend", post(routes::library::trigger_recommendations))
         .route("/library/artist-recommendations", post(routes::library::trigger_artist_recommendations))
-        .route("/library/artist-bios", post(routes::library::trigger_artist_bios))
         .route("/library/stats", get(routes::library::library_stats))
-        .route("/library/ai/clear", post(routes::library::clear_ai_data))
+        .route("/library/clear-data", post(routes::library::clear_data))
         // Libraries (admin CRUD)
         .route("/libraries", post(routes::libraries::add_library))
         .route("/libraries/{id}", put(routes::libraries::update_library).delete(routes::libraries::remove_library))
@@ -1143,13 +1105,9 @@ async fn run_download_processor(state: Arc<AppState>) {
             }
         }
 
-        // Run AI pipeline if we found the album
+        // Run post-download enrichment if we found the album
         if let Some((ref local_album_id,)) = new_album {
-            let config = state.config.read().await;
-            let ai_config = config.metadata.ai.clone();
-            drop(config);
-
-            // Stage 1: MusicBrainz enrichment
+            // MusicBrainz enrichment
             let status: Option<(String,)> = sqlx::query_as("SELECT status FROM download_queue WHERE id = ?")
                 .bind(&dl_id).fetch_optional(&state.db).await.unwrap_or(None);
             if status.as_ref().map(|s| s.0.as_str()) != Some("cancelled") {
@@ -1157,39 +1115,6 @@ async fn run_download_processor(state: Arc<AppState>) {
                     .bind(&dl_id).execute(&state.db).await;
                 if let Err(e) = musicbrainz::enrichment::enrich_album(&state.db, local_album_id).await {
                     tracing::warn!("post-download enrichment failed for {}: {e}", local_album_id);
-                }
-            }
-
-            // Stage 2: AI summarize (if AI configured)
-            let status: Option<(String,)> = sqlx::query_as("SELECT status FROM download_queue WHERE id = ?")
-                .bind(&dl_id).fetch_optional(&state.db).await.unwrap_or(None);
-            if status.as_ref().map(|s| s.0.as_str()) != Some("cancelled") && ai_config.enabled {
-                let _ = sqlx::query("UPDATE download_queue SET processing_stage = 'summarizing' WHERE id = ?")
-                    .bind(&dl_id).execute(&state.db).await;
-                if let Err(e) = ai::summarize_album(&state.db, &ai_config, local_album_id).await {
-                    tracing::warn!("post-download summarization failed for {}: {e}", local_album_id);
-                }
-            }
-
-            // Stage 3: AI rate
-            let status: Option<(String,)> = sqlx::query_as("SELECT status FROM download_queue WHERE id = ?")
-                .bind(&dl_id).fetch_optional(&state.db).await.unwrap_or(None);
-            if status.as_ref().map(|s| s.0.as_str()) != Some("cancelled") && ai_config.enabled {
-                let _ = sqlx::query("UPDATE download_queue SET processing_stage = 'rating' WHERE id = ?")
-                    .bind(&dl_id).execute(&state.db).await;
-                if let Err(e) = ai::rate_album(&state.db, &ai_config, local_album_id).await {
-                    tracing::warn!("post-download rating failed for {}: {e}", local_album_id);
-                }
-            }
-
-            // Stage 4: AI extract tags
-            let status: Option<(String,)> = sqlx::query_as("SELECT status FROM download_queue WHERE id = ?")
-                .bind(&dl_id).fetch_optional(&state.db).await.unwrap_or(None);
-            if status.as_ref().map(|s| s.0.as_str()) != Some("cancelled") && ai_config.enabled {
-                let _ = sqlx::query("UPDATE download_queue SET processing_stage = 'extracting_tags' WHERE id = ?")
-                    .bind(&dl_id).execute(&state.db).await;
-                if let Err(e) = ai::extract_tags_album(&state.db, &ai_config, local_album_id).await {
-                    tracing::warn!("post-download tag extraction failed for {}: {e}", local_album_id);
                 }
             }
         }
