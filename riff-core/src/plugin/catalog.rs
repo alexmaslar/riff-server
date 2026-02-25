@@ -14,7 +14,7 @@ pub struct RemotePluginEntry {
 }
 
 pub const REMOTE_CATALOG_URL: &str =
-    "https://raw.githubusercontent.com/alexmaslar/riff-plugins/master/catalog.json";
+    "https://raw.githubusercontent.com/alexmaslar/riff-plugins/main/catalog.json";
 
 /// Fetch the community plugin catalog from GitHub.
 /// Returns an empty vec on any failure (network, parse, etc.).
