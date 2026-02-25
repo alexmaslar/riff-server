@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crate::plugin::capabilities::EditorialProvider;
 use anyhow::Result;
 use sqlx::SqlitePool;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 use uuid::Uuid;
 
 pub struct EditorialEnrichResult {
@@ -26,48 +26,64 @@ pub async fn enrich_library_editorial(
     }
 
     let provider_count = editorial_providers.len() as i64;
+    let batch_size = 100;
+    let mut offset: i64 = 0;
 
-    // Find albums not yet fully enriched by all current providers.
-    // Excludes albums that already have a non-empty review from every registered provider.
-    let albums: Vec<(String, String, String, Option<String>)> = sqlx::query_as(
-        "SELECT a.id, a.title, ar.name, a.release_date \
-         FROM albums a JOIN artists ar ON a.artist_id = ar.id \
-         WHERE a.metadata_status = 'matched' \
-         AND a.id NOT IN ( \
-             SELECT entity_id FROM editorial_reviews \
-             WHERE entity_type = 'album' AND text != '' \
-             GROUP BY entity_id \
-             HAVING COUNT(DISTINCT source) >= ? \
-         ) \
-         LIMIT 100",
-    )
-    .bind(provider_count)
-    .fetch_all(pool)
-    .await?;
-
-    let total_albums = albums.len();
-    if total_albums > 0 {
-        info!("editorial: enriching {} albums", total_albums);
-    }
-
-    for (album_id, title, artist_name, release_date) in &albums {
-        match enrich_album(
-            pool,
-            editorial_providers,
-            album_id,
-            title,
-            artist_name,
-            release_date.as_deref(),
+    loop {
+        // Find next batch of albums not yet fully enriched by all current providers.
+        let albums: Vec<(String, String, String, Option<String>)> = sqlx::query_as(
+            "SELECT a.id, a.title, ar.name, a.release_date \
+             FROM albums a JOIN artists ar ON a.artist_id = ar.id \
+             WHERE a.metadata_status = 'matched' \
+             AND a.id NOT IN ( \
+                 SELECT entity_id FROM editorial_reviews \
+                 WHERE entity_type = 'album' AND text != '' \
+                 GROUP BY entity_id \
+                 HAVING COUNT(DISTINCT source) >= ? \
+             ) \
+             ORDER BY a.id \
+             LIMIT ? OFFSET ?",
         )
-        .await
-        {
-            Ok(added) => result.reviews_added += added,
-            Err(e) => {
-                let msg = format!("{} - {}: {}", artist_name, title, e);
-                warn!("editorial album error: {}", msg);
-                result.errors.push(msg);
+        .bind(provider_count)
+        .bind(batch_size)
+        .bind(offset)
+        .fetch_all(pool)
+        .await?;
+
+        if albums.is_empty() {
+            break;
+        }
+
+        let batch_count = albums.len();
+        info!(
+            "editorial: enriching batch of {} albums (offset {})",
+            batch_count, offset
+        );
+
+        for (album_id, title, artist_name, release_date) in &albums {
+            match enrich_album(
+                pool,
+                editorial_providers,
+                album_id,
+                title,
+                artist_name,
+                release_date.as_deref(),
+            )
+            .await
+            {
+                Ok(added) => result.reviews_added += added,
+                Err(e) => {
+                    let msg = format!("{} - {}: {}", artist_name, title, e);
+                    warn!("editorial album error: {}", msg);
+                    result.errors.push(msg);
+                }
             }
         }
+
+        if batch_count < batch_size as usize {
+            break;
+        }
+        offset += batch_size;
     }
 
     info!(
@@ -139,7 +155,7 @@ async fn enrich_album(
             }
         }
 
-        debug!(
+        info!(
             "editorial: querying '{}' for '{}' by '{}'",
             source, title, artist_name
         );
@@ -151,15 +167,31 @@ async fn enrich_album(
         .await
         {
             Ok(Ok(Some(result))) if !result.reviews.is_empty() => {
+                info!(
+                    "editorial: '{}' found review for '{}' by '{}'",
+                    source, title, artist_name
+                );
                 result.reviews.into_iter().next()
             }
-            Ok(Ok(_)) => None,
+            Ok(Ok(_)) => {
+                info!(
+                    "editorial: '{}' no review found for '{}' by '{}'",
+                    source, title, artist_name
+                );
+                None
+            }
             Ok(Err(e)) => {
-                debug!("editorial plugin '{}' error: {}", source, e);
+                warn!(
+                    "editorial: '{}' error for '{}' by '{}': {}",
+                    source, title, artist_name, e
+                );
                 None
             }
             Err(_) => {
-                debug!("editorial plugin '{}' timed out", source);
+                warn!(
+                    "editorial: '{}' timed out for '{}' by '{}'",
+                    source, title, artist_name
+                );
                 None
             }
         };
