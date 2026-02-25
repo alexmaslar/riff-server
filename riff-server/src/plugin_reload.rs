@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use riff_core::plugin::wasm_editorial::WasmEditorialProvider;
 use riff_core::plugin::wasm_host::WasmPluginInstance;
 use riff_core::plugin::wasm_streaming::WasmStreamingProvider;
 use riff_core::plugin::{Capability, Plugin as _};
@@ -121,6 +122,11 @@ pub async fn reload_wasm_plugins(state: &AppState) -> HashMap<String, PluginLoad
 
                 if instance.capabilities().contains(&Capability::Streaming) {
                     registry.register_streaming(Arc::new(WasmStreamingProvider::new(
+                        instance.clone(),
+                    )));
+                }
+                if instance.capabilities().contains(&Capability::Editorial) {
+                    registry.register_editorial(Arc::new(WasmEditorialProvider::new(
                         instance.clone(),
                     )));
                 }
@@ -288,6 +294,11 @@ async fn load_dev_plugin_from_path(
             let mut registry = state.plugin_registry.write().await;
             if instance.capabilities().contains(&Capability::Streaming) {
                 registry.register_streaming(Arc::new(WasmStreamingProvider::new(
+                    instance.clone(),
+                )));
+            }
+            if instance.capabilities().contains(&Capability::Editorial) {
+                registry.register_editorial(Arc::new(WasmEditorialProvider::new(
                     instance.clone(),
                 )));
             }

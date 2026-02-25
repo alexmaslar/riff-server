@@ -207,7 +207,7 @@ async fn enrich_one_album(
         .unwrap_or(false);
 
     sqlx::query(
-        "UPDATE albums SET external_id = ?, label = ?, catalog_number = ?, style = ?, genre = ?, country = ?, release_notes = ?, all_labels = ?, is_compilation = ?, metadata_status = 'matched' WHERE id = ?"
+        "UPDATE albums SET external_id = ?, label = ?, catalog_number = ?, style = ?, genre = ?, country = ?, release_notes = ?, all_labels = ?, is_compilation = ?, release_date = ?, metadata_status = 'matched' WHERE id = ?"
     )
     .bind(&release.id)
     .bind(&label)
@@ -218,6 +218,7 @@ async fn enrich_one_album(
     .bind(release_notes)
     .bind(&all_labels_json)
     .bind(is_compilation as i32)
+    .bind(&release.date)
     .bind(album_id)
     .execute(pool)
     .await?;

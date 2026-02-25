@@ -72,14 +72,13 @@ async fn run_background_pipeline(state: Arc<AppState>) {
         }
     }
 
-    // Step 1b: Editorial enrichment (Last.fm, Wikipedia, CritiqueBrainz, Discogs)
+    // Step 1b: Editorial enrichment (editorial plugins)
     {
-        let config = state.config.read().await;
-        let metadata_config = config.metadata.clone();
-        drop(config);
         let db = state.db.clone();
+        let editorial_providers = state.plugin_registry.read().await
+            .editorial_providers().to_vec();
         run_stage(&state.editorial_running, "editorial enrichment", async move {
-            riff_core::editorial::enrich_library_editorial(&db, &metadata_config).await
+            riff_core::editorial::enrich_library_editorial(&db, &editorial_providers).await
         })
         .await;
     }

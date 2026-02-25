@@ -5,6 +5,7 @@ pub mod manifest;
 pub mod registry;
 pub mod wasm_host;
 pub mod wasm_loader;
+pub mod wasm_editorial;
 pub mod wasm_streaming;
 
 use std::collections::HashMap;
@@ -20,6 +21,7 @@ pub enum Capability {
     Lyrics,
     Scrobble,
     Metadata,
+    Editorial,
 }
 
 pub struct PluginContext {

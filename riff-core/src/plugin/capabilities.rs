@@ -177,3 +177,33 @@ pub trait MetadataProvider: Send + Sync + 'static {
 
     async fn enrich_artist(&self, name: &str) -> anyhow::Result<Option<MetadataEnrichment>>;
 }
+
+// --- Editorial Provider ---
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EditorialReview {
+    pub source: String,
+    pub source_url: String,
+    pub excerpt: Option<String>,
+    pub rating: Option<f64>,
+    pub rating_count: Option<u32>,
+    pub reviewer: Option<String>,
+    pub review_date: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EditorialResult {
+    pub reviews: Vec<EditorialReview>,
+}
+
+#[async_trait]
+pub trait EditorialProvider: Send + Sync + 'static {
+    fn provider_name(&self) -> &str;
+
+    async fn get_album_reviews(
+        &self,
+        title: &str,
+        artist: &str,
+        year: Option<i32>,
+    ) -> anyhow::Result<Option<EditorialResult>>;
+}

@@ -76,15 +76,12 @@ pub struct AuthConfig {
     pub admin_password: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MetadataConfig {
     #[serde(default)]
     pub enrichment: EnrichmentConfig,
     #[serde(default)]
     pub ai: AiConfig,
-    /// Optional Last.fm API key for editorial content (album summaries, artist bios, tags).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lastfm_api_key: Option<String>,
     /// Optional Discogs personal access token for artist images.
     /// If not set, Deezer is used as the sole image source.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -206,16 +203,6 @@ impl Default for AiConfig {
     }
 }
 
-impl Default for MetadataConfig {
-    fn default() -> Self {
-        Self {
-            enrichment: EnrichmentConfig::default(),
-            ai: AiConfig::default(),
-            lastfm_api_key: None,
-            discogs_api_key: None,
-        }
-    }
-}
 
 impl Default for EnrichmentConfig {
     fn default() -> Self {

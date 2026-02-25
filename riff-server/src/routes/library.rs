@@ -109,15 +109,13 @@ pub async fn trigger_editorial(State(state): State<Arc<AppState>>) -> Result<Jso
 
     let ed_state = state.clone();
     tokio::spawn(async move {
-        let config = ed_state.config.read().await;
-        let metadata_config = config.metadata.clone();
-        drop(config);
-        match riff_core::editorial::enrich_library_editorial(&ed_state.db, &metadata_config).await {
+        let editorial_providers = ed_state.plugin_registry.read().await
+            .editorial_providers().to_vec();
+        match riff_core::editorial::enrich_library_editorial(&ed_state.db, &editorial_providers).await {
             Ok(result) => {
                 tracing::info!(
-                    "editorial enrichment complete: {} albums, {} artists, {} errors",
-                    result.albums_enriched,
-                    result.artists_enriched,
+                    "editorial enrichment complete: {} reviews added, {} errors",
+                    result.reviews_added,
                     result.errors.len(),
                 );
             }
@@ -298,8 +296,7 @@ pub async fn clear_data(
         let summaries = sqlx::query(
             "UPDATE albums SET summary = NULL, rating = NULL, \
              moods = '[]', descriptors = '[]', keywords = '[]', \
-             summary_source = NULL, rating_sources = '[]', summary_updated_at = NULL, \
-             summary_polished = 0, summary_excerpt = NULL \
+             summary_source = NULL, rating_sources = '[]', summary_updated_at = NULL \
              WHERE summary IS NOT NULL OR rating IS NOT NULL OR moods != '[]'"
         )
             .execute(&state.db)

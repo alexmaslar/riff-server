@@ -124,6 +124,7 @@ impl Plugin for WasmPluginInstance {
                 "lyrics" => Some(Capability::Lyrics),
                 "scrobble" => Some(Capability::Scrobble),
                 "metadata" => Some(Capability::Metadata),
+                "editorial" => Some(Capability::Editorial),
                 _ => None,
             })
             .collect()

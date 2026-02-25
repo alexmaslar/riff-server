@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use super::Plugin;
-use super::capabilities::{LyricsProvider, MetadataProvider, ScrobbleProvider, StreamingProvider, StreamingSearchResults};
+use super::capabilities::{EditorialProvider, LyricsProvider, MetadataProvider, ScrobbleProvider, StreamingProvider, StreamingSearchResults};
 
 pub struct PluginRegistry {
     plugins: Vec<Arc<dyn Plugin>>,
@@ -10,6 +10,7 @@ pub struct PluginRegistry {
     lyrics: Vec<Arc<dyn LyricsProvider>>,
     scrobble: Vec<Arc<dyn ScrobbleProvider>>,
     metadata: Vec<Arc<dyn MetadataProvider>>,
+    editorial: Vec<Arc<dyn EditorialProvider>>,
 }
 
 impl PluginRegistry {
@@ -20,6 +21,7 @@ impl PluginRegistry {
             lyrics: Vec::new(),
             scrobble: Vec::new(),
             metadata: Vec::new(),
+            editorial: Vec::new(),
         }
     }
 
@@ -45,6 +47,10 @@ impl PluginRegistry {
         self.metadata.push(provider);
     }
 
+    pub fn register_editorial(&mut self, provider: Arc<dyn EditorialProvider>) {
+        self.editorial.push(provider);
+    }
+
     /// Remove all registrations for a plugin by name.
     /// Used for hot-reloading WASM plugins.
     pub fn unregister_by_name(&mut self, name: &str) {
@@ -53,6 +59,7 @@ impl PluginRegistry {
         self.lyrics.retain(|p| p.provider_name() != name);
         self.scrobble.retain(|p| p.provider_name() != name);
         self.metadata.retain(|p| p.provider_name() != name);
+        self.editorial.retain(|p| p.provider_name() != name);
     }
 
     // --- Accessors ---
@@ -75,6 +82,10 @@ impl PluginRegistry {
 
     pub fn metadata_providers(&self) -> &[Arc<dyn MetadataProvider>] {
         &self.metadata
+    }
+
+    pub fn editorial_providers(&self) -> &[Arc<dyn EditorialProvider>] {
+        &self.editorial
     }
 
     // --- Convenience ---
@@ -221,6 +232,7 @@ mod tests {
         assert!(registry.lyrics_providers().is_empty());
         assert!(registry.scrobble_providers().is_empty());
         assert!(registry.metadata_providers().is_empty());
+        assert!(registry.editorial_providers().is_empty());
     }
 
     #[test]
