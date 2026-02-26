@@ -169,7 +169,7 @@ async fn enrich_album(
         );
 
         let review_data = match tokio::time::timeout(
-            std::time::Duration::from_secs(15),
+            std::time::Duration::from_secs(30),
             provider.get_album_reviews(clean_title, artist_name, None),
         )
         .await
