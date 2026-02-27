@@ -54,99 +54,130 @@ pub struct AppState {
     pub plugin_registry: RwLock<plugin::registry::PluginRegistry>,
     pub remote_catalog: RwLock<Vec<RemotePluginEntry>>,
     pub event_bus: plugin::events::EventBus,
+    /// Wakes the background pipeline when new content arrives (scan, download, manual trigger).
+    pub pipeline_notify: Notify,
     /// Names of plugins loaded from dev_plugins config (invisible to non-admin users).
     pub dev_plugin_names: RwLock<std::collections::HashSet<String>>,
 }
 
 async fn run_background_pipeline(state: Arc<AppState>) {
-    // Step 1: Enrichment (MusicBrainz — no API key needed)
-    {
-        let config = state.config.read().await;
-        if config.metadata.enrichment.auto_enrich {
-            let db = state.db.clone();
-            drop(config);
-            run_stage(&state.enrichment_running, "enrichment", async move {
-                musicbrainz::enrich_library(&db).await
-            })
-            .await;
+    let mut first_run = true;
+    loop {
+        if !first_run {
+            state.pipeline_notify.notified().await;
+            // Debounce: coalesce rapid triggers (e.g. multiple downloads completing)
+            tokio::time::sleep(Duration::from_secs(5)).await;
         }
-    }
+        first_run = false;
 
-    // Step 1b: Editorial enrichment (editorial plugins)
-    {
-        let db = state.db.clone();
-        let editorial_providers = state.plugin_registry.read().await
-            .editorial_providers().to_vec();
-        run_stage(&state.editorial_running, "editorial enrichment", async move {
-            riff_core::editorial::enrich_library_editorial(&db, &editorial_providers).await
-        })
+        tracing::info!("background pipeline starting");
+
+        let mut album_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut artist_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        // Step 1: Enrichment (MusicBrainz — no API key needed)
+        {
+            let config = state.config.read().await;
+            if config.metadata.enrichment.auto_enrich {
+                let db = state.db.clone();
+                drop(config);
+                if let Some(r) = run_stage_result(&state.enrichment_running, "enrichment", async move {
+                    musicbrainz::enrich_library(&db).await
+                }).await {
+                    album_ids.extend(r.enriched_album_ids);
+                    artist_ids.extend(r.enriched_artist_ids);
+                }
+            }
+        }
+
+        // Step 1b: Editorial enrichment (editorial plugins)
+        {
+            let db = state.db.clone();
+            let editorial_providers = state.plugin_registry.read().await
+                .editorial_providers().to_vec();
+            if let Some(r) = run_stage_result(&state.editorial_running, "editorial enrichment", async move {
+                riff_core::editorial::enrich_library_editorial(&db, &editorial_providers).await
+            }).await {
+                album_ids.extend(r.enriched_album_ids);
+            }
+        }
+
+        // Step 2: Album recommendations (metadata-based, always run)
+        run_stage(
+            &state.recommendation_running,
+            "recommendations",
+            {
+                let db = state.db.clone();
+                async move {
+                    riff_core::recommendations::generate_recommendations(&db).await
+                }
+            },
+        )
         .await;
-    }
 
-    // Step 2: Album recommendations (metadata-based, always run)
-    run_stage(
-        &state.recommendation_running,
-        "recommendations",
+        // Step 2a: Artist recommendations (metadata-based, always run)
+        run_stage(
+            &state.artist_recommendation_running,
+            "artist recommendations",
+            {
+                let db = state.db.clone();
+                async move {
+                    riff_core::recommendations::generate_artist_recommendations(&db).await
+                }
+            },
+        )
+        .await;
+
+        // Step 2b: Discogs artist images (if API key configured)
         {
-            let db = state.db.clone();
-            async move {
-                riff_core::recommendations::generate_recommendations(&db).await
-            }
-        },
-    )
-    .await;
-
-    // Step 2a: Artist recommendations (metadata-based, always run)
-    run_stage(
-        &state.artist_recommendation_running,
-        "artist recommendations",
-        {
-            let db = state.db.clone();
-            async move {
-                riff_core::recommendations::generate_artist_recommendations(&db).await
-            }
-        },
-    )
-    .await;
-
-    // Step 2b: Discogs artist images (if API key configured)
-    {
-        let config = state.config.read().await;
-        if let Some(ref api_key) = config.metadata.discogs_api_key {
-            let api_key = api_key.clone();
-            let db = state.db.clone();
-            drop(config);
-            match musicbrainz::enrich_artist_images_discogs(&db, &api_key).await {
-                Ok(n) if n > 0 => tracing::info!("discogs artist images: {n} artists updated"),
-                Ok(_) => {}
-                Err(e) => tracing::warn!("discogs artist images failed: {e}"),
+            let config = state.config.read().await;
+            if let Some(ref api_key) = config.metadata.discogs_api_key {
+                let api_key = api_key.clone();
+                let db = state.db.clone();
+                drop(config);
+                match musicbrainz::enrich_artist_images_discogs(&db, &api_key).await {
+                    Ok(ids) if !ids.is_empty() => {
+                        tracing::info!("discogs artist images: {} artists updated", ids.len());
+                        artist_ids.extend(ids);
+                    }
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!("discogs artist images failed: {e}"),
+                }
             }
         }
+
+        // Step 2c: Deezer top tracks + artist images fallback (no API key needed)
+        if let Some(ids) = run_stage_result(&state.top_tracks_running, "top tracks", {
+            let db = state.db.clone();
+            async move { musicbrainz::enrich_artist_top_tracks(&db).await }
+        }).await {
+            artist_ids.extend(ids);
+        }
+
+        // Step 3: Analysis (always)
+        if let Some(r) = run_stage_result(&state.analysis_running, "analysis", {
+            let db = state.db.clone();
+            async move { analysis::analyze_library(&db).await }
+        }).await {
+            album_ids.extend(r.enriched_album_ids);
+        }
+
+        // Emit consolidated enrichment event for SSE clients
+        if !album_ids.is_empty() || !artist_ids.is_empty() {
+            state.event_bus.emit(plugin::events::ServerEvent::EnrichmentCompleted {
+                album_ids: album_ids.into_iter().collect(),
+                artist_ids: artist_ids.into_iter().collect(),
+            });
+        }
+
+        // Daily mixes are NOT run here — they regenerate only at midnight UTC via run_daily_refresh()
+
+        // Step 4: Clean up stale caches (not accessed in 24h)
+        routes::hls::cleanup_hls_cache().await;
+        transcode::cleanup_cache(std::time::Duration::from_secs(86400)).await;
+
+        tracing::info!("background pipeline complete, waiting for next trigger");
     }
-
-    // Step 2c: Deezer top tracks + artist images fallback (no API key needed)
-    run_stage(&state.top_tracks_running, "top tracks", {
-        let db = state.db.clone();
-        async move { musicbrainz::enrich_artist_top_tracks(&db).await }
-    })
-    .await;
-
-    // Step 3: Analysis (always)
-    run_stage(&state.analysis_running, "analysis", {
-        let db = state.db.clone();
-        async move { analysis::analyze_library(&db).await }
-    })
-    .await;
-
-    // Step 4: Daily mixes (always, after analysis so ratings/BPM are available)
-    match daily_mixes::generate_all_daily_mixes(&state.db).await {
-        Ok(_) => tracing::info!("daily mixes complete"),
-        Err(e) => tracing::warn!("daily mixes failed: {e}"),
-    }
-
-    // Step 5: Clean up stale caches (not accessed in 24h)
-    routes::hls::cleanup_hls_cache().await;
-    transcode::cleanup_cache(std::time::Duration::from_secs(86400)).await;
 }
 
 async fn run_stage<F, R>(flag: &AtomicBool, name: &str, f: F)
@@ -162,6 +193,32 @@ where
             Err(e) => tracing::warn!("{name} failed: {e}"),
         }
         flag.store(false, Ordering::SeqCst);
+    }
+}
+
+/// Like `run_stage` but returns the successful result for ID collection.
+async fn run_stage_result<F, R>(flag: &AtomicBool, name: &str, f: F) -> Option<R>
+where
+    F: std::future::Future<Output = anyhow::Result<R>>,
+{
+    if flag
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+    {
+        let result = match f.await {
+            Ok(r) => {
+                tracing::info!("{name} complete");
+                Some(r)
+            }
+            Err(e) => {
+                tracing::warn!("{name} failed: {e}");
+                None
+            }
+        };
+        flag.store(false, Ordering::SeqCst);
+        result
+    } else {
+        None
     }
 }
 
@@ -201,6 +258,8 @@ async fn run_periodic_scanner(state: Arc<AppState>) {
         let global_interval = config.library.scan_interval;
         drop(config);
 
+        let mut new_content_found = false;
+
         for lib_entry in &libs {
             let effective_interval = lib_entry.scan_interval.unwrap_or(global_interval);
             if effective_interval == 0 {
@@ -222,6 +281,7 @@ async fn run_periodic_scanner(state: Arc<AppState>) {
                         || result.albums_removed > 0
                         || result.artists_removed > 0
                     {
+                        new_content_found = true;
                         tracing::info!(
                             "periodic scan complete for {:?}: +{} artists, +{} albums, +{} tracks, -{} tracks, -{} albums, -{} artists",
                             lib_entry.name,
@@ -236,6 +296,11 @@ async fn run_periodic_scanner(state: Arc<AppState>) {
                 }
                 Err(e) => tracing::warn!("periodic scan failed for {:?}: {}", lib_entry.name, e),
             }
+        }
+
+        if new_content_found {
+            tracing::info!("periodic scan found new content, triggering pipeline");
+            state.pipeline_notify.notify_one();
         }
 
         state.scan_running.store(false, Ordering::SeqCst);
@@ -411,6 +476,7 @@ async fn main() -> Result<()> {
         plugin_registry: RwLock::new(plugin_registry),
         remote_catalog: RwLock::new(remote_catalog),
         event_bus,
+        pipeline_notify: Notify::new(),
         dev_plugin_names: RwLock::new(std::collections::HashSet::new()),
     });
 
@@ -532,6 +598,14 @@ async fn main() -> Result<()> {
         .route("/auth/refresh", post(routes::auth::refresh))
         .route("/albums/{id}/cover", get(routes::albums::get_cover))
         .route("/mixes/daily/{id}/cover", get(routes::daily_mixes::get_mix_cover));
+
+    // SSE event stream — no timeout (long-lived), no gzip, auth required
+    let sse = Router::new()
+        .route("/events", get(routes::events::event_stream))
+        .route_layer(axum_mw::from_fn_with_state(
+            state.clone(),
+            middleware::require_auth,
+        ));
 
     // Streaming routes — generous timeout, no gzip (audio is already compressed;
     // gzip switches to chunked encoding which breaks Content-Length on iOS)
@@ -667,6 +741,7 @@ async fn main() -> Result<()> {
 
     let app = Router::new()
         .merge(public)
+        .merge(sse)            // no timeout — long-lived SSE connections
         .merge(streaming)      // no timeout, no gzip — raw bytes with accurate Content-Length
         .merge(timed_routes)   // 120s timeout + gzip for JSON API responses
         .layer(TraceLayer::new_for_http())
@@ -1131,7 +1206,8 @@ async fn run_download_processor(state: Arc<AppState>) {
 
                     // Re-fetch album metadata (MusicBrainz may have updated title/artist)
                     let album_meta: Option<(String, String, Option<String>)> = sqlx::query_as(
-                        "SELECT title, artist_name, release_date FROM albums WHERE id = ?"
+                        "SELECT a.title, ar.name, a.release_date FROM albums a \
+                         JOIN artists ar ON a.artist_id = ar.id WHERE a.id = ?"
                     )
                     .bind(local_album_id)
                     .fetch_optional(&state.db)
@@ -1153,6 +1229,15 @@ async fn run_download_processor(state: Arc<AppState>) {
                     }
                 }
             }
+
+            // Emit immediate enrichment event for this album
+            state.event_bus.emit(plugin::events::ServerEvent::EnrichmentCompleted {
+                album_ids: vec![local_album_id.clone()],
+                artist_ids: Vec::new(),
+            });
+
+            // Trigger full pipeline for recommendations, Discogs/Deezer, and analysis
+            state.pipeline_notify.notify_one();
         }
 
         // Check if cancelled during post-processing

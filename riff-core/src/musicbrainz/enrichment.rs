@@ -14,6 +14,8 @@ pub struct EnrichmentResult {
     pub artists_enriched: u32,
     pub covers_downloaded: u32,
     pub errors: Vec<String>,
+    pub enriched_album_ids: Vec<String>,
+    pub enriched_artist_ids: Vec<String>,
 }
 
 pub async fn enrich_library(
@@ -30,6 +32,8 @@ pub async fn enrich_library(
         artists_enriched: 0,
         covers_downloaded: 0,
         errors: Vec::new(),
+        enriched_album_ids: Vec::new(),
+        enriched_artist_ids: Vec::new(),
     };
 
     // Album enrichment
@@ -101,12 +105,28 @@ async fn enrich_albums(
 
     for (album_id, title, artist_name, year, cover_path) in &rows {
         match enrich_one_album(pool, client, config, album_id, title, artist_name, *year, cover_path.as_deref()).await {
-            Ok(true) => result.albums_enriched += 1,
+            Ok(true) => {
+                result.albums_enriched += 1;
+                result.enriched_album_ids.push(album_id.clone());
+            }
             Ok(false) => {} // no match found, skip
             Err(e) => {
                 warn!("enrichment error for album '{}': {}", title, e);
                 result.errors.push(format!("{}: {}", title, e));
             }
+        }
+    }
+
+    // Collect artist IDs from enriched albums
+    if !result.enriched_album_ids.is_empty() {
+        let placeholders: String = result.enriched_album_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let query = format!("SELECT DISTINCT artist_id FROM albums WHERE id IN ({})", placeholders);
+        let mut q = sqlx::query_scalar::<_, String>(&query);
+        for id in &result.enriched_album_ids {
+            q = q.bind(id);
+        }
+        if let Ok(artist_ids) = q.fetch_all(pool).await {
+            result.enriched_artist_ids = artist_ids;
         }
     }
 }
@@ -333,7 +353,7 @@ async fn download_cover(
 pub async fn enrich_artist_images_discogs(
     pool: &SqlitePool,
     api_key: &str,
-) -> anyhow::Result<u32> {
+) -> anyhow::Result<Vec<String>> {
     let rows: Vec<(String, String, Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
         "SELECT a.id, a.name, a.external_id, \
                 GROUP_CONCAT(al.genre, '|||') AS genres_raw, \
@@ -348,7 +368,7 @@ pub async fn enrich_artist_images_discogs(
 
     if rows.is_empty() {
         info!("no artists need Discogs image enrichment");
-        return Ok(0);
+        return Ok(Vec::new());
     }
 
     info!("enriching {} artists with Discogs images", rows.len());
@@ -359,7 +379,7 @@ pub async fn enrich_artist_images_discogs(
         .build()?;
 
     let mb_client = MusicBrainzClient::new()?;
-    let mut enriched = 0u32;
+    let mut enriched_ids: Vec<String> = Vec::new();
 
     for (artist_id, artist_name, external_id, genres_raw, styles_raw) in &rows {
         // Try MBID → Discogs ID first for exact match
@@ -400,7 +420,7 @@ pub async fn enrich_artist_images_discogs(
                     .bind(artist_id)
                     .execute(pool)
                     .await?;
-                enriched += 1;
+                enriched_ids.push(artist_id.clone());
                 debug!("Discogs image for '{}': {}", artist_name, url);
             }
             None => {
@@ -412,8 +432,8 @@ pub async fn enrich_artist_images_discogs(
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
 
-    info!("Discogs image enrichment complete: {} artists", enriched);
-    Ok(enriched)
+    info!("Discogs image enrichment complete: {} artists", enriched_ids.len());
+    Ok(enriched_ids)
 }
 
 /// Extract a Discogs artist ID from MusicBrainz URL relations.
@@ -437,7 +457,7 @@ fn extract_discogs_artist_id(relations: &[super::types::MBRelation]) -> Option<S
 /// Also fetches artist images from Deezer when not already set.
 pub async fn enrich_artist_top_tracks(
     pool: &SqlitePool,
-) -> anyhow::Result<u32> {
+) -> anyhow::Result<Vec<String>> {
     let rows: Vec<(String, String)> = sqlx::query_as(
         "SELECT a.id, a.name FROM artists a \
          WHERE a.name IS NOT NULL \
@@ -452,13 +472,13 @@ pub async fn enrich_artist_top_tracks(
 
     if rows.is_empty() {
         info!("no artists need top tracks enrichment");
-        return Ok(0);
+        return Ok(Vec::new());
     }
 
     info!("enriching {} artists with Deezer top tracks", rows.len());
 
     let client = reqwest::Client::new();
-    let mut enriched = 0u32;
+    let mut enriched_ids: Vec<String> = Vec::new();
 
     for (artist_id, artist_name) in &rows {
         match deezer::fetch_top_tracks(&client, artist_name, 10).await {
@@ -491,7 +511,7 @@ pub async fn enrich_artist_top_tracks(
                         .await?;
                 }
 
-                enriched += 1;
+                enriched_ids.push(artist_id.clone());
                 debug!("Deezer: {} top tracks for '{}'", tracks.len(), artist_name);
             }
             Ok(_) => {
@@ -513,8 +533,8 @@ pub async fn enrich_artist_top_tracks(
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
 
-    info!("Deezer top tracks enrichment complete: {} artists", enriched);
-    Ok(enriched)
+    info!("Deezer top tracks enrichment complete: {} artists", enriched_ids.len());
+    Ok(enriched_ids)
 }
 
 /// Update tracks in this album with ISRCs from MusicBrainz recordings.

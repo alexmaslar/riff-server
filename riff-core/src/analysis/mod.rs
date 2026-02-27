@@ -13,6 +13,7 @@ pub struct AnalysisResult {
     pub tracks_failed: u32,
     pub tracks_skipped: u32,
     pub errors: Vec<String>,
+    pub enriched_album_ids: Vec<String>,
 }
 
 /// Analyze all pending tracks in the library.
@@ -23,7 +24,9 @@ pub async fn analyze_library(pool: &SqlitePool) -> anyhow::Result<AnalysisResult
         tracks_failed: 0,
         tracks_skipped: 0,
         errors: Vec::new(),
+        enriched_album_ids: Vec::new(),
     };
+    let mut analyzed_track_ids: Vec<String> = Vec::new();
 
     // Reset any tracks stuck in 'analyzing' from a previous interrupted run
     let reset = sqlx::query(
@@ -99,6 +102,7 @@ pub async fn analyze_library(pool: &SqlitePool) -> anyhow::Result<AnalysisResult
                         .bind(&track_id)
                         .execute(pool)
                         .await?;
+                        analyzed_track_ids.push(track_id.clone());
                         result.tracks_analyzed += 1;
                     }
                     Ok(Err(e)) => {
@@ -136,6 +140,19 @@ pub async fn analyze_library(pool: &SqlitePool) -> anyhow::Result<AnalysisResult
         "analysis complete: {} analyzed, {} failed, {} skipped",
         result.tracks_analyzed, result.tracks_failed, result.tracks_skipped
     );
+
+    // Collect unique album IDs from analyzed tracks
+    if !analyzed_track_ids.is_empty() {
+        let placeholders: String = analyzed_track_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let query = format!("SELECT DISTINCT album_id FROM tracks WHERE id IN ({})", placeholders);
+        let mut q = sqlx::query_scalar::<_, String>(&query);
+        for id in &analyzed_track_ids {
+            q = q.bind(id);
+        }
+        if let Ok(album_ids) = q.fetch_all(pool).await {
+            result.enriched_album_ids = album_ids;
+        }
+    }
 
     Ok(result)
 }

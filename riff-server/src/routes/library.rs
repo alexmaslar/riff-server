@@ -51,7 +51,12 @@ pub async fn trigger_scan(State(state): State<Arc<AppState>>) -> Result<Json<Val
             }
         }
 
-        let enrichment_triggered = maybe_spawn_enrichment(&state).await;
+        let pipeline_triggered = if total_albums > 0 || total_tracks > 0 || total_artists > 0 {
+            state.pipeline_notify.notify_one();
+            true
+        } else {
+            false
+        };
         Ok(Json(json!({
             "status": "complete",
             "artists_added": total_artists,
@@ -61,7 +66,7 @@ pub async fn trigger_scan(State(state): State<Arc<AppState>>) -> Result<Json<Val
             "albums_removed": total_albums_removed,
             "artists_removed": total_artists_removed,
             "errors": all_errors,
-            "enrichment_triggered": enrichment_triggered,
+            "pipeline_triggered": pipeline_triggered,
         })))
     }.await;
 
@@ -70,36 +75,8 @@ pub async fn trigger_scan(State(state): State<Arc<AppState>>) -> Result<Json<Val
 }
 
 pub async fn trigger_enrichment(State(state): State<Arc<AppState>>) -> Result<Json<Value>, AppError> {
-    if maybe_spawn_enrichment(&state).await {
-        Ok(Json(json!({ "status": "started" })))
-    } else {
-        Ok(Json(json!({ "status": "already_running" })))
-    }
-}
-
-/// Spawn background enrichment if not already running. Returns true if started.
-async fn maybe_spawn_enrichment(state: &Arc<AppState>) -> bool {
-    if state.enrichment_running.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
-        tracing::debug!("enrichment already running, skipping");
-        return false;
-    }
-
-    let enrich_state = state.clone();
-    tokio::spawn(async move {
-        match musicbrainz::enrich_library(&enrich_state.db).await {
-            Ok(result) => {
-                tracing::info!(
-                    "enrichment complete: {} albums, {} covers",
-                    result.albums_enriched,
-                    result.covers_downloaded,
-                );
-            }
-            Err(e) => tracing::warn!("enrichment failed: {}", e),
-        }
-        enrich_state.enrichment_running.store(false, Ordering::SeqCst);
-    });
-
-    true
+    state.pipeline_notify.notify_one();
+    Ok(Json(json!({ "status": "started" })))
 }
 
 pub async fn trigger_editorial(State(state): State<Arc<AppState>>) -> Result<Json<Value>, AppError> {

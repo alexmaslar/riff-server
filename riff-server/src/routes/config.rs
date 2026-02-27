@@ -430,12 +430,12 @@ pub async fn update_config(
                 }
                 // Run Discogs enrichment with the new key
                 match riff_core::musicbrainz::enrich_artist_images_discogs(&db, &api_key).await {
-                    Ok(n) => tracing::info!("discogs re-enrichment: {n} artists updated"),
+                    Ok(ids) => tracing::info!("discogs re-enrichment: {} artists updated", ids.len()),
                     Err(e) => tracing::warn!("discogs re-enrichment failed: {e}"),
                 }
                 // Deezer fallback for any remaining NULL image_urls
                 match riff_core::musicbrainz::enrich_artist_top_tracks(&db).await {
-                    Ok(n) => tracing::info!("deezer fallback after discogs refresh: {n} artists"),
+                    Ok(ids) => tracing::info!("deezer fallback after discogs refresh: {} artists", ids.len()),
                     Err(e) => tracing::warn!("deezer fallback failed: {e}"),
                 }
             });

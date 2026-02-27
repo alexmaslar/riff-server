@@ -6,6 +6,7 @@ pub mod autoqueue;
 pub mod config;
 pub mod daily_mixes;
 pub mod downloads;
+pub mod events;
 pub mod favorites;
 pub mod featured;
 pub mod history;

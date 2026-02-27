@@ -9,6 +9,7 @@ use uuid::Uuid;
 pub struct EditorialEnrichResult {
     pub reviews_added: u32,
     pub errors: Vec<String>,
+    pub enriched_album_ids: Vec<String>,
 }
 
 /// Enrich all albums missing editorial content via editorial plugins.
@@ -19,6 +20,7 @@ pub async fn enrich_library_editorial(
     let mut result = EditorialEnrichResult {
         reviews_added: 0,
         errors: Vec::new(),
+        enriched_album_ids: Vec::new(),
     };
 
     if editorial_providers.is_empty() {
@@ -71,7 +73,12 @@ pub async fn enrich_library_editorial(
             )
             .await
             {
-                Ok(added) => result.reviews_added += added,
+                Ok(added) => {
+                    if added > 0 {
+                        result.enriched_album_ids.push(album_id.clone());
+                    }
+                    result.reviews_added += added;
+                }
                 Err(e) => {
                     let msg = format!("{} - {}: {}", artist_name, title, e);
                     warn!("editorial album error: {}", msg);

@@ -37,6 +37,10 @@ pub enum ServerEvent {
         entity_id: String,
         is_favorite: bool,
     },
+    EnrichmentCompleted {
+        album_ids: Vec<String>,
+        artist_ids: Vec<String>,
+    },
 }
 
 pub struct EventBus {
