@@ -108,7 +108,7 @@ fn is_recent_release(release_date: Option<&str>) -> bool {
 }
 
 /// Enrich a single album from editorial plugins. Returns number of reviews added.
-async fn enrich_album(
+pub async fn enrich_album(
     pool: &SqlitePool,
     editorial_providers: &[Arc<dyn EditorialProvider>],
     album_id: &str,

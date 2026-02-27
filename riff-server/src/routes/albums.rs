@@ -444,7 +444,7 @@ pub async fn build_album_detail(
     // Fetch editorial reviews for this album
     let review_rows = sqlx::query_as::<_, (String, Option<String>, String, Option<f64>, Option<i64>, Option<String>, Option<String>, Option<String>)>(
         "SELECT source, source_url, text, rating, rating_count, license, reviewer, review_date \
-         FROM editorial_reviews WHERE entity_type = 'album' AND entity_id = ? AND text != '' \
+         FROM editorial_reviews WHERE entity_type = 'album' AND entity_id = ? AND text != '' AND hidden = 0 \
          ORDER BY created_at DESC"
     )
     .bind(album_id)
@@ -1228,5 +1228,66 @@ pub async fn increment_play_count(
             Json(json!({ "error": e.to_string() })),
         )),
     }
+}
+
+pub async fn toggle_review_visibility(
+    State(state): State<Arc<AppState>>,
+    Extension(_claims): Extension<Claims>,
+    Path((album_id, source)): Path<(String, String)>,
+) -> Result<Json<Value>, AppError> {
+    // Toggle hidden between 0 and 1
+    let result = sqlx::query(
+        "UPDATE editorial_reviews SET hidden = CASE WHEN hidden = 0 THEN 1 ELSE 0 END \
+         WHERE entity_type = 'album' AND entity_id = ? AND source = ?"
+    )
+    .bind(&album_id)
+    .bind(&source)
+    .execute(&state.db)
+    .await?;
+
+    if result.rows_affected() == 0 {
+        return Err(AppError::NotFound("review not found".into()));
+    }
+
+    let row = sqlx::query_as::<_, (i32,)>(
+        "SELECT hidden FROM editorial_reviews WHERE entity_type = 'album' AND entity_id = ? AND source = ?"
+    )
+    .bind(&album_id)
+    .bind(&source)
+    .fetch_one(&state.db)
+    .await?;
+
+    Ok(Json(json!({ "hidden": row.0 != 0 })))
+}
+
+pub async fn get_hidden_reviews(
+    State(state): State<Arc<AppState>>,
+    Extension(_claims): Extension<Claims>,
+    Path(album_id): Path<String>,
+) -> Result<Json<Value>, AppError> {
+    let rows = sqlx::query_as::<_, (String, Option<String>, String, Option<f64>, Option<i64>, Option<String>, Option<String>, Option<String>)>(
+        "SELECT source, source_url, text, rating, rating_count, license, reviewer, review_date \
+         FROM editorial_reviews WHERE entity_type = 'album' AND entity_id = ? AND hidden = 1 \
+         ORDER BY created_at DESC"
+    )
+    .bind(&album_id)
+    .fetch_all(&state.db)
+    .await?;
+
+    let reviews: Vec<EditorialReview> = rows
+        .into_iter()
+        .map(|(source, source_url, text, rating, rating_count, license, reviewer, review_date)| EditorialReview {
+            source,
+            source_url,
+            text,
+            rating,
+            rating_count,
+            license,
+            reviewer,
+            review_date,
+        })
+        .collect();
+
+    Ok(Json(json!({ "reviews": reviews })))
 }
 

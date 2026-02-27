@@ -112,6 +112,7 @@ pub async fn list_downloads(
                 "stage_description": r.processing_stage.as_ref().map(|s| match s.as_str() {
                     "scanning" => "Scanning library...",
                     "enriching" => "Enriching metadata...",
+                    "editorial" => "Fetching reviews...",
                     "summarizing" => "Writing summary...",
                     "rating" => "Rating...",
                     "extracting_tags" => "Extracting tags...",

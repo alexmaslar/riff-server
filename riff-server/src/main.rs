@@ -569,6 +569,8 @@ async fn main() -> Result<()> {
         .route("/albums/{id}", get(routes::albums::get_album))
         .route("/albums/{id}/summary", put(routes::albums::update_summary))
         .route("/albums/{id}/play", post(routes::albums::increment_play_count))
+        .route("/albums/{id}/reviews/hidden", get(routes::albums::get_hidden_reviews))
+        .route("/albums/{id}/reviews/{source}/toggle-hidden", post(routes::albums::toggle_review_visibility))
         .route("/playlists", get(routes::playlists::list_playlists).post(routes::playlists::create_playlist))
         .route("/playlists/{id}", get(routes::playlists::get_playlist).delete(routes::playlists::delete_playlist))
         .route("/playlists/{id}/tracks", post(routes::playlists::add_track).put(routes::playlists::reorder_tracks))
@@ -1114,6 +1116,41 @@ async fn run_download_processor(state: Arc<AppState>) {
                     .bind(&dl_id).execute(&state.db).await;
                 if let Err(e) = musicbrainz::enrichment::enrich_album(&state.db, local_album_id).await {
                     tracing::warn!("post-download enrichment failed for {}: {e}", local_album_id);
+                }
+            }
+
+            // Editorial review enrichment
+            let status: Option<(String,)> = sqlx::query_as("SELECT status FROM download_queue WHERE id = ?")
+                .bind(&dl_id).fetch_optional(&state.db).await.unwrap_or(None);
+            if status.as_ref().map(|s| s.0.as_str()) != Some("cancelled") {
+                let editorial_providers = state.plugin_registry.read().await
+                    .editorial_providers().to_vec();
+                if !editorial_providers.is_empty() {
+                    let _ = sqlx::query("UPDATE download_queue SET processing_stage = 'editorial' WHERE id = ?")
+                        .bind(&dl_id).execute(&state.db).await;
+
+                    // Re-fetch album metadata (MusicBrainz may have updated title/artist)
+                    let album_meta: Option<(String, String, Option<String>)> = sqlx::query_as(
+                        "SELECT title, artist_name, release_date FROM albums WHERE id = ?"
+                    )
+                    .bind(local_album_id)
+                    .fetch_optional(&state.db)
+                    .await
+                    .unwrap_or(None);
+
+                    if let Some((title, artist_name, release_date)) = &album_meta {
+                        match riff_core::editorial::enrich_album(
+                            &state.db,
+                            &editorial_providers,
+                            local_album_id,
+                            title,
+                            artist_name,
+                            release_date.as_deref(),
+                        ).await {
+                            Ok(count) => tracing::info!("post-download editorial: {count} reviews added for {local_album_id}"),
+                            Err(e) => tracing::warn!("post-download editorial failed for {local_album_id}: {e}"),
+                        }
+                    }
                 }
             }
         }

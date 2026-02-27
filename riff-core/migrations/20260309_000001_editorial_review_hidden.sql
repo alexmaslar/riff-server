@@ -1,0 +1,1 @@
+ALTER TABLE editorial_reviews ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0;
