@@ -70,8 +70,6 @@ library:
   scan_interval: 3600
 
 metadata:
-  discogs:
-    api_token: "your-discogs-token"
   ai:
     enabled: true
     provider: openai

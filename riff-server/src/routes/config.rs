@@ -60,7 +60,6 @@ pub async fn get_config(
                     "base_url": config.metadata.ai.base_url,
                     "playlist_generation": config.metadata.ai.playlist_generation,
                 },
-                "discogs_api_key": config.metadata.discogs_api_key.as_deref().map(mask_secret),
             },
             "streaming": {
                 "remote_bitrate": config.streaming.remote_bitrate,
@@ -151,7 +150,6 @@ pub struct LibraryUpdate {
 pub struct MetadataUpdate {
     pub enrichment: Option<EnrichmentUpdate>,
     pub ai: Option<AiUpdate>,
-    pub discogs_api_key: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -178,14 +176,11 @@ pub async fn update_config(
     Json(update): Json<ConfigUpdate>,
 ) -> Result<Json<Value>, AppError> {
     // Clone config under write lock, apply mutations, then drop lock before disk I/O
-    let (config_snapshot, any_newly_enabled, https_port_changed, discogs_key_changed, plugins_changed) = {
+    let (config_snapshot, any_newly_enabled, https_port_changed, plugins_changed) = {
         let mut config = state.config.write().await;
 
         // Snapshot AI flags before mutations
         let old_ai_enabled = config.metadata.ai.enabled;
-
-        // Snapshot Discogs key before mutations
-        let old_discogs_key = config.metadata.discogs_api_key.clone();
 
         let mut https_port_changed = false;
         if let Some(srv) = update.server {
@@ -214,10 +209,6 @@ pub async fn update_config(
                 if let Some(download_covers) = enrichment.download_covers {
                     config.metadata.enrichment.download_covers = download_covers;
                 }
-            }
-
-            if let Some(key) = meta.discogs_api_key {
-                config.metadata.discogs_api_key = if key.is_empty() { None } else { Some(key) };
             }
 
             if let Some(ai) = meta.ai {
@@ -293,12 +284,6 @@ pub async fn update_config(
             }
         }
 
-        let discogs_key_changed = match (&old_discogs_key, &config.metadata.discogs_api_key) {
-            (None, Some(_)) => true,
-            (Some(old), Some(new)) if old != new => true,
-            _ => false,
-        };
-
         let any_newly_enabled = !old_ai_enabled && config.metadata.ai.enabled;
 
         if any_newly_enabled {
@@ -306,7 +291,7 @@ pub async fn update_config(
         }
 
         let snapshot = config.clone();
-        (snapshot, any_newly_enabled, https_port_changed, discogs_key_changed, plugins_changed)
+        (snapshot, any_newly_enabled, https_port_changed, plugins_changed)
     }; // write lock dropped before disk I/O
 
     // Save to disk outside the lock
@@ -320,9 +305,6 @@ pub async fn update_config(
         }
         if any_newly_enabled {
             changed.push("ai_features_enabled".to_string());
-        }
-        if discogs_key_changed {
-            changed.push("discogs_api_key".to_string());
         }
         if plugins_changed {
             changed.push("plugins".to_string());
@@ -395,7 +377,6 @@ pub async fn update_config(
                 "base_url": config_snapshot.metadata.ai.base_url,
                 "playlist_generation": config_snapshot.metadata.ai.playlist_generation,
             },
-            "discogs_api_key": config_snapshot.metadata.discogs_api_key.as_deref().map(mask_secret),
         },
         "streaming": {
             "remote_bitrate": config_snapshot.streaming.remote_bitrate,
@@ -408,39 +389,6 @@ pub async fn update_config(
 
     // AI was enabled — no automatic content generation since editorial enrichment is used instead
     let _ = any_newly_enabled;
-
-    if discogs_key_changed {
-        if let Some(ref api_key) = config_snapshot.metadata.discogs_api_key {
-            let api_key = api_key.clone();
-            let db = state.db.clone();
-            tokio::spawn(async move {
-                // Clear all artist images so Discogs can re-fill them
-                match sqlx::query("UPDATE artists SET image_url = NULL WHERE image_url IS NOT NULL")
-                    .execute(&db)
-                    .await
-                {
-                    Ok(r) => tracing::info!(
-                        "cleared {} artist images for Discogs re-fetch",
-                        r.rows_affected()
-                    ),
-                    Err(e) => {
-                        tracing::warn!("failed to clear artist images: {e}");
-                        return;
-                    }
-                }
-                // Run Discogs enrichment with the new key
-                match riff_core::musicbrainz::enrich_artist_images_discogs(&db, &api_key).await {
-                    Ok(ids) => tracing::info!("discogs re-enrichment: {} artists updated", ids.len()),
-                    Err(e) => tracing::warn!("discogs re-enrichment failed: {e}"),
-                }
-                // Deezer fallback for any remaining NULL image_urls
-                match riff_core::musicbrainz::enrich_artist_top_tracks(&db).await {
-                    Ok(ids) => tracing::info!("deezer fallback after discogs refresh: {} artists", ids.len()),
-                    Err(e) => tracing::warn!("deezer fallback failed: {e}"),
-                }
-            });
-        }
-    }
 
     Ok(Json(response))
 }

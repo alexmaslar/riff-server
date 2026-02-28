@@ -4,8 +4,11 @@ use sqlx::SqlitePool;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
+use std::sync::Arc;
+
 use crate::config::EnrichmentConfig;
 use crate::deezer;
+use crate::plugin::capabilities::StreamingProvider;
 use super::client::MusicBrainzClient;
 use super::matching;
 
@@ -348,31 +351,13 @@ async fn download_cover(
     Ok(true)
 }
 
-/// Fetch artist images from Discogs using their search API.
-/// Requires a Discogs personal access token. Only processes artists with no image yet.
-pub async fn enrich_artist_images_discogs(
+/// Fetch artist images from Spotify via MusicBrainz URL relations, with streaming provider fallback.
+/// Phase 1: MusicBrainz → Spotify artist link → oEmbed → 640px image (no auth needed).
+/// Phase 2: For remaining artists, search registered streaming providers by name.
+pub async fn enrich_artist_images_spotify(
     pool: &SqlitePool,
-    api_key: &str,
+    streaming_providers: &[Arc<dyn StreamingProvider>],
 ) -> anyhow::Result<Vec<String>> {
-    let rows: Vec<(String, String, Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
-        "SELECT a.id, a.name, a.external_id, \
-                GROUP_CONCAT(al.genre, '|||') AS genres_raw, \
-                GROUP_CONCAT(al.style, '|||') AS styles_raw \
-         FROM artists a \
-         LEFT JOIN albums al ON al.artist_id = a.id \
-         WHERE a.image_url IS NULL \
-         GROUP BY a.id, a.name, a.external_id"
-    )
-    .fetch_all(pool)
-    .await?;
-
-    if rows.is_empty() {
-        info!("no artists need Discogs image enrichment");
-        return Ok(Vec::new());
-    }
-
-    info!("enriching {} artists with Discogs images", rows.len());
-
     let http_client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .user_agent("RiffServer/0.1 (riff-music-server)")
@@ -381,69 +366,108 @@ pub async fn enrich_artist_images_discogs(
     let mb_client = MusicBrainzClient::new()?;
     let mut enriched_ids: Vec<String> = Vec::new();
 
-    for (artist_id, artist_name, external_id, genres_raw, styles_raw) in &rows {
-        // Try MBID → Discogs ID first for exact match
-        let mut image_url: Option<String> = None;
+    // Phase 1: Spotify via MusicBrainz links
+    let rows: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT id, name, external_id FROM artists \
+         WHERE image_url IS NULL AND external_id IS NOT NULL"
+    )
+    .fetch_all(pool)
+    .await?;
 
-        if let Some(mbid) = external_id {
-            match mb_client.get_artist(mbid).await {
-                Ok(detail) => {
-                    if let Some(discogs_id) = extract_discogs_artist_id(&detail.relations) {
-                        debug!("Discogs: fetching by ID {} for '{}'", discogs_id, artist_name);
-                        match crate::discogs::fetch_artist_image_by_id(&http_client, &discogs_id, api_key).await {
-                            Ok(url) => image_url = url,
-                            Err(e) => warn!("Discogs ID lookup failed for '{}': {}", artist_name, e),
-                        }
-                    }
-                }
-                Err(e) => {
-                    warn!("MusicBrainz artist lookup failed for '{}': {}", artist_name, e);
-                }
+    if !rows.is_empty() {
+        info!("Spotify image enrichment: {} artists with MusicBrainz IDs", rows.len());
+    }
+
+    for (artist_id, artist_name, mbid) in &rows {
+        let spotify_id = match mb_client.get_artist(mbid).await {
+            Ok(detail) => extract_spotify_artist_id(&detail.relations),
+            Err(e) => {
+                warn!("MusicBrainz artist lookup failed for '{}': {}", artist_name, e);
+                None
             }
+        };
+
+        if let Some(ref sid) = spotify_id {
+            match crate::spotify::fetch_artist_image(&http_client, sid).await {
+                Ok(Some(url)) => {
+                    sqlx::query("UPDATE artists SET image_url = ? WHERE id = ? AND image_url IS NULL")
+                        .bind(&url)
+                        .bind(artist_id)
+                        .execute(pool)
+                        .await?;
+                    enriched_ids.push(artist_id.clone());
+                    debug!("Spotify image for '{}'", artist_name);
+                }
+                Ok(None) => debug!("no Spotify image for '{}'", artist_name),
+                Err(e) => warn!("Spotify image error for '{}': {}", artist_name, e),
+            }
+        } else {
+            debug!("no Spotify link for '{}'", artist_name);
         }
 
-        // Fall back to name search with genre hints
-        if image_url.is_none() {
-            let genre_hints = parse_aggregated_genres(genres_raw.as_deref(), styles_raw.as_deref());
-            match crate::discogs::fetch_artist_image(&http_client, artist_name, api_key, &genre_hints).await {
-                Ok(url) => image_url = url,
-                Err(e) => {
-                    warn!("Discogs image error for '{}': {}", artist_name, e);
-                }
-            }
-        }
-
-        match &image_url {
-            Some(url) => {
-                sqlx::query("UPDATE artists SET image_url = ? WHERE id = ?")
-                    .bind(url)
-                    .bind(artist_id)
-                    .execute(pool)
-                    .await?;
-                enriched_ids.push(artist_id.clone());
-                debug!("Discogs image for '{}': {}", artist_name, url);
-            }
-            None => {
-                debug!("no Discogs image found for '{}'", artist_name);
-            }
-        }
-
-        // Rate limit: Discogs allows 60 req/min authenticated, stay well under
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
 
-    info!("Discogs image enrichment complete: {} artists", enriched_ids.len());
+    // Phase 2: Streaming provider fallback for remaining artists
+    if !streaming_providers.is_empty() {
+        let remaining: Vec<(String, String)> = sqlx::query_as(
+            "SELECT id, name FROM artists WHERE image_url IS NULL"
+        )
+        .fetch_all(pool)
+        .await?;
+
+        if !remaining.is_empty() {
+            info!("streaming provider image fallback: {} artists remaining", remaining.len());
+        }
+
+        for (artist_id, artist_name) in &remaining {
+            let mut found = false;
+            for provider in streaming_providers {
+                match provider.search(artist_name, 1).await {
+                    Ok(results) => {
+                        if let Some(artist) = results.artists.iter().find(|a| {
+                            a.name.eq_ignore_ascii_case(artist_name)
+                        }) {
+                            if let Some(ref url) = artist.image_url {
+                                sqlx::query("UPDATE artists SET image_url = ? WHERE id = ? AND image_url IS NULL")
+                                    .bind(url)
+                                    .bind(artist_id)
+                                    .execute(pool)
+                                    .await?;
+                                enriched_ids.push(artist_id.clone());
+                                debug!("streaming provider image for '{}' via {}", artist_name, provider.provider_name());
+                                found = true;
+                                break;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        debug!("streaming provider {} search failed for '{}': {}", provider.provider_name(), artist_name, e);
+                    }
+                }
+            }
+            if !found {
+                debug!("no streaming provider image for '{}'", artist_name);
+            }
+
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+    }
+
+    if !enriched_ids.is_empty() {
+        info!("artist image enrichment complete: {} artists", enriched_ids.len());
+    }
     Ok(enriched_ids)
 }
 
-/// Extract a Discogs artist ID from MusicBrainz URL relations.
-/// Looks for a URL matching `discogs.com/artist/` and extracts the trailing numeric ID.
-fn extract_discogs_artist_id(relations: &[super::types::MBRelation]) -> Option<String> {
+/// Extract a Spotify artist ID from MusicBrainz URL relations.
+/// Looks for a URL matching `open.spotify.com/artist/` and extracts the 22-char ID.
+fn extract_spotify_artist_id(relations: &[super::types::MBRelation]) -> Option<String> {
     for rel in relations {
         if let Some(url_res) = &rel.url {
-            if let Some(pos) = url_res.resource.find("discogs.com/artist/") {
-                let after = &url_res.resource[pos + "discogs.com/artist/".len()..];
-                let id: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if let Some(pos) = url_res.resource.find("open.spotify.com/artist/") {
+                let after = &url_res.resource[pos + "open.spotify.com/artist/".len()..];
+                let id: String = after.chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
                 if !id.is_empty() {
                     return Some(id);
                 }
@@ -482,7 +506,7 @@ pub async fn enrich_artist_top_tracks(
 
     for (artist_id, artist_name) in &rows {
         match deezer::fetch_top_tracks(&client, artist_name, 10).await {
-            Ok((tracks, image_url)) if !tracks.is_empty() => {
+            Ok(tracks) if !tracks.is_empty() => {
                 // Delete existing rows then insert fresh
                 sqlx::query("DELETE FROM artist_top_tracks WHERE artist_id = ?")
                     .bind(artist_id)
@@ -500,15 +524,6 @@ pub async fn enrich_artist_top_tracks(
                     .bind(track.popularity)
                     .execute(pool)
                     .await?;
-                }
-
-                // Update artist image from Deezer if not already set
-                if let Some(img_url) = &image_url {
-                    sqlx::query("UPDATE artists SET image_url = ? WHERE id = ? AND image_url IS NULL")
-                        .bind(img_url)
-                        .bind(artist_id)
-                        .execute(pool)
-                        .await?;
                 }
 
                 enriched_ids.push(artist_id.clone());
@@ -535,6 +550,162 @@ pub async fn enrich_artist_top_tracks(
 
     info!("Deezer top tracks enrichment complete: {} artists", enriched_ids.len());
     Ok(enriched_ids)
+}
+
+/// Fetch artist biographies from Wikipedia via MusicBrainz Wikidata relations.
+/// Resolves Wikidata ID → English Wikipedia article title → Wikipedia summary extract.
+pub async fn enrich_artist_bios_wikipedia(
+    pool: &SqlitePool,
+) -> anyhow::Result<Vec<String>> {
+    let rows: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT id, name, external_id FROM artists \
+         WHERE bio IS NULL AND external_id IS NOT NULL"
+    )
+    .fetch_all(pool)
+    .await?;
+
+    if rows.is_empty() {
+        info!("no artists need Wikipedia bio enrichment");
+        return Ok(Vec::new());
+    }
+
+    info!("enriching {} artists with Wikipedia bios", rows.len());
+
+    let mb_client = MusicBrainzClient::new()?;
+    let http_client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .user_agent("RiffServer/0.1 (riff-music-server; mailto:riff@example.com)")
+        .build()?;
+
+    let mut enriched_ids: Vec<String> = Vec::new();
+
+    for (artist_id, artist_name, mbid) in &rows {
+        // Get Wikidata ID from MusicBrainz relations
+        let wikidata_id = match mb_client.get_artist(mbid).await {
+            Ok(detail) => extract_wikidata_id(&detail.relations),
+            Err(e) => {
+                warn!("MusicBrainz lookup failed for '{}': {}", artist_name, e);
+                continue;
+            }
+        };
+
+        let Some(qid) = wikidata_id else {
+            debug!("no Wikidata link for '{}'", artist_name);
+            continue;
+        };
+
+        // Resolve Wikidata ID → English Wikipedia title via sitelinks
+        let wiki_title = match resolve_wikidata_to_wikipedia(&http_client, &qid).await {
+            Ok(Some(title)) => title,
+            Ok(None) => {
+                debug!("no English Wikipedia article for '{}' ({})", artist_name, qid);
+                continue;
+            }
+            Err(e) => {
+                warn!("Wikidata lookup failed for '{}' ({}): {}", artist_name, qid, e);
+                continue;
+            }
+        };
+
+        // Rate limit between Wikidata and Wikipedia calls
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+        // Fetch plain-text extract from Wikipedia REST API
+        let url = format!(
+            "https://en.wikipedia.org/api/rest_v1/page/summary/{}",
+            wiki_title
+        );
+        match http_client.get(&url).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                #[derive(serde::Deserialize)]
+                struct WikiSummary {
+                    extract: Option<String>,
+                }
+                match resp.json::<WikiSummary>().await {
+                    Ok(summary) => {
+                        if let Some(extract) = summary.extract.filter(|s| s.len() > 20) {
+                            sqlx::query(
+                                "UPDATE artists SET bio = ? WHERE id = ? AND bio IS NULL"
+                            )
+                            .bind(&extract)
+                            .bind(artist_id)
+                            .execute(pool)
+                            .await?;
+                            enriched_ids.push(artist_id.clone());
+                            debug!("Wikipedia bio for '{}' ({} chars)", artist_name, extract.len());
+                        }
+                    }
+                    Err(e) => warn!("Wikipedia JSON parse error for '{}': {}", artist_name, e),
+                }
+            }
+            Ok(resp) => {
+                debug!("Wikipedia returned {} for '{}'", resp.status(), artist_name);
+            }
+            Err(e) => {
+                warn!("Wikipedia fetch error for '{}': {}", artist_name, e);
+            }
+        }
+
+        // Rate limit: Wikipedia asks for courtesy (1 req/sec)
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+
+    info!("Wikipedia bio enrichment complete: {} artists", enriched_ids.len());
+    Ok(enriched_ids)
+}
+
+/// Extract a Wikidata entity ID (e.g. "Q47293799") from MusicBrainz URL relations.
+fn extract_wikidata_id(relations: &[super::types::MBRelation]) -> Option<String> {
+    for rel in relations {
+        if let Some(url_res) = &rel.url {
+            if let Some(pos) = url_res.resource.find("wikidata.org/wiki/") {
+                let after = &url_res.resource[pos + "wikidata.org/wiki/".len()..];
+                let id: String = after.chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
+                if id.starts_with('Q') && id.len() > 1 {
+                    return Some(id);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Resolve a Wikidata entity ID to an English Wikipedia article title via sitelinks.
+async fn resolve_wikidata_to_wikipedia(
+    client: &reqwest::Client,
+    wikidata_id: &str,
+) -> anyhow::Result<Option<String>> {
+    let url = format!(
+        "https://www.wikidata.org/w/api.php?action=wbgetentities&ids={}&props=sitelinks&sitefilter=enwiki&format=json",
+        wikidata_id
+    );
+
+    let resp = client.get(&url).send().await?;
+    if !resp.status().is_success() {
+        anyhow::bail!("Wikidata returned status {}", resp.status());
+    }
+
+    #[derive(serde::Deserialize)]
+    struct WdResponse {
+        entities: std::collections::HashMap<String, WdEntity>,
+    }
+    #[derive(serde::Deserialize)]
+    struct WdEntity {
+        #[serde(default)]
+        sitelinks: std::collections::HashMap<String, WdSitelink>,
+    }
+    #[derive(serde::Deserialize)]
+    struct WdSitelink {
+        title: String,
+    }
+
+    let body: WdResponse = resp.json().await?;
+    let title = body.entities
+        .get(wikidata_id)
+        .and_then(|e| e.sitelinks.get("enwiki"))
+        .map(|sl| sl.title.clone());
+
+    Ok(title)
 }
 
 /// Update tracks in this album with ISRCs from MusicBrainz recordings.
@@ -576,33 +747,6 @@ async fn enrich_track_isrcs(
     if updated > 0 {
         debug!("enriched {} tracks with ISRCs for album {}", updated, album_id);
     }
-}
-
-/// Parse `GROUP_CONCAT(..., '|||')`-separated JSON arrays of genre/style strings
-/// into a deduplicated, lowercased list suitable for Discogs disambiguation.
-fn parse_aggregated_genres(genres_raw: Option<&str>, styles_raw: Option<&str>) -> Vec<String> {
-    let mut seen = std::collections::HashSet::new();
-    let mut result = Vec::new();
-
-    for raw in [genres_raw, styles_raw].into_iter().flatten() {
-        for json_fragment in raw.split("|||") {
-            let fragment = json_fragment.trim();
-            if fragment.is_empty() {
-                continue;
-            }
-            // Each fragment is a JSON array like '["Electronic","Ambient"]'
-            if let Ok(tags) = serde_json::from_str::<Vec<String>>(fragment) {
-                for tag in tags {
-                    let lower = tag.to_lowercase();
-                    if seen.insert(lower.clone()) {
-                        result.push(lower);
-                    }
-                }
-            }
-        }
-    }
-
-    result
 }
 
 fn capitalize_first(s: &str) -> String {

@@ -231,6 +231,78 @@ async fn stream_transcode(
     Ok(Body::from_stream(stream))
 }
 
+/// Re-encode a FLAC file in-place to fix broken frame headers.
+/// Writes to a temp file and atomically replaces the original.
+/// Preserves the original file's mtime so the scanner cache doesn't invalidate.
+pub async fn fix_flac_metadata(path: &std::path::Path) -> Result<(), AppError> {
+    let input = path
+        .to_str()
+        .ok_or_else(|| AppError::Internal("invalid file path".into()))?;
+
+    // Capture original mtime before re-encoding
+    let original_mtime = tokio::fs::metadata(path)
+        .await
+        .ok()
+        .and_then(|m| m.modified().ok());
+
+    let unique_suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64
+        ^ (std::process::id() as u64);
+    let tmp = path.with_extension(format!("flac.{unique_suffix}.tmp"));
+    let tmp_str = tmp
+        .to_str()
+        .ok_or_else(|| AppError::Internal("invalid temp path".into()))?;
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(600),
+        Command::new("ffmpeg")
+            .args(["-i", input, "-c:a", "flac", "-f", "flac", "-y", tmp_str])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .map_err(|_| {
+        let tmp_path = tmp.clone();
+        tokio::spawn(async move { let _ = tokio::fs::remove_file(&tmp_path).await; });
+        AppError::Internal("ffmpeg FLAC re-encode timed out".into())
+    })?
+    .map_err(|e| AppError::Internal(format!("ffmpeg spawn failed: {e}")))?;
+
+    if !result.status.success() {
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err(AppError::Internal(format!(
+            "ffmpeg FLAC re-encode failed: {}",
+            stderr.lines().last().unwrap_or("unknown error")
+        )));
+    }
+
+    // Atomic replace
+    tokio::fs::rename(&tmp, path)
+        .await
+        .map_err(|e| AppError::Internal(format!("FLAC replace rename failed: {e}")))?;
+
+    // Restore original mtime so scanner cache doesn't re-scan
+    if let Some(mtime) = original_mtime {
+        let path = path.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            let _ = filetime::set_file_mtime(
+                &path,
+                filetime::FileTime::from_system_time(mtime),
+            );
+        })
+        .await
+        .ok();
+    }
+
+    tracing::info!("FLAC re-encoded: {}", path.display());
+    Ok(())
+}
+
 /// Remove cached transcode files older than `max_age`.
 /// Also removes orphaned `.tmp` files from cancelled/interrupted transcodes.
 pub async fn cleanup_cache(max_age: std::time::Duration) {

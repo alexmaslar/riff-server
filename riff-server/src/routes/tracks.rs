@@ -310,6 +310,44 @@ pub async fn download_track(
         .unwrap())
 }
 
+#[derive(Debug, Deserialize)]
+pub struct DecodeErrorReport {
+    pub error: String,
+}
+
+/// Report a decode error for a track. When `error` is `"flac_channel_layout"`,
+/// the server re-encodes the FLAC file in the background to fix broken frame headers.
+pub async fn report_decode_error(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    axum::Json(body): axum::Json<DecodeErrorReport>,
+) -> Result<axum::Json<serde_json::Value>, AppError> {
+    if body.error != "flac_channel_layout" {
+        return Ok(axum::Json(serde_json::json!({"status": "ignored", "reason": "unknown error type"})));
+    }
+
+    let row = sqlx::query_as::<_, (String, String)>(
+        "SELECT file_path, format FROM tracks WHERE id = ?",
+    )
+    .bind(&id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| AppError::NotFound("track not found".into()))?;
+
+    let (file_path, format) = row;
+    if format != "FLAC" {
+        return Ok(axum::Json(serde_json::json!({"status": "ignored", "reason": "not a FLAC file"})));
+    }
+
+    tracing::info!("decode error reported for track {id}, re-encoding FLAC");
+
+    let path = std::path::PathBuf::from(file_path);
+    crate::transcode::fix_flac_metadata(&path).await?;
+
+    tracing::info!("FLAC re-encode complete for track {id}");
+    Ok(axum::Json(serde_json::json!({"status": "fixed"})))
+}
+
 /// Parse a Range header value like "bytes=0-1023" or "bytes=1024-"
 fn parse_range(range_header: &str, file_size: u64) -> Option<(u64, u64)> {
     let range_str = range_header.strip_prefix("bytes=")?;

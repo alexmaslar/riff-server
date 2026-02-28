@@ -967,9 +967,8 @@ pub async fn refresh_cover(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, AppError> {
     // Look up album info
-    let (external_id, title, artist_name): (Option<String>, String, String) = sqlx::query_as(
-        "SELECT a.external_id, a.title, ar.name \
-         FROM albums a JOIN artists ar ON a.artist_id = ar.id WHERE a.id = ?",
+    let (external_id,): (Option<String>,) = sqlx::query_as(
+        "SELECT external_id FROM albums WHERE id = ?",
     )
     .bind(&id)
     .fetch_optional(&state.db)
@@ -1001,20 +1000,6 @@ pub async fn refresh_cover(
                         cover_bytes = Some(bytes.to_vec());
                     }
                 }
-            }
-        }
-    }
-
-    // Fallback: try Discogs if configured
-    if cover_bytes.is_none() {
-        let config = state.config.read().await;
-        if let Some(ref token) = config.metadata.discogs_api_key {
-            let client = reqwest::Client::new();
-            match riff_core::discogs::fetch_album_cover(&client, &artist_name, &title, token).await
-            {
-                Ok(Some(bytes)) => cover_bytes = Some(bytes),
-                Ok(None) => {}
-                Err(e) => tracing::warn!("Discogs cover search failed: {e}"),
             }
         }
     }

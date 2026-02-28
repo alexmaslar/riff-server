@@ -63,7 +63,6 @@ pub struct ArtistDetailResponse {
     pub is_favorited: bool,
     pub similar_artists: Vec<SimilarArtist>,
     pub popular_tracks: Vec<PopularTrack>,
-    pub bio_polished: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -87,7 +86,7 @@ pub async fn list_artists(
     let rows = if let Some(ref search) = params.search {
         let pattern = format!("%{}%", search);
         sqlx::query_as::<_, (String, String, Option<String>, Option<String>, i64)>(
-            "SELECT id, name, COALESCE(editorial_bio, bio) as bio, image_url, COUNT(*) OVER() as total_count \
+            "SELECT id, name, bio, image_url, COUNT(*) OVER() as total_count \
              FROM artists \
              WHERE name LIKE ? AND library_id IN (SELECT value FROM json_each(?)) \
              ORDER BY name LIMIT ? OFFSET ?",
@@ -100,7 +99,7 @@ pub async fn list_artists(
         .await
     } else {
         sqlx::query_as::<_, (String, String, Option<String>, Option<String>, i64)>(
-            "SELECT id, name, COALESCE(editorial_bio, bio) as bio, image_url, COUNT(*) OVER() as total_count \
+            "SELECT id, name, bio, image_url, COUNT(*) OVER() as total_count \
              FROM artists \
              WHERE library_id IN (SELECT value FROM json_each(?)) \
              ORDER BY name LIMIT ? OFFSET ?",
@@ -340,39 +339,13 @@ pub async fn get_streaming_albums(
     })))
 }
 
-#[derive(Debug, Deserialize)]
-pub struct UpdateBioRequest {
-    pub bio: String,
-}
-
-pub async fn update_bio(
-    State(state): State<Arc<AppState>>,
-    Extension(_claims): Extension<Claims>,
-    Path(id): Path<String>,
-    Json(body): Json<UpdateBioRequest>,
-) -> Result<Json<Value>, AppError> {
-    let result = sqlx::query(
-        "UPDATE artists SET editorial_bio = ?, editorial_bio_polished = 1 WHERE id = ?",
-    )
-    .bind(&body.bio)
-    .bind(&id)
-    .execute(&state.db)
-    .await?;
-
-    if result.rows_affected() == 0 {
-        return Err(AppError::NotFound("artist not found".into()));
-    }
-
-    Ok(Json(json!({ "success": true })))
-}
-
 pub async fn build_artist_detail(
     db: &SqlitePool,
     artist_id: &str,
     user_id: &str,
 ) -> Result<ArtistDetailResponse, AppError> {
-    let artist = sqlx::query_as::<_, (String, String, Option<String>, Option<String>, i32)>(
-        "SELECT id, name, COALESCE(editorial_bio, bio) as bio, image_url, editorial_bio_polished FROM artists WHERE id = ?",
+    let artist = sqlx::query_as::<_, (String, String, Option<String>, Option<String>)>(
+        "SELECT id, name, bio, image_url FROM artists WHERE id = ?",
     )
     .bind(artist_id)
     .fetch_optional(db)
@@ -484,6 +457,5 @@ pub async fn build_artist_detail(
         is_favorited,
         similar_artists,
         popular_tracks,
-        bio_polished: artist.4 != 0,
     })
 }

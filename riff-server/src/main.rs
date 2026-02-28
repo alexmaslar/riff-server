@@ -128,30 +128,34 @@ async fn run_background_pipeline(state: Arc<AppState>) {
         )
         .await;
 
-        // Step 2b: Discogs artist images (if API key configured)
+        // Step 2b: Spotify artist images + streaming provider fallback
         {
-            let config = state.config.read().await;
-            if let Some(ref api_key) = config.metadata.discogs_api_key {
-                let api_key = api_key.clone();
-                let db = state.db.clone();
-                drop(config);
-                match musicbrainz::enrich_artist_images_discogs(&db, &api_key).await {
-                    Ok(ids) if !ids.is_empty() => {
-                        tracing::info!("discogs artist images: {} artists updated", ids.len());
-                        artist_ids.extend(ids);
-                    }
-                    Ok(_) => {}
-                    Err(e) => tracing::warn!("discogs artist images failed: {e}"),
+            let db = state.db.clone();
+            let providers = state.plugin_registry.read().await.streaming_providers().to_vec();
+            match musicbrainz::enrich_artist_images_spotify(&db, &providers).await {
+                Ok(ids) if !ids.is_empty() => {
+                    tracing::info!("artist images: {} artists updated", ids.len());
+                    artist_ids.extend(ids);
                 }
+                Ok(_) => {}
+                Err(e) => tracing::warn!("artist image enrichment failed: {e}"),
             }
         }
 
-        // Step 2c: Deezer top tracks + artist images fallback (no API key needed)
+        // Step 2c: Deezer top tracks (no API key needed)
         if let Some(ids) = run_stage_result(&state.top_tracks_running, "top tracks", {
             let db = state.db.clone();
             async move { musicbrainz::enrich_artist_top_tracks(&db).await }
         }).await {
             artist_ids.extend(ids);
+        }
+
+        // Step 2d: Wikipedia bios (no API key needed)
+        {
+            let db = state.db.clone();
+            let wiki_ids = musicbrainz::enrich_artist_bios_wikipedia(&db).await
+                .unwrap_or_else(|e| { tracing::warn!("Wikipedia bio enrichment failed: {e}"); vec![] });
+            artist_ids.extend(wiki_ids);
         }
 
         // Step 3: Analysis (always)
@@ -635,7 +639,6 @@ async fn main() -> Result<()> {
         .route("/artists", get(routes::artists::list_artists))
         .route("/artists/stories", get(routes::artists::artist_stories))
         .route("/artists/{id}", get(routes::artists::get_artist))
-        .route("/artists/{id}/bio", put(routes::artists::update_bio))
         .route("/artists/{id}/streaming-albums", get(routes::artists::get_streaming_albums))
         .route("/albums", get(routes::albums::list_albums))
         .route("/albums/filters", get(routes::albums::list_filters))
@@ -645,6 +648,7 @@ async fn main() -> Result<()> {
         .route("/albums/{id}/play", post(routes::albums::increment_play_count))
         .route("/albums/{id}/reviews/hidden", get(routes::albums::get_hidden_reviews))
         .route("/albums/{id}/reviews/{source}/toggle-hidden", post(routes::albums::toggle_review_visibility))
+        .route("/tracks/{id}/report-decode-error", post(routes::tracks::report_decode_error))
         .route("/playlists", get(routes::playlists::list_playlists).post(routes::playlists::create_playlist))
         .route("/playlists/{id}", get(routes::playlists::get_playlist).delete(routes::playlists::delete_playlist))
         .route("/playlists/{id}/tracks", post(routes::playlists::add_track).put(routes::playlists::reorder_tracks))

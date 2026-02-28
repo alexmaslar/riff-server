@@ -278,19 +278,12 @@ pub async fn clear_data(
         )
             .execute(&state.db)
             .await?;
-        let bios = sqlx::query(
-            "UPDATE artists SET editorial_bio = NULL, editorial_bio_source = NULL, \
-             editorial_bio_updated_at = NULL, editorial_bio_polished = 0 \
-             WHERE editorial_bio IS NOT NULL"
-        )
-            .execute(&state.db)
-            .await?;
         let reviews = sqlx::query("DELETE FROM editorial_reviews")
             .execute(&state.db)
             .await?;
-        let total = summaries.rows_affected() + bios.rows_affected() + reviews.rows_affected();
-        tracing::info!("Cleared editorial data: {} albums, {} artist bios, {} reviews",
-            summaries.rows_affected(), bios.rows_affected(), reviews.rows_affected());
+        let total = summaries.rows_affected() + reviews.rows_affected();
+        tracing::info!("Cleared editorial data: {} albums, {} reviews",
+            summaries.rows_affected(), reviews.rows_affected());
         cleared.insert("editorial_data".into(), json!(total));
     }
 

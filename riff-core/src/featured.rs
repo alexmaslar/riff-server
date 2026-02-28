@@ -133,7 +133,7 @@ async fn score_artists(pool: &SqlitePool, user_id: &str, library_ids_json: &str)
     let rows = sqlx::query(
         "SELECT
             ar.id,
-            ar.editorial_bio IS NOT NULL OR ar.bio IS NOT NULL AS has_bio,
+            ar.bio IS NOT NULL AS has_bio,
             ar.image_url IS NOT NULL AS has_image,
             COUNT(DISTINCT a.id) AS album_count,
             MIN(julianday('now') - julianday(a.added_at)) AS min_days_since_added,
