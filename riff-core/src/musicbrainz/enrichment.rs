@@ -206,16 +206,16 @@ async fn enrich_one_album(
     let label = release.label_info.first().and_then(|li| li.label.as_ref().map(|l| l.name.clone()));
     let catno = release.label_info.first().and_then(|li| li.catalog_number.clone());
 
-    // Genres sorted by vote count
-    let mut genres: Vec<&str> = release.genres.iter()
-        .map(|g| g.name.as_str())
+    // Genres sorted alphabetically, title-cased
+    let mut genres: Vec<String> = release.genres.iter()
+        .map(|g| crate::db::title_case_genre(&g.name))
         .collect();
     genres.sort();
     let genre_json = serde_json::to_string(&genres)?;
 
-    // Tags sorted by vote count → style column
-    let mut tags: Vec<&str> = release.tags.iter()
-        .map(|t| t.name.as_str())
+    // Tags sorted alphabetically, title-cased → style column
+    let mut tags: Vec<String> = release.tags.iter()
+        .map(|t| crate::db::title_case_genre(&t.name))
         .collect();
     tags.sort();
     let style_json = serde_json::to_string(&tags)?;

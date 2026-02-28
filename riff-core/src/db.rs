@@ -29,7 +29,76 @@ pub async fn init_pool() -> anyhow::Result<SqlitePool> {
 
     sqlx::migrate!("./migrations").run(&pool).await?;
 
+    normalize_genre_casing(&pool).await?;
+
     Ok(pool)
+}
+
+/// Title-case a genre/style string: "alternative rock" → "Alternative Rock".
+/// Handles hyphenated words ("post-punk" → "Post-Punk") and preserves
+/// all-caps abbreviations like "R&B", "DJ", "UK", "US", "EDM", "IDM".
+pub fn title_case_genre(s: &str) -> String {
+    s.split_whitespace()
+        .map(|word| {
+            // Preserve known all-caps tokens
+            let upper = word.to_uppercase();
+            if matches!(upper.as_str(), "R&B" | "DJ" | "UK" | "US" | "EDM" | "IDM" | "EBM" | "MPB" | "II" | "III" | "IV") {
+                return upper;
+            }
+            // Handle hyphenated words: "post-punk" → "Post-Punk"
+            word.split('-')
+                .map(|part| {
+                    let mut chars = part.chars();
+                    match chars.next() {
+                        None => String::new(),
+                        Some(c) => {
+                            let mut s = c.to_uppercase().to_string();
+                            s.extend(chars.map(|ch| ch.to_lowercase().next().unwrap_or(ch)));
+                            s
+                        }
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("-")
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// One-time normalization: title-case all genre and style JSON arrays in albums.
+async fn normalize_genre_casing(pool: &SqlitePool) -> anyhow::Result<()> {
+    let rows: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT id, genre, style FROM albums",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut updated = 0u64;
+    for (id, genre_str, style_str) in &rows {
+        let genres: Vec<String> = serde_json::from_str(genre_str).unwrap_or_default();
+        let styles: Vec<String> = serde_json::from_str(style_str).unwrap_or_default();
+
+        let new_genres: Vec<String> = genres.iter().map(|g| title_case_genre(g)).collect();
+        let new_styles: Vec<String> = styles.iter().map(|s| title_case_genre(s)).collect();
+
+        if new_genres != genres || new_styles != styles {
+            let genre_json = serde_json::to_string(&new_genres)?;
+            let style_json = serde_json::to_string(&new_styles)?;
+            sqlx::query("UPDATE albums SET genre = ?, style = ? WHERE id = ?")
+                .bind(&genre_json)
+                .bind(&style_json)
+                .bind(id)
+                .execute(pool)
+                .await?;
+            updated += 1;
+        }
+    }
+
+    if updated > 0 {
+        info!("normalized genre/style casing for {} albums", updated);
+    }
+
+    Ok(())
 }
 
 /// Sync the `libraries` table with the config entries.

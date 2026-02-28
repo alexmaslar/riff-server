@@ -113,7 +113,6 @@ pub async fn list_downloads(
                     "scanning" => "Scanning library...",
                     "enriching" => "Enriching metadata...",
                     "editorial" => "Fetching reviews...",
-                    "summarizing" => "Writing summary...",
                     "rating" => "Rating...",
                     "extracting_tags" => "Extracting tags...",
                     "complete" => "Complete",

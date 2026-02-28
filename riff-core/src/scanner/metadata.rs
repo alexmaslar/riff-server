@@ -425,7 +425,7 @@ pub fn extract_metadata(path: &Path) -> anyhow::Result<TrackMetadata> {
             }
             Some(StandardTagKey::Genre) => {
                 let genre_str = tag.value.to_string();
-                for g in genre_str.split(';').map(|s| s.trim().to_string()) {
+                for g in genre_str.split(';').map(|s| crate::db::title_case_genre(s.trim())) {
                     if !g.is_empty() && !meta.genre.contains(&g) {
                         meta.genre.push(g);
                     }

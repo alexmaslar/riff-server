@@ -58,8 +58,6 @@ pub struct AlbumDetailResponse {
     pub label: Option<String>,
     pub catalog_number: Option<String>,
     pub cover_art_path: Option<String>,
-    pub summary: Option<String>,
-    pub summary_source: Option<String>,
     pub rating: Option<f64>,
     pub rating_sources: Vec<serde_json::Value>,
     pub moods: Vec<String>,
@@ -476,8 +474,6 @@ pub async fn build_album_detail(
         label: album_row.get(7),
         catalog_number: album_row.get(8),
         cover_art_path: album_row.get(9),
-        summary: album_row.get(10),
-        summary_source: album_row.get(23),
         rating: album_row.get(11),
         rating_sources: serde_json::from_str(&rating_sources_str).unwrap_or_default(),
         moods: serde_json::from_str(&moods_str).unwrap_or_default(),
@@ -1161,32 +1157,6 @@ pub async fn delete_album(
     }
 
     Ok(Json(json!({"ok": true})))
-}
-
-#[derive(Debug, Deserialize)]
-pub struct UpdateSummaryRequest {
-    pub summary: String,
-}
-
-pub async fn update_summary(
-    State(state): State<Arc<AppState>>,
-    Extension(_claims): Extension<Claims>,
-    Path(id): Path<String>,
-    Json(body): Json<UpdateSummaryRequest>,
-) -> Result<Json<Value>, AppError> {
-    let result = sqlx::query(
-        "UPDATE albums SET summary = ? WHERE id = ?",
-    )
-    .bind(&body.summary)
-    .bind(&id)
-    .execute(&state.db)
-    .await?;
-
-    if result.rows_affected() == 0 {
-        return Err(AppError::NotFound("album not found".into()));
-    }
-
-    Ok(Json(json!({ "success": true })))
 }
 
 pub async fn increment_play_count(

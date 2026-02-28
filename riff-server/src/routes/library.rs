@@ -123,16 +123,6 @@ pub async fn library_stats(State(state): State<Arc<AppState>>) -> Result<Json<Va
             .fetch_one(&state.db)
             .await?;
 
-    let (editorial_enriched, pending_editorial): (i64, i64) =
-        sqlx::query_as(
-            "SELECT \
-             SUM(CASE WHEN summary IS NOT NULL THEN 1 ELSE 0 END), \
-             SUM(CASE WHEN summary IS NULL AND metadata_status = 'matched' THEN 1 ELSE 0 END) \
-             FROM albums"
-        )
-            .fetch_one(&state.db)
-            .await?;
-
     Ok(Json(json!({
         "artists": artist_count,
         "albums": album_count,
@@ -140,8 +130,6 @@ pub async fn library_stats(State(state): State<Arc<AppState>>) -> Result<Json<Va
         "totalSize": total_size,
         "analyzed": analyzed,
         "pendingAnalysis": pending_analysis,
-        "editorialEnriched": editorial_enriched,
-        "pendingEditorial": pending_editorial,
     })))
 }
 
@@ -271,10 +259,10 @@ pub async fn clear_data(
 
     if body.editorial_data == Some(true) {
         let summaries = sqlx::query(
-            "UPDATE albums SET summary = NULL, rating = NULL, \
+            "UPDATE albums SET rating = NULL, \
              moods = '[]', descriptors = '[]', keywords = '[]', \
-             summary_source = NULL, rating_sources = '[]', summary_updated_at = NULL \
-             WHERE summary IS NOT NULL OR rating IS NOT NULL OR moods != '[]'"
+             rating_sources = '[]' \
+             WHERE rating IS NOT NULL OR moods != '[]'"
         )
             .execute(&state.db)
             .await?;

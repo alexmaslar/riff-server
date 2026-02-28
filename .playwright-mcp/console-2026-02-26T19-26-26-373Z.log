@@ -1,0 +1,7 @@
+[     289ms] [WARNING] Allow attribute will take precedence over 'allowfullscreen'. @ https://northerntransmissions.com/mitski-nothings-about-to-happen-to-me/:251
+[     499ms] [ERROR] Attestation check for Attribution Reporting on https://www.google-analytics.com failed. @ https://northerntransmissions.com/mitski-nothings-about-to-happen-to-me/:0
+[    1194ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[    1345ms] [ERROR] Attestation check for Attribution Reporting on https://www.google-analytics.com failed. @ https://northerntransmissions.com/mitski-nothings-about-to-happen-to-me/:0
+[    1194ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[    1622ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[    1708ms] [ERROR] Attestation check for Attribution Reporting on https://www.google-analytics.com failed. @ https://northerntransmissions.com/mitski-nothings-about-to-happen-to-me/:0

@@ -1,0 +1,6 @@
+[    1699ms] [WARNING] [Meta Pixel] - Removed parameters from custom data due to potential violations. Go to Events Manager to learn more. @ https://cdn.quantummetric.com/qscripts/quantum-conde.js:110
+[    1699ms] [WARNING] [Meta Pixel] - Removed URL query parameters due to potential violations. @ https://cdn.quantummetric.com/qscripts/quantum-conde.js:110
+[    1793ms] [ERROR] Attestation check for Attribution Reporting on https://www.facebook.com failed. @ https://pitchfork.com/search/?q=Fontaines+DC+Romance:0
+[    3326ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[    3326ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[    3464ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0

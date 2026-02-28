@@ -1,0 +1,4 @@
+[     298ms] [ERROR] Failed to load resource: the server responded with a status of 404 () @ https://pitchfork.com/reviews/albums/radiohead-ok-computer/:0
+[     309ms] [WARNING] SDK loading skipped - missing requirements: {hasClientSdkKey: true, hasApiHost: true, enableClient: true, hasExpId: false} @ https://pitchfork.com/reviews/albums/radiohead-ok-computer/:1120
+[    1219ms] [WARNING] [Meta Pixel] - Removed parameters from custom data due to potential violations. Go to Events Manager to learn more. @ https://connect.facebook.net/en_US/fbevents.js:171
+[    1489ms] [ERROR] Attestation check for Attribution Reporting on https://www.facebook.com failed. @ https://pitchfork.com/reviews/albums/radiohead-ok-computer/:0

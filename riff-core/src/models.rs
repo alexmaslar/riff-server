@@ -34,7 +34,6 @@ pub struct Album {
     pub label: Option<String>,
     pub catalog_number: Option<String>,
     pub cover_art_path: Option<String>,
-    pub summary: Option<String>,
     pub metadata_status: String,
     pub added_at: NaiveDateTime,
     pub country: Option<String>,

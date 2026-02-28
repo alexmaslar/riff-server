@@ -1,0 +1,48 @@
+[     221ms] [ERROR] Failed to load resource: the server responded with a status of 404 () @ https://pitchfork.com/rss/reviews/albums/:0
+[     623ms] [WARNING] [Meta Pixel] - Removed parameters from custom data due to potential violations. Go to Events Manager to learn more. @ https://cdn.quantummetric.com/qscripts/quantum-conde.js:110
+[     701ms] [ERROR] Attestation check for Attribution Reporting on https://www.facebook.com failed. @ https://pitchfork.com/rss/reviews/albums/:0
+[  262735ms] [ERROR] Failed to load resource: net::ERR_HTTP2_PROTOCOL_ERROR @ https://variants.conde.digital/sub/sdk-LNwIx5l2RsABsNl:0
+[ 1582759ms] [ERROR] Failed to load resource: net::ERR_HTTP2_PROTOCOL_ERROR @ https://variants.conde.digital/sub/sdk-LNwIx5l2RsABsNl:0
+[ 3043891ms] [ERROR] Failed to load resource: net::ERR_HTTP2_PROTOCOL_ERROR @ https://variants.conde.digital/sub/sdk-LNwIx5l2RsABsNl:0
+[ 3742805ms] [ERROR] Failed to load resource: net::ERR_HTTP2_PROTOCOL_ERROR @ https://variants.conde.digital/sub/sdk-LNwIx5l2RsABsNl:0
+[ 4791800ms] [ERROR] Failed to load resource: net::ERR_HTTP2_PROTOCOL_ERROR @ https://variants.conde.digital/sub/sdk-LNwIx5l2RsABsNl:0
+[ 5409700ms] [ERROR] Failed to load resource: net::ERR_HTTP2_PROTOCOL_ERROR @ https://variants.conde.digital/sub/sdk-LNwIx5l2RsABsNl:0
+[ 6715887ms] [ERROR] Failed to load resource: net::ERR_HTTP2_PROTOCOL_ERROR @ https://variants.conde.digital/sub/sdk-LNwIx5l2RsABsNl:0
+[ 7900067ms] [ERROR] Failed to load resource: net::ERR_HTTP2_PROTOCOL_ERROR @ https://variants.conde.digital/sub/sdk-LNwIx5l2RsABsNl:0
+[ 7922505ms] [WARNING] [Meta Pixel] - Removed parameters from custom data due to potential violations. Go to Events Manager to learn more. @ https://cdn.quantummetric.com/qscripts/quantum-conde.js:110
+[ 7922675ms] [ERROR] Attestation check for Attribution Reporting on https://www.facebook.com failed. @ https://pitchfork.com/reviews/albums/:0
+[ 7923130ms] [ERROR] Refused to set unsafe header "access-control-request-method" @ https://pitchfork.com/verso/static/1665.fd8c970ece7f6c91f683.js:0
+[ 7923130ms] [ERROR] Refused to set unsafe header "access-control-request-headers" @ https://pitchfork.com/verso/static/1665.fd8c970ece7f6c91f683.js:0
+[ 7923130ms] [ERROR] Refused to set unsafe header "user-agent" @ https://pitchfork.com/verso/static/1665.fd8c970ece7f6c91f683.js:0
+[ 7923131ms] [ERROR] Refused to set unsafe header "access-control-request-method" @ https://pitchfork.com/verso/static/1665.fd8c970ece7f6c91f683.js:0
+[ 7923131ms] [ERROR] Refused to set unsafe header "access-control-request-headers" @ https://pitchfork.com/verso/static/1665.fd8c970ece7f6c91f683.js:0
+[ 7923131ms] [ERROR] Refused to set unsafe header "user-agent" @ https://pitchfork.com/verso/static/1665.fd8c970ece7f6c91f683.js:0
+[ 7923132ms] [ERROR] Refused to set unsafe header "access-control-request-method" @ https://pitchfork.com/verso/static/1665.fd8c970ece7f6c91f683.js:0
+[ 7923132ms] [ERROR] Refused to set unsafe header "access-control-request-headers" @ https://pitchfork.com/verso/static/1665.fd8c970ece7f6c91f683.js:0
+[ 7923132ms] [ERROR] Refused to set unsafe header "user-agent" @ https://pitchfork.com/verso/static/1665.fd8c970ece7f6c91f683.js:0
+[ 7923134ms] [ERROR] Refused to set unsafe header "access-control-request-method" @ https://pitchfork.com/verso/static/1665.fd8c970ece7f6c91f683.js:0
+[ 7923134ms] [ERROR] Refused to set unsafe header "access-control-request-headers" @ https://pitchfork.com/verso/static/1665.fd8c970ece7f6c91f683.js:0
+[ 7923134ms] [ERROR] Refused to set unsafe header "user-agent" @ https://pitchfork.com/verso/static/1665.fd8c970ece7f6c91f683.js:0
+[ 7923375ms] [WARNING] [Meta Pixel] - Removed parameters from custom data due to potential violations. Go to Events Manager to learn more. @ https://cdn.quantummetric.com/qscripts/quantum-conde.js:110
+[ 7923463ms] [ERROR] Attestation check for Attribution Reporting on https://www.facebook.com failed. @ https://pitchfork.com/reviews/albums/zel-still-right-here/:0
+[ 7923614ms] [WARNING] Allow attribute will take precedence over 'allowfullscreen'. @ https://player.cnevids.com/script/video/692e03848f0296695d271fc4.js?autoplay=1&muted=1&continuousPlay=1&hasCompanion=false&hideHoverTitle=1&hidePosterTitle=1&interludeOverride=true&onReady=setupInterlude1&playerType=interlude&recAlgorithm=sitewideInterludeVideoOverride&recStrategy=sitewideInterludeVideoOverride&showPlaylistBar=false&isFullBleed=false&isRightRail=false&onIframeReady=onIframeReady17720376711651&videoEmbedPosition=inlineInjected:0
+[ 7925426ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[ 7925426ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[ 7926018ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[ 7925426ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[ 7926018ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[ 7926339ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[ 7926505ms] [ERROR] Failed to load resource: net::ERR_NAME_NOT_RESOLVED @ https://sync.search.spotxchange.com/partner?adv_id=7025&gdpr=0&gpp=DBABLA~BVQqAAAAAABY.QA&gpp_sid=7&redir=https%3A%2F%2Fcm.g.doubleclick.net%2Fpixel%3Fgoogle_nid%3Dspotxchange_dbm%26google_hm%3D%24SPOTX_BASE64_USER_ID:0
+[ 7926546ms] [ERROR] Failed to load resource: net::ERR_NAME_NOT_RESOLVED @ https://sync.search.spotxchange.com/partner?adv_id=7025&gdpr=0&gpp=DBABLA~BVQqAAAAAABY.QA&gpp_sid=7&uid=CAESEIGg_9ET1cCBDh3YrHvZae8&google_cver=1:0
+[ 7925426ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[ 7926018ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[ 7926339ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[ 7926750ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[ 7926505ms] [ERROR] Failed to load resource: net::ERR_NAME_NOT_RESOLVED @ https://sync.search.spotxchange.com/partner?adv_id=7025&gdpr=0&gpp=DBABLA~BVQqAAAAAABY.QA&gpp_sid=7&redir=https%3A%2F%2Fcm.g.doubleclick.net%2Fpixel%3Fgoogle_nid%3Dspotxchange_dbm%26google_hm%3D%24SPOTX_BASE64_USER_ID:0
+[ 7926546ms] [ERROR] Failed to load resource: net::ERR_NAME_NOT_RESOLVED @ https://sync.search.spotxchange.com/partner?adv_id=7025&gdpr=0&gpp=DBABLA~BVQqAAAAAABY.QA&gpp_sid=7&uid=CAESEIGg_9ET1cCBDh3YrHvZae8&google_cver=1:0
+[ 7925426ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[ 7926018ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[ 7926339ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[ 7926750ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[ 7926978ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[ 7927481ms] Failed to read a named property 'addEventListener' from 'Window': Blocked a frame with origin "https://aax-events-cell01-cf.us-east.aps.axp.amazon-adsystem.com" from accessing a cross-origin frame.

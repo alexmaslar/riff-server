@@ -1,0 +1,7 @@
+[    1171ms] [WARNING] Allow attribute will take precedence over 'allowfullscreen'. @ https://northerntransmissions.com/tigers-blood-by-waxahatchee/:251
+[    1405ms] [ERROR] Attestation check for Attribution Reporting on https://www.google-analytics.com failed. @ https://northerntransmissions.com/tigers-blood-by-waxahatchee/:0
+[    2066ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[    2185ms] [ERROR] Attestation check for Attribution Reporting on https://www.google-analytics.com failed. @ https://northerntransmissions.com/tigers-blood-by-waxahatchee/:0
+[    2066ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[    2516ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[    2600ms] [ERROR] Attestation check for Attribution Reporting on https://www.google-analytics.com failed. @ https://northerntransmissions.com/tigers-blood-by-waxahatchee/:0

@@ -1,0 +1,7 @@
+[    1089ms] [WARNING] Allow attribute will take precedence over 'allowfullscreen'. @ https://northerntransmissions.com/fontaines-d-c-romance/:251
+[    1271ms] [ERROR] Attestation check for Attribution Reporting on https://www.google-analytics.com failed. @ https://northerntransmissions.com/fontaines-d-c-romance/:0
+[    2034ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[    2103ms] [ERROR] Attestation check for Attribution Reporting on https://www.google-analytics.com failed. @ https://northerntransmissions.com/fontaines-d-c-romance/:0
+[    2034ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[    2503ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[    2573ms] [ERROR] Attestation check for Attribution Reporting on https://www.google-analytics.com failed. @ https://northerntransmissions.com/fontaines-d-c-romance/:0

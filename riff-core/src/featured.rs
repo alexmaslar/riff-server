@@ -5,7 +5,6 @@ use std::hash::{Hash, Hasher};
 // Scoring constants
 const SCORE_FAVORITE: f64 = 3.0;
 const SCORE_PLAY_CAP: f64 = 2.0;
-const SCORE_HAS_SUMMARY: f64 = 1.5;
 const SCORE_HAS_COVER: f64 = 1.0;
 const SCORE_NEWNESS_MAX: f64 = 2.0;
 const SCORE_NEWNESS_DAYS: f64 = 30.0;
@@ -24,7 +23,6 @@ async fn score_albums(pool: &SqlitePool, user_id: &str, library_ids_json: &str) 
         "SELECT
             a.id,
             a.rating,
-            a.summary IS NOT NULL AS has_summary,
             a.cover_art_path IS NOT NULL AS has_cover,
             a.is_compilation,
             julianday('now') - julianday(a.added_at) AS days_since_added,
@@ -65,7 +63,6 @@ async fn score_albums(pool: &SqlitePool, user_id: &str, library_ids_json: &str) 
         .map(|row| {
             let id: String = row.get("id");
             let album_rating: Option<f64> = row.get("rating");
-            let has_summary: bool = row.get("has_summary");
             let has_cover: bool = row.get("has_cover");
             let is_compilation: bool = row.get("is_compilation");
             let days_since_added: f64 = row.get("days_since_added");
@@ -83,9 +80,6 @@ async fn score_albums(pool: &SqlitePool, user_id: &str, library_ids_json: &str) 
             // Play engagement: ln(1 + play_count) capped
             score += ((1.0 + play_count as f64).ln()).min(SCORE_PLAY_CAP);
 
-            if has_summary {
-                score += SCORE_HAS_SUMMARY;
-            }
             if has_cover {
                 score += SCORE_HAS_COVER;
             }

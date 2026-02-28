@@ -1,0 +1,7 @@
+[    1097ms] [WARNING] Allow attribute will take precedence over 'allowfullscreen'. @ https://northerntransmissions.com/interpol-marauder-review/:251
+[    2374ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[    2374ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[    3572ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[    3749ms] [ERROR] Attestation check for Attribution Reporting on https://www.google-analytics.com failed. @ https://northerntransmissions.com/interpol-marauder-review/:0
+[    3749ms] [ERROR] Attestation check for Attribution Reporting on https://www.google-analytics.com failed. @ https://northerntransmissions.com/interpol-marauder-review/:0
+[    3749ms] [ERROR] Attestation check for Attribution Reporting on https://www.google-analytics.com failed. @ https://northerntransmissions.com/interpol-marauder-review/:0

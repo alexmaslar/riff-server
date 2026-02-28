@@ -644,7 +644,6 @@ async fn main() -> Result<()> {
         .route("/albums/filters", get(routes::albums::list_filters))
         .route("/genres", get(routes::albums::list_genres))
         .route("/albums/{id}", get(routes::albums::get_album))
-        .route("/albums/{id}/summary", put(routes::albums::update_summary))
         .route("/albums/{id}/play", post(routes::albums::increment_play_count))
         .route("/albums/{id}/reviews/hidden", get(routes::albums::get_hidden_reviews))
         .route("/albums/{id}/reviews/{source}/toggle-hidden", post(routes::albums::toggle_review_visibility))

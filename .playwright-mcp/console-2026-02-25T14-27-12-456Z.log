@@ -1,0 +1,20 @@
+[    5483ms] [WARNING] [Meta Pixel] - Removed parameters from custom data due to potential violations. Go to Events Manager to learn more. @ https://cdn.quantummetric.com/qscripts/quantum-conde.js:110
+[    5483ms] [WARNING] [Meta Pixel] - Removed URL query parameters due to potential violations. @ https://cdn.quantummetric.com/qscripts/quantum-conde.js:110
+[    5567ms] [ERROR] Attestation check for Attribution Reporting on https://www.facebook.com failed. @ https://pitchfork.com/search/?q=taylor+swift+1989:0
+[    9439ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[    9520ms] [ERROR] Failed to load resource: net::ERR_NAME_NOT_RESOLVED @ https://cs.lkqd.net/cs?partnerId=97&partnerUserId=4a9fb1d2-1cbf-412e-9000-720bfbf261d3-699f0646-5553:0
+[    9439ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[    9542ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[    9439ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[    9542ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[    9836ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[    9989ms] Failed to read a named property 'addEventListener' from 'Window': Blocked a frame with origin "https://c25a37c09b9cc39199fb3e8310b13cf1.safeframe.googlesyndication.com" from accessing a cross-origin frame.
+[   10244ms] SecurityError: Failed to read a named property from 'Location': Blocked a frame with origin "https://aax-events-cell01-cf.us-east.aps.axp.amazon-adsystem.com" from accessing a cross-origin frame.
+    at https://aax-events-cell01-cf.us-east.aps.axp.amazon-adsystem.com/e/dtb/admi?b=JI7bRMQ2pu3p2XGyx_VhI1gAAAGclTKAbgEAAAvbAQBhcHNfdHhuX2JpZDIgICBhcHNfdHhuX2ltcDEgICBxsQQS&rnd=2501183806371772029642253&pp=1qblssg&p=3ai6m8&crid=2238:8693455:38:447
+[    9520ms] [ERROR] Failed to load resource: net::ERR_NAME_NOT_RESOLVED @ https://cs.lkqd.net/cs?partnerId=97&partnerUserId=4a9fb1d2-1cbf-412e-9000-720bfbf261d3-699f0646-5553:0
+[    9439ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[    9542ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[    9836ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[   10463ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[   10463ms] [ERROR] Failed to load resource: net::ERR_NAME_NOT_RESOLVED @ https://tags.bluekai.com/site/2964?id=L6vjdssi1VVfQO5:0
+[   10641ms] [ERROR] Failed to load resource: the server responded with a status of 400 () @ https://gotham.prd-00.retargetly.com/sync?sid=4a9fb1d2-1cbf-412e-9000-720bfbf261d3-699f0646-5553&pid=23:0

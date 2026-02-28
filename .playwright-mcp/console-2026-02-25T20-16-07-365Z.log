@@ -1,0 +1,298 @@
+[    5067ms] [WARNING] [Meta Pixel] - Removed parameters from custom data due to potential violations. Go to Events Manager to learn more. @ https://cdn.quantummetric.com/qscripts/quantum-conde.js:110
+[    5067ms] [WARNING] [Meta Pixel] - Removed URL query parameters due to potential violations. @ https://cdn.quantummetric.com/qscripts/quantum-conde.js:110
+[    5173ms] [ERROR] Attestation check for Attribution Reporting on https://www.facebook.com failed. @ https://pitchfork.com/search/?q=Kendrick+Lamar:0
+[    6586ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[    6605ms] [ERROR] Attestation check for Attribution Reporting on https://ad.doubleclick.net failed. @ https://pitchfork.com/search/?q=Kendrick+Lamar:0
+[    6681ms] [ERROR] Attestation check for Attribution Reporting on https://ad.doubleclick.net failed. @ https://pitchfork.com/search/?q=Kendrick+Lamar:0
+[    6822ms] [ERROR] Failed to load resource: the server responded with a status of 410 (Gone) @ https://ads.stickyadstv.com/user-matching?id=11:0
+[    6836ms] [ERROR] Failed to load resource: the server responded with a status of 410 (Gone) @ https://ads.stickyadstv.com/user-registering?dataProviderId=141&userId=CAESEJ35x-FRaMPORNfixj5UcEY&google_cver=1&gpp=DBABLA~BVQqAAAAAABY.QA&gpp_sid=7:0
+[    6586ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[    6933ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[    6586ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[    6933ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[    7054ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[    7247ms] [WARNING] This ad's html cannot be accessed using the getHtml method on googletag.Slot. Returning the empty string instead. @ https://cdn.quantummetric.com/qscripts/quantum-conde.js:110
+[    6586ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[    6933ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[    7054ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[    6822ms] [ERROR] Failed to load resource: the server responded with a status of 410 (Gone) @ https://ads.stickyadstv.com/user-matching?id=11:0
+[    6836ms] [ERROR] Failed to load resource: the server responded with a status of 410 (Gone) @ https://ads.stickyadstv.com/user-registering?dataProviderId=141&userId=CAESEJ35x-FRaMPORNfixj5UcEY&google_cver=1&gpp=DBABLA~BVQqAAAAAABY.QA&gpp_sid=7:0
+[    9478ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[    9483ms] [ERROR] Attestation check for Attribution Reporting on https://ad.doubleclick.net failed. @ https://pitchfork.com/search/?q=Kendrick+Lamar:0
+[   10270ms] [WARNING] [GPT] Slot mid_content_0 rendered inside of the viewport.
+https://goo.gle/gpt-message#169 @ https://cdn.quantummetric.com/qscripts/quantum-conde.js:110
+[   12812ms] [ERROR] Attestation check for Attribution Reporting on https://ad.doubleclick.net failed. @ https://pitchfork.com/search/?q=Kendrick+Lamar:0
+[    6586ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[    6933ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[    7054ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[    9478ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[    6822ms] [ERROR] Failed to load resource: the server responded with a status of 410 (Gone) @ https://ads.stickyadstv.com/user-matching?id=11:0
+[    6836ms] [ERROR] Failed to load resource: the server responded with a status of 410 (Gone) @ https://ads.stickyadstv.com/user-registering?dataProviderId=141&userId=CAESEJ35x-FRaMPORNfixj5UcEY&google_cver=1&gpp=DBABLA~BVQqAAAAAABY.QA&gpp_sid=7:0
+[   12821ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[   15054ms] [ERROR] Refused to set unsafe header "access-control-request-method" @ https://pitchfork.com/verso/static/1665.fd8c970ece7f6c91f683.js:0
+[   15054ms] [ERROR] Refused to set unsafe header "access-control-request-headers" @ https://pitchfork.com/verso/static/1665.fd8c970ece7f6c91f683.js:0
+[   15054ms] [ERROR] Refused to set unsafe header "user-agent" @ https://pitchfork.com/verso/static/1665.fd8c970ece7f6c91f683.js:0
+[   15055ms] [ERROR] Refused to set unsafe header "access-control-request-method" @ https://pitchfork.com/verso/static/1665.fd8c970ece7f6c91f683.js:0
+[   15055ms] [ERROR] Refused to set unsafe header "access-control-request-headers" @ https://pitchfork.com/verso/static/1665.fd8c970ece7f6c91f683.js:0
+[   15055ms] [ERROR] Refused to set unsafe header "user-agent" @ https://pitchfork.com/verso/static/1665.fd8c970ece7f6c91f683.js:0
+[   15055ms] [ERROR] Refused to set unsafe header "access-control-request-method" @ https://pitchfork.com/verso/static/1665.fd8c970ece7f6c91f683.js:0
+[   15055ms] [ERROR] Refused to set unsafe header "access-control-request-headers" @ https://pitchfork.com/verso/static/1665.fd8c970ece7f6c91f683.js:0
+[   15055ms] [ERROR] Refused to set unsafe header "user-agent" @ https://pitchfork.com/verso/static/1665.fd8c970ece7f6c91f683.js:0
+[   15058ms] [ERROR] Refused to set unsafe header "access-control-request-method" @ https://pitchfork.com/verso/static/1665.fd8c970ece7f6c91f683.js:0
+[   15058ms] [ERROR] Refused to set unsafe header "access-control-request-headers" @ https://pitchfork.com/verso/static/1665.fd8c970ece7f6c91f683.js:0
+[   15058ms] [ERROR] Refused to set unsafe header "user-agent" @ https://pitchfork.com/verso/static/1665.fd8c970ece7f6c91f683.js:0
+[   15282ms] [WARNING] [Meta Pixel] - Removed parameters from custom data due to potential violations. Go to Events Manager to learn more. @ https://cdn.quantummetric.com/qscripts/quantum-conde.js:110
+[   15282ms] [WARNING] [Meta Pixel] - Removed URL query parameters due to potential violations. @ https://cdn.quantummetric.com/qscripts/quantum-conde.js:110
+[   15470ms] [ERROR] Attestation check for Attribution Reporting on https://www.facebook.com failed. @ https://pitchfork.com/reviews/albums/17253-good-kid-maad-city/:0
+[   15470ms] [WARNING] Allow attribute will take precedence over 'allowfullscreen'. @ https://player.cnevids.com/script/video/692e03848f0296695d271fc4.js?autoplay=1&muted=1&continuousPlay=1&hasCompanion=false&hideHoverTitle=1&hidePosterTitle=1&interludeOverride=true&onReady=setupInterlude1&playerType=interlude&recAlgorithm=sitewideInterludeVideoOverride&recStrategy=sitewideInterludeVideoOverride&showPlaylistBar=false&isFullBleed=false&isRightRail=false&onIframeReady=onIframeReady17720505826001&videoEmbedPosition=inlineInjected:0
+[   17053ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[   17709ms] [ERROR] Failed to load resource: net::ERR_NAME_NOT_RESOLVED @ https://tags.bluekai.com/site/2981?redir=https%3A%2F%2Fcm.g.doubleclick.net%2Fpixel%3Fgoogle_nid%3Dbluekai%26google_hm%3D%24_BK_UUID_B64&gdpr=0&gpp=DBABLA~BVQqAAAAAABY.QA&gpp_sid=7:0
+[   17723ms] [ERROR] Failed to load resource: net::ERR_NAME_NOT_RESOLVED @ https://tags.bluekai.com/site/2981?id=&gdpr=0&gpp=DBABLA~BVQqAAAAAABY.QA&gpp_sid=7&google_gid=CAESEIduxpU8x4z9bD5elIMw8no&google_cver=1:0
+[   17741ms] [ERROR] Failed to load resource: net::ERR_NAME_NOT_RESOLVED @ https://x.dlx.addthis.com/e/googlegdn_sync?na_exid=CAESEFI-9IAv5vkdfCAup1heWnU&gdpr=0&gpp=DBABLA~BVQqAAAAAABY.QA&gpp_sid=7&google_cver=1:0
+[   17053ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[   17053ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[   17769ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[   17770ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[   17053ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[   17769ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[   17770ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[   17923ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[   17709ms] [ERROR] Failed to load resource: net::ERR_NAME_NOT_RESOLVED @ https://tags.bluekai.com/site/2981?redir=https%3A%2F%2Fcm.g.doubleclick.net%2Fpixel%3Fgoogle_nid%3Dbluekai%26google_hm%3D%24_BK_UUID_B64&gdpr=0&gpp=DBABLA~BVQqAAAAAABY.QA&gpp_sid=7:0
+[   17723ms] [ERROR] Failed to load resource: net::ERR_NAME_NOT_RESOLVED @ https://tags.bluekai.com/site/2981?id=&gdpr=0&gpp=DBABLA~BVQqAAAAAABY.QA&gpp_sid=7&google_gid=CAESEIduxpU8x4z9bD5elIMw8no&google_cver=1:0
+[   17741ms] [ERROR] Failed to load resource: net::ERR_NAME_NOT_RESOLVED @ https://x.dlx.addthis.com/e/googlegdn_sync?na_exid=CAESEFI-9IAv5vkdfCAup1heWnU&gdpr=0&gpp=DBABLA~BVQqAAAAAABY.QA&gpp_sid=7&google_cver=1:0
+[   18131ms] [ERROR] Access to XMLHttpRequest at 'https://cdn.flashtalking.com/feeds/comcast/FBI-3250/segs.js' from origin 'https://f0629c7846f2a3c6afdd9c3d557db300.safeframe.googlesyndication.com' has been blocked by CORS policy: The 'Access-Control-Allow-Origin' header has a value 'https://c3c4150c0b3dd01606388042cdc3c418.safeframe.googlesyndication.com' that is not equal to the supplied origin. @ about:srcdoc:0
+[   18131ms] [ERROR] Failed to load resource: net::ERR_FAILED @ https://cdn.flashtalking.com/feeds/comcast/FBI-3250/segs.js:0
+[   18213ms] [WARNING] This ad's html cannot be accessed using the getHtml method on googletag.Slot. Returning the empty string instead. @ https://cdn.quantummetric.com/qscripts/quantum-conde.js:110
+[   17053ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[   17769ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[   17770ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[   17923ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[   18235ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[   18627ms] Failed to read a named property 'addEventListener' from 'Window': Blocked a frame with origin "https://aax-events-cell01-cf.us-east.aps.axp.amazon-adsystem.com" from accessing a cross-origin frame.
+[   26477ms] [WARNING] [Meta Pixel] - Removed parameters from custom data due to potential violations. Go to Events Manager to learn more. @ https://cdn.quantummetric.com/qscripts/quantum-conde.js:110
+[   26477ms] [WARNING] [Meta Pixel] - Removed URL query parameters due to potential violations. @ https://cdn.quantummetric.com/qscripts/quantum-conde.js:110
+[   26578ms] [ERROR] Attestation check for Attribution Reporting on https://www.facebook.com failed. @ https://pitchfork.com/search/?q=Kendrick+Lamar:0
+[   28722ms] [ERROR] Attestation check for Attribution Reporting on https://ad.doubleclick.net failed. @ https://pitchfork.com/search/?q=Kendrick+Lamar:0
+[   28738ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[   28878ms] [ERROR] Attestation check for Attribution Reporting on https://ad.doubleclick.net failed. @ https://pitchfork.com/search/?q=Kendrick+Lamar:0
+[   28738ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[   29420ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[   29460ms] [ERROR] Attestation check for Attribution Reporting on https://ad.doubleclick.net failed. @ https://pitchfork.com/search/?q=Kendrick+Lamar:0
+[   28738ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[   29420ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[   29701ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[   29739ms] [ERROR] Attestation check for Attribution Reporting on https://ad.doubleclick.net failed. @ https://pitchfork.com/search/?q=Kendrick+Lamar:0
+[   29819ms] [ERROR] Access to XMLHttpRequest at 'https://cdn.flashtalking.com/feeds/comcast/FBI-3250/segs.js' from origin 'https://8246b7e652fe30089ceb8d9322dc2e48.safeframe.googlesyndication.com' has been blocked by CORS policy: The 'Access-Control-Allow-Origin' header has a value 'https://c3c4150c0b3dd01606388042cdc3c418.safeframe.googlesyndication.com' that is not equal to the supplied origin. @ about:srcdoc:0
+[   29819ms] [ERROR] Failed to load resource: net::ERR_FAILED @ https://cdn.flashtalking.com/feeds/comcast/FBI-3250/segs.js:0
+[   29976ms] [ERROR] Access to XMLHttpRequest at 'https://cdn.flashtalking.com/feeds/comcast/FBI-3250/segs.js' from origin 'https://8246b7e652fe30089ceb8d9322dc2e48.safeframe.googlesyndication.com' has been blocked by CORS policy: The 'Access-Control-Allow-Origin' header has a value 'https://c3c4150c0b3dd01606388042cdc3c418.safeframe.googlesyndication.com' that is not equal to the supplied origin. @ about:srcdoc:0
+[   29976ms] [ERROR] Failed to load resource: net::ERR_FAILED @ https://cdn.flashtalking.com/feeds/comcast/FBI-3250/segs.js:0
+[   31798ms] [ERROR] Failed to load resource: the server responded with a status of 503 () @ https://csync.loopme.me/?pubid=11537&gdpr=${GDPR}&gdpr_consent=${GDPR_CONSENT_109}&redirect=https%3A%2F%2Fcm.g.doubleclick.net%2Fpixel%3Fgoogle_nid%3Dloopme_eb_%26google_hm%3D{viewer_token}&google_push=AXcoOmSa2vVPd4_XtMBVtIS86VImJ8D5PLdoWuhFfnYFnwmhhCie2AnlxkYIUXxZy2jCMOELxZ8LX-xCYKmDnWiYOW1mFPMoDlzV2scAO6pudugTTYJiuHYXl_0ep3Ma_GPnPyTiYSfIqcjfS8GIHd38Ut5g:0
+[   29819ms] [ERROR] Access to XMLHttpRequest at 'https://cdn.flashtalking.com/feeds/comcast/FBI-3250/segs.js' from origin 'https://8246b7e652fe30089ceb8d9322dc2e48.safeframe.googlesyndication.com' has been blocked by CORS policy: The 'Access-Control-Allow-Origin' header has a value 'https://c3c4150c0b3dd01606388042cdc3c418.safeframe.googlesyndication.com' that is not equal to the supplied origin. @ about:srcdoc:0
+[   29819ms] [ERROR] Failed to load resource: net::ERR_FAILED @ https://cdn.flashtalking.com/feeds/comcast/FBI-3250/segs.js:0
+[   29976ms] [ERROR] Access to XMLHttpRequest at 'https://cdn.flashtalking.com/feeds/comcast/FBI-3250/segs.js' from origin 'https://8246b7e652fe30089ceb8d9322dc2e48.safeframe.googlesyndication.com' has been blocked by CORS policy: The 'Access-Control-Allow-Origin' header has a value 'https://c3c4150c0b3dd01606388042cdc3c418.safeframe.googlesyndication.com' that is not equal to the supplied origin. @ about:srcdoc:0
+[   29976ms] [ERROR] Failed to load resource: net::ERR_FAILED @ https://cdn.flashtalking.com/feeds/comcast/FBI-3250/segs.js:0
+[   31798ms] [ERROR] Failed to load resource: the server responded with a status of 503 () @ https://csync.loopme.me/?pubid=11537&gdpr=${GDPR}&gdpr_consent=${GDPR_CONSENT_109}&redirect=https%3A%2F%2Fcm.g.doubleclick.net%2Fpixel%3Fgoogle_nid%3Dloopme_eb_%26google_hm%3D{viewer_token}&google_push=AXcoOmSa2vVPd4_XtMBVtIS86VImJ8D5PLdoWuhFfnYFnwmhhCie2AnlxkYIUXxZy2jCMOELxZ8LX-xCYKmDnWiYOW1mFPMoDlzV2scAO6pudugTTYJiuHYXl_0ep3Ma_GPnPyTiYSfIqcjfS8GIHd38Ut5g:0
+[   28738ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[   29420ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[   29701ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[   59467ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[   28738ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[   29420ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[   29701ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[   59467ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[   59642ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[   91008ms] [WARNING] An iframe which has both allow-scripts and allow-same-origin for its sandbox attribute can escape its sandboxing. @ about:blank:0
+[   91375ms] Error: Minified React error #418; visit https://reactjs.org/docs/error-decoder.html?invariant=418 for the full message or use the non-minified dev environment for full errors and additional helpful warnings.
+    at ca (https://pitchfork.com/verso/static/2008.cfa53e03a64a9b35578d.js:2:299273)
+    at ku (https://pitchfork.com/verso/static/2008.cfa53e03a64a9b35578d.js:2:371907)
+    at yl (https://pitchfork.com/verso/static/2008.cfa53e03a64a9b35578d.js:2:359465)
+    at $l (https://pitchfork.com/verso/static/2008.cfa53e03a64a9b35578d.js:2:359393)
+    at hl (https://pitchfork.com/verso/static/2008.cfa53e03a64a9b35578d.js:2:359256)
+    at nl (https://pitchfork.com/verso/static/2008.cfa53e03a64a9b35578d.js:2:354419)
+    at w (https://pitchfork.com/verso/static/2008.cfa53e03a64a9b35578d.js:2:1085856)
+    at MessagePort.A (https://pitchfork.com/verso/static/2008.cfa53e03a64a9b35578d.js:2:1086388)
+[   91375ms] Error: Minified React error #418; visit https://reactjs.org/docs/error-decoder.html?invariant=418 for the full message or use the non-minified dev environment for full errors and additional helpful warnings.
+    at ca (https://pitchfork.com/verso/static/2008.cfa53e03a64a9b35578d.js:2:299273)
+    at ku (https://pitchfork.com/verso/static/2008.cfa53e03a64a9b35578d.js:2:371907)
+    at yl (https://pitchfork.com/verso/static/2008.cfa53e03a64a9b35578d.js:2:359465)
+    at $l (https://pitchfork.com/verso/static/2008.cfa53e03a64a9b35578d.js:2:359393)
+    at hl (https://pitchfork.com/verso/static/2008.cfa53e03a64a9b35578d.js:2:359256)
+    at nl (https://pitchfork.com/verso/static/2008.cfa53e03a64a9b35578d.js:2:354419)
+    at w (https://pitchfork.com/verso/static/2008.cfa53e03a64a9b35578d.js:2:1085856)
+    at MessagePort.A (https://pitchfork.com/verso/static/2008.cfa53e03a64a9b35578d.js:2:1086388)
+[   91375ms] Error: Minified React error #418; visit https://reactjs.org/docs/error-decoder.html?invariant=418 for the full message or use the non-minified dev environment for full errors and additional helpful warnings.
+    at ca (https://pitchfork.com/verso/static/2008.cfa53e03a64a9b35578d.js:2:299273)
+    at ku (https://pitchfork.com/verso/static/2008.cfa53e03a64a9b35578d.js:2:371907)
+    at yl (https://pitchfork.com/verso/static/2008.cfa53e03a64a9b35578d.js:2:359465)
+    at $l (https://pitchfork.com/verso/static/2008.cfa53e03a64a9b35578d.js:2:359393)
+    at hl (https://pitchfork.com/verso/static/2008.cfa53e03a64a9b35578d.js:2:359256)
+    at nl (https://pitchfork.com/verso/static/2008.cfa53e03a64a9b35578d.js:2:354419)
+    at w (https://pitchfork.com/verso/static/2008.cfa53e03a64a9b35578d.js:2:1085856)
+    at MessagePort.A (https://pitchfork.com/verso/static/2008.cfa53e03a64a9b35578d.js:2:1086388)
+[   91375ms] Error: Minified React error #418; visit https://reactjs.org/docs/error-decoder.html?invariant=418 for the full message or use the non-minified dev environment for full errors and additional helpful warnings.
+    at ca (https://pitchfork.com/verso/static/2008.cfa53e03a64a9b35578d.js:2:299273)
+    at ku (https://pitchfork.com/verso/static/2008.cfa53e03a64a9b35578d.js:2:371907)
+    at yl (https://pitchfork.com/verso/static/2008.cfa53e03a64a9b35578d.js:2:359465)
+    at $l (https://pitchfork.com/verso/static/2008.cfa53e03a64a9b35578d.js:2:359393)
+    at hl (https://pitchfork.com/verso/static/2008.cfa53e03a64a9b35578d.js:2:359256)
+    at nl (https://pitchfork.com/verso/static/2008.cfa53e03a64a9b35578d.js:2:354419)
+    at w (https://pitchfork.com/verso/static/2008.cfa53e03a64a9b35578d.js:2:1085856)
+    at MessagePort.A (https://pitchfork.com/verso/static/2008.cfa53e03a64a9b35578d.js:2:1086388)
+[   91375ms] Error: Minified React error #418; visit https://reactjs.org/docs/error-decoder.html?invariant=418 for the full message or use the non-minified dev environment for full errors and additional helpful warnings.
+    at ca (https://pitchfork.com/verso/static/2008.cfa53e03a64a9b35578d.js:2:299273)
+    at ku (https://pitchfork.com/verso/static/2008.cfa53e03a64a9b35578d.js:2:371907)
+    at yl (https://pitchfork.com/verso/static/2008.cfa53e03a64a9b35578d.js:2:359465)
+    at $l (https://pitchfork.com/verso/static/2008.cfa53e03a64a9b35578d.js:2:359393)
+    at hl (https://pitchfork.com/verso/static/2008.cfa53e03a64a9b35578d.js:2:359256)
+    at nl (https://pitchfork.com/verso/static/2008.cfa53e03a64a9b35578d.js:2:354419)
+    at w (https://pitchfork.com/verso/static/2008.cfa53e03a64a9b35578d.js:2:1085856)
+    at MessagePort.A (https://pitchfork.com/verso/static/2008.cfa53e03a64a9b35578d.js:2:1086388)
+[   91375ms] Error: Minified React error #418; visit https://reactjs.org/docs/error-decoder.html?invariant=418 for the full message or use the non-minified dev environment for full errors and additional helpful warnings.
+    at ca (https://pitchfork.com/verso/static/2008.cfa53e03a64a9b35578d.js:2:299273)
+    at ku (https://pitchfork.com/verso/static/2008.cfa53e03a64a9b35578d.js:2:371907)
+    at yl (https://pitchfork.com/verso/static/2008.cfa53e03a64a9b35578d.js:2:359465)
+    at $l (https://pitchfork.com/verso/static/2008.cfa53e03a64a9b35578d.js:2:359393)
+    at hl (https://pitchfork.com/verso/static/2008.cfa53e03a64a9b35578d.js:2:359256)
+    at nl (https://pitchfork.com/verso/static/2008.cfa53e03a64a9b35578d.js:2:354419)
+    at w (https://pitchfork.com/verso/static/2008.cfa53e03a64a9b35578d.js:2:1085856)
+    at MessagePort.A (https://pitchfork.com/verso/static/2008.cfa53e03a64a9b35578d.js:2:1086388)
+[   91376ms] Error: Minified React error #418; visit https://reactjs.org/docs/error-decoder.html?invariant=418 for the full message or use the non-minified dev environment for full errors and additional helpful warnings.
+    at ca (https://pitchfork.com/verso/static/2008.cfa53e03a64a9b35578d.js:2:299273)
+    at ku (https://pitchfork.com/verso/static/2008.cfa53e03a64a9b35578d.js:2:371907)
+    at yl (https://pitchfork.com/verso/static/2008.cfa53e03a64a9b35578d.js:2:359465)
+    at $l (https://pitchfork.com/verso/static/2008.cfa53e03a64a9b35578d.js:2:359393)
+    at hl (https://pitchfork.com/verso/static/2008.cfa53e03a64a9b35578d.js:2:359256)
+    at nl (https://pitchfork.com/verso/static/2008.cfa53e03a64a9b35578d.js:2:354419)
+    at w (https://pitchfork.com/verso/static/2008.cfa53e03a64a9b35578d.js:2:1085856)
+    at MessagePort.A (https://pitchfork.com/verso/static/2008.cfa53e03a64a9b35578d.js:2:1086388)
+[   91376ms] Error: Minified React error #423; visit https://reactjs.org/docs/error-decoder.html?invariant=423 for the full message or use the non-minified dev environment for full errors and additional helpful warnings.
+    at ku (https://pitchfork.com/verso/static/2008.cfa53e03a64a9b35578d.js:2:371593)
+    at yl (https://pitchfork.com/verso/static/2008.cfa53e03a64a9b35578d.js:2:359465)
+    at $l (https://pitchfork.com/verso/static/2008.cfa53e03a64a9b35578d.js:2:359393)
+    at hl (https://pitchfork.com/verso/static/2008.cfa53e03a64a9b35578d.js:2:359256)
+    at rl (https://pitchfork.com/verso/static/2008.cfa53e03a64a9b35578d.js:2:356091)
+    at nl (https://pitchfork.com/verso/static/2008.cfa53e03a64a9b35578d.js:2:354646)
+    at w (https://pitchfork.com/verso/static/2008.cfa53e03a64a9b35578d.js:2:1085856)
+    at MessagePort.A (https://pitchfork.com/verso/static/2008.cfa53e03a64a9b35578d.js:2:1086388)
+[   91378ms] [ERROR] Refused to set unsafe header "access-control-request-method" @ https://pitchfork.com/verso/static/1665.fd8c970ece7f6c91f683.js:0
+[   91378ms] [ERROR] Refused to set unsafe header "access-control-request-headers" @ https://pitchfork.com/verso/static/1665.fd8c970ece7f6c91f683.js:0
+[   91378ms] [ERROR] Refused to set unsafe header "user-agent" @ https://pitchfork.com/verso/static/1665.fd8c970ece7f6c91f683.js:0
+[   91379ms] [ERROR] Refused to set unsafe header "access-control-request-method" @ https://pitchfork.com/verso/static/1665.fd8c970ece7f6c91f683.js:0
+[   91379ms] [ERROR] Refused to set unsafe header "access-control-request-headers" @ https://pitchfork.com/verso/static/1665.fd8c970ece7f6c91f683.js:0
+[   91379ms] [ERROR] Refused to set unsafe header "user-agent" @ https://pitchfork.com/verso/static/1665.fd8c970ece7f6c91f683.js:0
+[   91379ms] [ERROR] Refused to set unsafe header "access-control-request-method" @ https://pitchfork.com/verso/static/1665.fd8c970ece7f6c91f683.js:0
+[   91379ms] [ERROR] Refused to set unsafe header "access-control-request-headers" @ https://pitchfork.com/verso/static/1665.fd8c970ece7f6c91f683.js:0
+[   91379ms] [ERROR] Refused to set unsafe header "user-agent" @ https://pitchfork.com/verso/static/1665.fd8c970ece7f6c91f683.js:0
+[   91382ms] [ERROR] Refused to set unsafe header "access-control-request-method" @ https://pitchfork.com/verso/static/1665.fd8c970ece7f6c91f683.js:0
+[   91382ms] [ERROR] Refused to set unsafe header "access-control-request-headers" @ https://pitchfork.com/verso/static/1665.fd8c970ece7f6c91f683.js:0
+[   91382ms] [ERROR] Refused to set unsafe header "user-agent" @ https://pitchfork.com/verso/static/1665.fd8c970ece7f6c91f683.js:0
+[   91464ms] [WARNING] An iframe which has both allow-scripts and allow-same-origin for its sandbox attribute can escape its sandboxing. @ https://pitchfork.com/verso/static/2008.cfa53e03a64a9b35578d.js:1
+[   91752ms] [WARNING] Allow attribute will take precedence over 'allowfullscreen'. @ https://player.cnevids.com/script/video/692e03848f0296695d271fc4.js?autoplay=1&muted=1&continuousPlay=1&hasCompanion=false&hideHoverTitle=1&hidePosterTitle=1&interludeOverride=true&onReady=setupInterlude1&playerType=interlude&recAlgorithm=sitewideInterludeVideoOverride&recStrategy=sitewideInterludeVideoOverride&showPlaylistBar=false&isFullBleed=false&isRightRail=false&onIframeReady=onIframeReady17720506588641&videoEmbedPosition=inlineInjected:0
+[   91840ms] [WARNING] [Meta Pixel] - Removed parameters from custom data due to potential violations. Go to Events Manager to learn more. @ https://cdn.quantummetric.com/qscripts/quantum-conde.js:110
+[   91964ms] [ERROR] Attestation check for Attribution Reporting on https://www.facebook.com failed. @ https://pitchfork.com/reviews/albums/fontaines-dc-romance/:0
+[   92580ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[   92580ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[   93553ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[   93645ms] [ERROR] Attestation check for Attribution Reporting on https://ad.doubleclick.net failed. @ https://pitchfork.com/reviews/albums/fontaines-dc-romance/:0
+[   93821ms] [ERROR] Attestation check for Attribution Reporting on https://ad.doubleclick.net failed. @ https://pitchfork.com/reviews/albums/fontaines-dc-romance/:0
+[   92580ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[   93553ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[   93910ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[   94071ms] [WARNING] This ad's html cannot be accessed using the getHtml method on googletag.Slot. Returning the empty string instead. @ https://cdn.quantummetric.com/qscripts/quantum-conde.js:110
+[   92580ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[   93553ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[   93910ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[   94180ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[  102242ms] [WARNING] [Meta Pixel] - Removed parameters from custom data due to potential violations. Go to Events Manager to learn more. @ https://cdn.quantummetric.com/qscripts/quantum-conde.js:110
+[  102242ms] [WARNING] [Meta Pixel] - Removed URL query parameters due to potential violations. @ https://cdn.quantummetric.com/qscripts/quantum-conde.js:110
+[  102352ms] [ERROR] Attestation check for Attribution Reporting on https://www.facebook.com failed. @ https://pitchfork.com/search/?q=Kendrick+Lamar:0
+[  102762ms] [WARNING] Blocked aria-hidden on an element because its descendant retained focus. The focus must not be hidden from assistive technology users. Avoid using aria-hidden on a focused element or its ancestor. Consider using the inert attribute instead, which will also prevent focus. For more details, see the aria-hidden section of the WAI-ARIA specification at https://w3c.github.io/aria/#aria-hidden.
+Element with focus: <a.SummaryItemImageLink-dmOApG kqwxCt summary-item__image-link summary-item-tracking__image-link>
+Ancestor with aria-hidden: <a.SummaryItemImageLink-dmOApG kqwxCt summary-item__image-link summary-item-tracking__image-link> @ https://pitchfork.com/search/?q=Kendrick+Lamar:0
+[  103201ms] [ERROR] Refused to set unsafe header "access-control-request-method" @ https://pitchfork.com/verso/static/1665.fd8c970ece7f6c91f683.js:0
+[  103201ms] [ERROR] Refused to set unsafe header "access-control-request-headers" @ https://pitchfork.com/verso/static/1665.fd8c970ece7f6c91f683.js:0
+[  103201ms] [ERROR] Refused to set unsafe header "user-agent" @ https://pitchfork.com/verso/static/1665.fd8c970ece7f6c91f683.js:0
+[  103201ms] [ERROR] Refused to set unsafe header "access-control-request-method" @ https://pitchfork.com/verso/static/1665.fd8c970ece7f6c91f683.js:0
+[  103201ms] [ERROR] Refused to set unsafe header "access-control-request-headers" @ https://pitchfork.com/verso/static/1665.fd8c970ece7f6c91f683.js:0
+[  103201ms] [ERROR] Refused to set unsafe header "user-agent" @ https://pitchfork.com/verso/static/1665.fd8c970ece7f6c91f683.js:0
+[  103202ms] [ERROR] Refused to set unsafe header "access-control-request-method" @ https://pitchfork.com/verso/static/1665.fd8c970ece7f6c91f683.js:0
+[  103202ms] [ERROR] Refused to set unsafe header "access-control-request-headers" @ https://pitchfork.com/verso/static/1665.fd8c970ece7f6c91f683.js:0
+[  103202ms] [ERROR] Refused to set unsafe header "user-agent" @ https://pitchfork.com/verso/static/1665.fd8c970ece7f6c91f683.js:0
+[  103204ms] [ERROR] Refused to set unsafe header "access-control-request-method" @ https://pitchfork.com/verso/static/1665.fd8c970ece7f6c91f683.js:0
+[  103204ms] [ERROR] Refused to set unsafe header "access-control-request-headers" @ https://pitchfork.com/verso/static/1665.fd8c970ece7f6c91f683.js:0
+[  103204ms] [ERROR] Refused to set unsafe header "user-agent" @ https://pitchfork.com/verso/static/1665.fd8c970ece7f6c91f683.js:0
+[  103511ms] [WARNING] Allow attribute will take precedence over 'allowfullscreen'. @ https://player.cnevids.com/script/video/692e03848f0296695d271fc4.js?autoplay=1&muted=1&continuousPlay=1&hasCompanion=false&hideHoverTitle=1&hidePosterTitle=1&interludeOverride=true&onReady=setupInterlude1&playerType=interlude&recAlgorithm=sitewideInterludeVideoOverride&recStrategy=sitewideInterludeVideoOverride&showPlaylistBar=false&isFullBleed=false&isRightRail=false&onIframeReady=onIframeReady17720506707011&videoEmbedPosition=inlineInjected:0
+[  103714ms] [WARNING] [Meta Pixel] - Removed parameters from custom data due to potential violations. Go to Events Manager to learn more. @ https://cdn.quantummetric.com/qscripts/quantum-conde.js:110
+[  103714ms] [WARNING] [Meta Pixel] - Removed URL query parameters due to potential violations. @ https://cdn.quantummetric.com/qscripts/quantum-conde.js:110
+[  103827ms] [ERROR] Attestation check for Attribution Reporting on https://www.facebook.com failed. @ https://pitchfork.com/reviews/albums/17253-good-kid-maad-city/:0
+[  105221ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[  105221ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[  106033ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[  106061ms] [ERROR] Attestation check for Attribution Reporting on https://ad.doubleclick.net failed. @ https://pitchfork.com/reviews/albums/17253-good-kid-maad-city/:0
+[  106216ms] [ERROR] Attestation check for Attribution Reporting on https://ad.doubleclick.net failed. @ https://pitchfork.com/reviews/albums/17253-good-kid-maad-city/:0
+[  105221ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[  106033ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[  106299ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[  106767ms] [WARNING] This ad's html cannot be accessed using the getHtml method on googletag.Slot. Returning the empty string instead. @ https://cdn.quantummetric.com/qscripts/quantum-conde.js:110
+[  107260ms] Failed to read a named property 'addEventListener' from 'Window': Blocked a frame with origin "https://aax-events-cell01-cf.us-east.aps.axp.amazon-adsystem.com" from accessing a cross-origin frame.
+[  112147ms] [ERROR] Failed to load resource: the server responded with a status of 404 () @ https://pitchfork.com/reviews/albums/kendrick-lamar-good-kid-maad-city/:0
+[  112430ms] [WARNING] [Meta Pixel] - Removed parameters from custom data due to potential violations. Go to Events Manager to learn more. @ https://cdn.quantummetric.com/qscripts/quantum-conde.js:110
+[  112524ms] [ERROR] Attestation check for Attribution Reporting on https://www.facebook.com failed. @ https://pitchfork.com/reviews/albums/kendrick-lamar-good-kid-maad-city/:0
+[  113949ms] [ERROR] Refused to set unsafe header "access-control-request-method" @ https://pitchfork.com/verso/static/1665.fd8c970ece7f6c91f683.js:0
+[  113949ms] [ERROR] Refused to set unsafe header "access-control-request-headers" @ https://pitchfork.com/verso/static/1665.fd8c970ece7f6c91f683.js:0
+[  113949ms] [ERROR] Refused to set unsafe header "user-agent" @ https://pitchfork.com/verso/static/1665.fd8c970ece7f6c91f683.js:0
+[  113949ms] [ERROR] Refused to set unsafe header "access-control-request-method" @ https://pitchfork.com/verso/static/1665.fd8c970ece7f6c91f683.js:0
+[  113949ms] [ERROR] Refused to set unsafe header "access-control-request-headers" @ https://pitchfork.com/verso/static/1665.fd8c970ece7f6c91f683.js:0
+[  113949ms] [ERROR] Refused to set unsafe header "user-agent" @ https://pitchfork.com/verso/static/1665.fd8c970ece7f6c91f683.js:0
+[  113950ms] [ERROR] Refused to set unsafe header "access-control-request-method" @ https://pitchfork.com/verso/static/1665.fd8c970ece7f6c91f683.js:0
+[  113950ms] [ERROR] Refused to set unsafe header "access-control-request-headers" @ https://pitchfork.com/verso/static/1665.fd8c970ece7f6c91f683.js:0
+[  113950ms] [ERROR] Refused to set unsafe header "user-agent" @ https://pitchfork.com/verso/static/1665.fd8c970ece7f6c91f683.js:0
+[  113951ms] [ERROR] Refused to set unsafe header "access-control-request-method" @ https://pitchfork.com/verso/static/1665.fd8c970ece7f6c91f683.js:0
+[  113952ms] [ERROR] Refused to set unsafe header "access-control-request-headers" @ https://pitchfork.com/verso/static/1665.fd8c970ece7f6c91f683.js:0
+[  113952ms] [ERROR] Refused to set unsafe header "user-agent" @ https://pitchfork.com/verso/static/1665.fd8c970ece7f6c91f683.js:0
+[  114303ms] [WARNING] Allow attribute will take precedence over 'allowfullscreen'. @ https://player.cnevids.com/script/video/692e03848f0296695d271fc4.js?autoplay=1&muted=1&continuousPlay=1&hasCompanion=false&hideHoverTitle=1&hidePosterTitle=1&interludeOverride=true&onReady=setupInterlude1&playerType=interlude&recAlgorithm=sitewideInterludeVideoOverride&recStrategy=sitewideInterludeVideoOverride&showPlaylistBar=false&isFullBleed=false&isRightRail=false&onIframeReady=onIframeReady17720506814341&videoEmbedPosition=inlineInjected:0
+[  114338ms] [WARNING] [Meta Pixel] - Removed parameters from custom data due to potential violations. Go to Events Manager to learn more. @ https://cdn.quantummetric.com/qscripts/quantum-conde.js:110
+[  114338ms] [WARNING] [Meta Pixel] - Removed URL query parameters due to potential violations. @ https://cdn.quantummetric.com/qscripts/quantum-conde.js:110
+[  114440ms] [ERROR] Attestation check for Attribution Reporting on https://www.facebook.com failed. @ https://pitchfork.com/reviews/albums/17253-good-kid-maad-city/:0
+[  115490ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[  115490ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[  115490ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[  116297ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[  116299ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[  116353ms] [ERROR] Refused to execute script from 'https://ipds.adrta.com/i?__x=MJCOJCHIIDHMCG@LOIKNHKLNGIKLINPOGICGMLGHLEMPILLFCLNKNLNFKLHNJKMLJMHL@HOMHEJHMMJNMG@IMOGLMGFINJMGMIIMJNCHLNJFKEKPJKNIAF@ECG&clid=opx&paid=sc&avid=537073246&caid=537096098&publisherId=538995730&plid=537171575&siteId=538996096&kv1=300x600&kv2=https%3A%2F%2Fpitchfork.com%2Freviews%2Falbums%2F17253-good-kid-maad-city&kv4=75.73.113.0&kv5=1772050683&kv11=55df8e23-3ef8-4984-b6e7-00e3df83b0b3&lineItemId=537133568&kv15=us&kv55=1.0,1!google.com,pub-3844877863303739,1,,,!openx.com,538995730,1,55df8e23-3ef8-4984-b6e7-00e3df83b0b3,,&kv10=&kv25=&kv26=MacOSX&kv28=Apple&kv62=&kv63=&kv9=&kv13=&kv3=1b7973ad-c4ed-4dfd-8b00-778d49ec8d52&kv27=Mozilla%2F5.0+%28Macintosh%3B+Intel+Mac+OS+X+10_15_7%29+AppleWebKit%2F537.36+%28KHTML%2C+like+Gecko%29+Chrome%2F145.0.0.0+Safari%2F537.36&kv7=bbb82fae-1d27-4d90-bb10-e24164ecd7bc&kv14=&kv16=44.9099&kv17=-93.27999&kv12=538996253&kv18=&kv19=&kv23=&kv24=Desktop_Display&cb=240559#opx' because its MIME type ('image/gif') is not executable. @ https://4fc8fdfdfe43ab0a1b1fa6daa9ae96bc.safeframe.googlesyndication.com/safeframe/1-0-45/html/container.html:0
+[  116353ms] [ERROR] Refused to execute script from 'https://ipds.adrta.com/i?__x=MJCOJCHIIDHMCG@LOIKNHKLNGIKLINPOGICGMLGHLEMPILLFCLNKNLNFKLHNJKMLJMHL@HOMHEJHMMJNMG@IMOGLMGFINJMGMIIMJNCHLNJFKEKPJKNIAF@ECG&clid=opx&paid=sc&avid=537073246&caid=537096098&publisherId=538995730&plid=537171575&siteId=538996096&kv1=300x600&kv2=https%3A%2F%2Fpitchfork.com%2Freviews%2Falbums%2F17253-good-kid-maad-city&kv4=75.73.113.0&kv5=1772050683&kv11=55df8e23-3ef8-4984-b6e7-00e3df83b0b3&lineItemId=537133568&kv15=us&kv55=1.0,1!google.com,pub-3844877863303739,1,,,!openx.com,538995730,1,55df8e23-3ef8-4984-b6e7-00e3df83b0b3,,&kv10=&kv25=&kv26=MacOSX&kv28=Apple&kv62=&kv63=&kv9=&kv13=&kv3=1b7973ad-c4ed-4dfd-8b00-778d49ec8d52&kv27=Mozilla%2F5.0+%28Macintosh%3B+Intel+Mac+OS+X+10_15_7%29+AppleWebKit%2F537.36+%28KHTML%2C+like+Gecko%29+Chrome%2F145.0.0.0+Safari%2F537.36&kv7=bbb82fae-1d27-4d90-bb10-e24164ecd7bc&kv14=&kv16=44.9099&kv17=-93.27999&kv12=538996253&kv18=&kv19=&kv23=&kv24=Desktop_Display&cb=240559#opx' because its MIME type ('image/gif') is not executable. @ https://4fc8fdfdfe43ab0a1b1fa6daa9ae96bc.safeframe.googlesyndication.com/safeframe/1-0-45/html/container.html:0
+[  115490ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[  116297ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[  116299ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[  116443ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[  116603ms] [WARNING] This ad's html cannot be accessed using the getHtml method on googletag.Slot. Returning the empty string instead. @ https://cdn.quantummetric.com/qscripts/quantum-conde.js:110
+[  126683ms] [WARNING] [Meta Pixel] - Removed parameters from custom data due to potential violations. Go to Events Manager to learn more. @ https://cdn.quantummetric.com/qscripts/quantum-conde.js:110
+[  126683ms] [WARNING] [Meta Pixel] - Removed URL query parameters due to potential violations. @ https://cdn.quantummetric.com/qscripts/quantum-conde.js:110
+[  126789ms] [ERROR] Attestation check for Attribution Reporting on https://www.facebook.com failed. @ https://pitchfork.com/search/?q=parcels:0
+[  128233ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[  128233ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[  128456ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[  128478ms] [ERROR] Attestation check for Attribution Reporting on https://ad.doubleclick.net failed. @ https://pitchfork.com/search/?q=parcels:0
+[  128504ms] [WARNING] This ad's html cannot be accessed using the getHtml method on googletag.Slot. Returning the empty string instead. @ https://cdn.quantummetric.com/qscripts/quantum-conde.js:110
+[  128886ms] [ERROR] Access to XMLHttpRequest at 'https://cdn.flashtalking.com/feeds/comcast/FBI-3250/segs.js' from origin 'https://c809902da45d3ba29cefb6f4cb87ab33.safeframe.googlesyndication.com' has been blocked by CORS policy: The 'Access-Control-Allow-Origin' header has a value 'https://c3c4150c0b3dd01606388042cdc3c418.safeframe.googlesyndication.com' that is not equal to the supplied origin. @ about:srcdoc:0
+[  128886ms] [ERROR] Failed to load resource: net::ERR_FAILED @ https://cdn.flashtalking.com/feeds/comcast/FBI-3250/segs.js:0
+[  134020ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_RESET @ https://cs.admanmedia.com/e805be652c9053b8f771665f0ac3c361.gif?puid=k-N23iR6GWRQppREzpq6Ye8p0XwnHdqyDV2yObaw&redir=https%3a%2f%2fssp-sync.criteo.com%2fuser-sync%2fmatch%3fp%3djM-pCV9sJTJGMkNGdk5YJTJGT1BUdXRZWUptVGpITGhVek5uTmR3b1ZxYVN3bTNWMklOQSUzRA%26u%3d%5bUID%5d&gdpr=0&gdpr_consent=&ccpa=:0
+[  136259ms] [WARNING] [Meta Pixel] - Removed parameters from custom data due to potential violations. Go to Events Manager to learn more. @ https://cdn.quantummetric.com/qscripts/quantum-conde.js:110
+[  136259ms] [WARNING] [Meta Pixel] - Removed URL query parameters due to potential violations. @ https://cdn.quantummetric.com/qscripts/quantum-conde.js:110
+[  136353ms] [ERROR] Attestation check for Attribution Reporting on https://www.facebook.com failed. @ https://pitchfork.com/artists/parcels/:0
+[  137903ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[  137903ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[  138115ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[  137903ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[  138115ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[  138375ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[  137903ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[  138115ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[  138375ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[  138648ms] [ERROR] Attestation check for Shared Storage on https://www.googleadservices.com failed. @ https://www.googleadservices.com/pagead/managed/js/activeview/current/reach_worklet.html:0
+[  144066ms] [ERROR] Failed to load resource: the server responded with a status of 429 () @ https://ssp-sync.criteo.com/user-sync/match?p=2M3Fe19FVSUyRlZLaGNUJTJCcmZHaG9XU2daT2c5VEJXbU9NMnVRT0RrNXM4bmRRS1Z2dyUzRA&u=3ed6d713-964f-40b7-a158-388bf9db9838:0
+[  144067ms] [ERROR] Failed to load resource: the server responded with a status of 429 () @ https://ssp-sync.criteo.com/user-sync/match?p=SelY9V9yZDQlMkZEbW0xY0Fpc1c2RnV0TUlEblRyaExmVk9ObzIxakVVaTZIeXN2N00lM0Q&u=5601777548706340241&gdpr=0&gdpr_consent=:0
+[  159450ms] [ERROR] Failed to load resource: the server responded with a status of 422 () @ https://nrb.ybp.yahoo.com/ym?gm0=0&gm1=0&tivt=0&hov=2&tth=0&intt=2&intl=0&tti=0&st=21146&foc=1&adt=21146&scr=2&ph=-1&scd=0&svd=0&svu=0&sct=0&mivp=88.49999904632568&mivt=0&ls=7&winl=&winr=&lvl=3&atf=0&al=2&ae=0&aw=0&ao=pitchfork.com%0215507a39fafcdfba0fe79f46c4b512ac.safeframe.googlesyndication.com%0115507a39fafcdfba0fe79f46c4b512ac.safeframe.googlesyndication.com&sao=3&lang=en-US&sw=1376&sh=995&tzo=360&plgn=9324f4179595cf19e0530413734921d7&ci=ci&b=5&ad=jv=1.0.296:vd=0:na=0:ed=1:tpv=:apif=89195841:cslm=0:cslf=7:csrm=0:csrf=74:aih=0:dc=12:ab=0:abs=01110011121000001008010100:pf=MacIntel:zi=1:lt=225:aiff=0:aisf=0:aihi=0:ads=0:stu=0:aihv=0:rdbf=01361000001311:rdsf=060008462424:cj=0:clk=0:tp=1:mt=7&sek=2906843544562257550:1772050704453:0
+[  160522ms] [ERROR] Failed to load resource: the server responded with a status of 404 () @ https://pitchfork.com/artists/kendric-lamar/:0
+[  160797ms] [WARNING] [Meta Pixel] - Removed parameters from custom data due to potential violations. Go to Events Manager to learn more. @ https://cdn.quantummetric.com/qscripts/quantum-conde.js:110
+[  160902ms] [ERROR] Attestation check for Attribution Reporting on https://www.facebook.com failed. @ https://pitchfork.com/artists/kendric-lamar/:0
