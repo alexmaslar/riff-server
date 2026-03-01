@@ -99,6 +99,7 @@ pub struct EditorialReview {
     pub license: Option<String>,
     pub reviewer: Option<String>,
     pub review_date: Option<String>,
+    pub source_icon_url: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -325,6 +326,7 @@ pub async fn build_album_detail(
     db: &SqlitePool,
     album_id: &str,
     user_id: &str,
+    plugin_registry: Option<&riff_core::plugin::registry::PluginRegistry>,
 ) -> Result<AlbumDetailResponse, AppError> {
     let album_row = sqlx::query(
         "SELECT a.id, a.title, a.artist_id, ar.name, a.year, a.genre, a.style, a.label, a.catalog_number, a.cover_art_path, a.summary, a.rating, a.moods, a.descriptors, a.keywords, a.metadata_status, a.added_at, a.country, a.release_notes, a.all_labels, a.is_compilation, a.play_count, a.source, a.summary_source, a.rating_sources
@@ -451,15 +453,26 @@ pub async fn build_album_detail(
 
     let reviews: Vec<EditorialReview> = review_rows
         .into_iter()
-        .map(|(source, source_url, text, rating, rating_count, license, reviewer, review_date)| EditorialReview {
-            source,
-            source_url,
-            text,
-            rating,
-            rating_count,
-            license,
-            reviewer,
-            review_date,
+        .map(|(source, source_url, text, rating, rating_count, license, reviewer, review_date)| {
+            let source_icon_url = plugin_registry
+                .and_then(|reg| {
+                    reg.editorial_providers()
+                        .iter()
+                        .find(|p| p.provider_name() == source)
+                        .and_then(|p| p.icon_url().map(|s| s.to_string()))
+                })
+                .or_else(|| Some(format!("/plugins/{}/icon", source)));
+            EditorialReview {
+                source,
+                source_url,
+                text,
+                rating,
+                rating_count,
+                license,
+                reviewer,
+                review_date,
+                source_icon_url,
+            }
         })
         .collect();
 
@@ -500,7 +513,8 @@ pub async fn get_album(
     Extension(claims): Extension<Claims>,
     Path(id): Path<String>,
 ) -> Result<([(header::HeaderName, &'static str); 1], Json<Value>), AppError> {
-    let detail = build_album_detail(&state.db, &id, &claims.sub).await?;
+    let registry = state.plugin_registry.read().await;
+    let detail = build_album_detail(&state.db, &id, &claims.sub, Some(&registry)).await?;
     Ok((
         [(header::CACHE_CONTROL, "private, max-age=3600")],
         Json(json!(detail)),
@@ -1240,6 +1254,7 @@ pub async fn get_hidden_reviews(
             license,
             reviewer,
             review_date,
+            source_icon_url: None,
         })
         .collect();
 

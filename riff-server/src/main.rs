@@ -601,7 +601,8 @@ async fn main() -> Result<()> {
         .route("/auth/login", post(routes::auth::login))
         .route("/auth/refresh", post(routes::auth::refresh))
         .route("/albums/{id}/cover", get(routes::albums::get_cover))
-        .route("/mixes/daily/{id}/cover", get(routes::daily_mixes::get_mix_cover));
+        .route("/mixes/daily/{id}/cover", get(routes::daily_mixes::get_mix_cover))
+        .route("/plugins/{name}/icon", get(routes::plugins::get_plugin_icon));
 
     // SSE event stream — no timeout (long-lived), no gzip, auth required
     let sse = Router::new()

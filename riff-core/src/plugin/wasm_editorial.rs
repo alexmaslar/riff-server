@@ -29,6 +29,10 @@ impl EditorialProvider for WasmEditorialProvider {
         &self.instance.manifest.id
     }
 
+    fn icon_url(&self) -> Option<&str> {
+        self.instance.manifest.icon_url.as_deref()
+    }
+
     async fn get_album_reviews(
         &self,
         title: &str,

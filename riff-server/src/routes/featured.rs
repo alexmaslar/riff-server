@@ -42,7 +42,8 @@ pub async fn get_featured_album(
 
     let album_id = album_id.ok_or(AppError::NotFound("no albums in library".into()))?;
 
-    let detail = build_album_detail(&state.db, &album_id, &claims.sub).await?;
+    let registry = state.plugin_registry.read().await;
+    let detail = build_album_detail(&state.db, &album_id, &claims.sub, Some(&registry)).await?;
     Ok((daily_cache_header(), Json(json!(detail))))
 }
 
@@ -99,9 +100,10 @@ pub async fn get_featured_albums(
     .await
     .map_err(|e| AppError::Internal(e.to_string()))?;
 
+    let registry = state.plugin_registry.read().await;
     let futures: Vec<_> = album_ids
         .iter()
-        .map(|id| build_album_detail(&state.db, id, &claims.sub))
+        .map(|id| build_album_detail(&state.db, id, &claims.sub, Some(&registry)))
         .collect();
     let albums: Vec<_> = futures::future::try_join_all(futures).await?;
 

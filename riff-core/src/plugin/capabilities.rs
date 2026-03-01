@@ -199,6 +199,7 @@ pub struct EditorialResult {
 #[async_trait]
 pub trait EditorialProvider: Send + Sync + 'static {
     fn provider_name(&self) -> &str;
+    fn icon_url(&self) -> Option<&str> { None }
 
     async fn get_album_reviews(
         &self,

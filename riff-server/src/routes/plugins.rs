@@ -1,4 +1,7 @@
+use axum::body::Body;
 use axum::extract::{Path, State};
+use axum::http::{header, StatusCode};
+use axum::response::Response;
 use axum::Json;
 use serde_json::{json, Value};
 use std::collections::HashSet;
@@ -129,4 +132,49 @@ pub async fn reload_dev_plugin(
         "healthy": result.healthy,
         "message": result.message,
     })))
+}
+
+/// GET /plugins/{name}/icon — serve the plugin's icon image.
+/// Looks for icon.png, icon.jpg, or icon.webp in the plugin directory.
+/// Also checks dev plugin paths.
+pub async fn get_plugin_icon(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> Response {
+    let config = state.config.read().await;
+    let plugin_dir = config.plugin_directory();
+    let dev_path = config.dev_plugins.get(&name).map(|d| d.path.clone());
+    drop(config);
+
+    let candidates = [
+        ("image/png", "icon.png"),
+        ("image/jpeg", "icon.jpg"),
+        ("image/webp", "icon.webp"),
+    ];
+
+    // Check the installed plugin directory first, then dev plugin path
+    let search_dirs: Vec<std::path::PathBuf> = std::iter::once(plugin_dir.join(&name))
+        .chain(dev_path)
+        .collect();
+
+    for dir in &search_dirs {
+        for (content_type, filename) in &candidates {
+            let path = dir.join(filename);
+            if path.exists() {
+                if let Ok(data) = tokio::fs::read(&path).await {
+                    return Response::builder()
+                        .status(StatusCode::OK)
+                        .header(header::CONTENT_TYPE, *content_type)
+                        .header(header::CACHE_CONTROL, "public, max-age=86400")
+                        .body(Body::from(data))
+                        .unwrap();
+                }
+            }
+        }
+    }
+
+    Response::builder()
+        .status(StatusCode::NOT_FOUND)
+        .body(Body::empty())
+        .unwrap()
 }

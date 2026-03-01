@@ -42,6 +42,7 @@ pub trait Plugin: Send + Sync + 'static {
     fn display_name(&self) -> &str;
     fn version(&self) -> &str;
     fn capabilities(&self) -> Vec<Capability>;
+    fn icon_url(&self) -> Option<&str> { None }
     async fn init(&mut self, ctx: PluginContext) -> anyhow::Result<()>;
     async fn health_check(&self) -> HealthStatus;
     async fn shutdown(&self) -> anyhow::Result<()>;

@@ -11,6 +11,8 @@ pub struct RemotePluginEntry {
     pub settings: Vec<serde_json::Value>,
     pub wasm_url: String,
     pub manifest_url: String,
+    #[serde(default)]
+    pub icon_url: Option<String>,
 }
 
 pub const REMOTE_CATALOG_URL: &str =

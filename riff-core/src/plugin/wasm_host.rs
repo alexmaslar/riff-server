@@ -115,6 +115,10 @@ impl Plugin for WasmPluginInstance {
         &self.manifest.version
     }
 
+    fn icon_url(&self) -> Option<&str> {
+        self.manifest.icon_url.as_deref()
+    }
+
     fn capabilities(&self) -> Vec<Capability> {
         self.manifest
             .capabilities
