@@ -140,10 +140,10 @@ pub async fn list_albums(
     let offset = params.offset.unwrap_or(0);
 
     let order_clause = match params.sort.as_deref() {
-        Some("year") => "a.year DESC, a.title",
+        Some("year") => "a.year DESC, a.title COLLATE NOCASE",
         Some("added") => "a.added_at DESC",
-        Some("artist") => "ar.name, a.year, a.title",
-        _ => "a.title",
+        Some("artist") => "ar.name COLLATE NOCASE, a.year, a.title COLLATE NOCASE",
+        _ => "a.title COLLATE NOCASE",
     };
 
     let mut builder = QueryBuilder::<Sqlite>::new(

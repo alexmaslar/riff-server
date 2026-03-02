@@ -21,6 +21,7 @@ pub struct AutoQueueParams {
     pub artist_id: Option<String>,
     pub exclude: Option<String>,
     pub limit: Option<usize>,
+    pub library: Option<String>,
 }
 
 /// GET /autoqueue — Get auto-queued tracks based on a seed track
@@ -30,6 +31,7 @@ pub async fn get_autoqueue(
     Query(params): Query<AutoQueueParams>,
 ) -> Result<Json<Value>, AppError> {
     let limit = params.limit.unwrap_or(15).clamp(1, 50);
+    let library_ids = riff_core::db::resolve_library_ids(&state.db, params.library.as_deref()).await?;
     let exclude_ids: Vec<String> = params
         .exclude
         .as_deref()
@@ -91,16 +93,18 @@ pub async fn get_autoqueue(
              JOIN albums a ON t.album_id = a.id
              JOIN artists ar ON a.artist_id = ar.id
              WHERE t.id NOT IN (SELECT value FROM json_each(?))
+               AND t.library_id IN (SELECT value FROM json_each(?))
              ORDER BY CASE WHEN a.artist_id = ? THEN 0 ELSE 1 END, rating DESC
              LIMIT 200",
         );
         let exclude_json = serde_json::to_string(&exclude_ids).unwrap_or_else(|_| "[]".to_string());
         q = q.bind(exclude_json);
+        q = q.bind(&library_ids);
         q = q.bind(context_artist_id);
         q.fetch_all(&state.db).await?
     } else {
         // Build genre match condition with dynamic placeholders
-        let genre_params: Vec<String> = genres.iter().enumerate().map(|(i, _)| format!("?{}", i + 3)).collect();
+        let genre_params: Vec<String> = genres.iter().enumerate().map(|(i, _)| format!("?{}", i + 4)).collect();
         let genre_list = genre_params.join(", ");
 
         let query = format!(
@@ -114,6 +118,7 @@ pub async fn get_autoqueue(
              JOIN albums a ON t.album_id = a.id
              JOIN artists ar ON a.artist_id = ar.id
              WHERE t.id NOT IN (SELECT value FROM json_each(?1))
+               AND t.library_id IN (SELECT value FROM json_each(?2))
                AND a.id IN (
                  SELECT DISTINCT a2.id FROM albums a2, json_each(a2.genre) jg
                  WHERE jg.value IN ({genre_list})
@@ -121,12 +126,12 @@ pub async fn get_autoqueue(
                  SELECT DISTINCT a3.id FROM albums a3, json_each(a3.style) js
                  WHERE js.value IN ({genre_list})
                )
-             ORDER BY CASE WHEN a.artist_id = ?2 THEN 0 ELSE 1 END, rating DESC
+             ORDER BY CASE WHEN a.artist_id = ?3 THEN 0 ELSE 1 END, rating DESC
              LIMIT 200"
         );
 
         let exclude_json = serde_json::to_string(&exclude_ids).unwrap_or_else(|_| "[]".to_string());
-        let mut q = sqlx::query(&query).bind(&exclude_json).bind(context_artist_id);
+        let mut q = sqlx::query(&query).bind(&exclude_json).bind(&library_ids).bind(context_artist_id);
         for genre in &genres {
             q = q.bind(genre);
         }
