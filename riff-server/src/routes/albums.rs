@@ -76,6 +76,7 @@ pub struct AlbumDetailResponse {
     pub is_favorited: bool,
     pub similar_albums: Vec<SimilarAlbum>,
     pub source: Option<String>,
+    pub summary: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -504,6 +505,7 @@ pub async fn build_album_detail(
         is_favorited,
         similar_albums,
         source: album_row.get(22),
+        summary: album_row.get(10),
         reviews,
     })
 }
@@ -1259,5 +1261,42 @@ pub async fn get_hidden_reviews(
         .collect();
 
     Ok(Json(json!({ "reviews": reviews })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ConsensusBody {
+    pub text: String,
+    pub rating: Option<f64>,
+}
+
+pub async fn save_consensus(
+    State(state): State<Arc<AppState>>,
+    Extension(_claims): Extension<Claims>,
+    Path(id): Path<String>,
+    Json(body): Json<ConsensusBody>,
+) -> Result<Json<Value>, AppError> {
+    // Only write if summary is currently NULL or empty
+    let result = sqlx::query(
+        "UPDATE albums SET summary = ?, rating = COALESCE(?, rating), summary_source = 'ai_consensus', summary_updated_at = datetime('now') \
+         WHERE id = ? AND (summary IS NULL OR summary = '')"
+    )
+    .bind(&body.text)
+    .bind(body.rating)
+    .bind(&id)
+    .execute(&state.db)
+    .await?;
+
+    if result.rows_affected() == 0 {
+        // Either album not found or summary already exists
+        let exists = sqlx::query_as::<_, (i64,)>("SELECT COUNT(*) FROM albums WHERE id = ?")
+            .bind(&id)
+            .fetch_one(&state.db)
+            .await?;
+        if exists.0 == 0 {
+            return Err(AppError::NotFound("album not found".into()));
+        }
+    }
+
+    Ok(Json(json!({ "ok": true })))
 }
 

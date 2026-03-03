@@ -648,6 +648,7 @@ async fn main() -> Result<()> {
         .route("/albums/{id}/play", post(routes::albums::increment_play_count))
         .route("/albums/{id}/reviews/hidden", get(routes::albums::get_hidden_reviews))
         .route("/albums/{id}/reviews/{source}/toggle-hidden", post(routes::albums::toggle_review_visibility))
+        .route("/albums/{id}/consensus", put(routes::albums::save_consensus))
         .route("/tracks/{id}/report-decode-error", post(routes::tracks::report_decode_error))
         .route("/playlists", get(routes::playlists::list_playlists).post(routes::playlists::create_playlist))
         .route("/playlists/{id}", get(routes::playlists::get_playlist).delete(routes::playlists::delete_playlist))
