@@ -175,7 +175,7 @@ pub async fn enrich_album(
             source, clean_title, artist_name
         );
 
-        let review_data = match tokio::time::timeout(
+        let reviews = match tokio::time::timeout(
             std::time::Duration::from_secs(30),
             provider.get_album_reviews(clean_title, artist_name, None),
         )
@@ -183,69 +183,77 @@ pub async fn enrich_album(
         {
             Ok(Ok(Some(result))) if !result.reviews.is_empty() => {
                 info!(
-                    "editorial: '{}' found review for '{}' by '{}'",
-                    source, clean_title, artist_name
+                    "editorial: '{}' found {} review(s) for '{}' by '{}'",
+                    source,
+                    result.reviews.len(),
+                    clean_title,
+                    artist_name
                 );
-                result.reviews.into_iter().next()
+                result.reviews
             }
             Ok(Ok(_)) => {
                 info!(
                     "editorial: '{}' no review found for '{}' by '{}'",
                     source, clean_title, artist_name
                 );
-                None
+                Vec::new()
             }
             Ok(Err(e)) => {
                 warn!(
                     "editorial: '{}' error for '{}' by '{}': {}",
                     source, clean_title, artist_name, e
                 );
-                None
+                Vec::new()
             }
             Err(_) => {
                 warn!(
                     "editorial: '{}' timed out for '{}' by '{}'",
                     source, clean_title, artist_name
                 );
-                None
+                Vec::new()
             }
         };
 
-        let review_id = Uuid::new_v4().to_string();
         let now = chrono::Utc::now().to_rfc3339();
 
-        match review_data {
-            Some(review) => {
-                let text = review.excerpt.unwrap_or_default();
+        if reviews.is_empty() {
+            // No reviews → placeholder with provider name
+            let review_id = Uuid::new_v4().to_string();
+            insert_placeholder(pool, &review_id, album_id, &source, &now).await?;
+        } else {
+            // Store each review with its per-source name (e.g. "pitchfork", "allmusic")
+            for review in &reviews {
+                let review_source = &review.source;
+                let text = review.excerpt.as_deref().unwrap_or_default();
                 if text.is_empty() {
-                    // Review with no excerpt → placeholder
-                    insert_placeholder(pool, &review_id, album_id, &source, &now).await?;
-                } else {
-                    sqlx::query(
-                        "INSERT OR REPLACE INTO editorial_reviews \
-                         (id, entity_type, entity_id, source, source_url, text, rating, \
-                          rating_count, reviewer, review_date, created_at) \
-                         VALUES (?, 'album', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    )
-                    .bind(&review_id)
-                    .bind(album_id)
-                    .bind(&source)
-                    .bind(&review.source_url)
-                    .bind(&text)
-                    .bind(review.rating)
-                    .bind(review.rating_count.map(|c| c as i64))
-                    .bind(&review.reviewer)
-                    .bind(&review.review_date)
-                    .bind(&now)
-                    .execute(pool)
-                    .await?;
-                    reviews_added += 1;
+                    continue;
                 }
+                let review_id = Uuid::new_v4().to_string();
+                sqlx::query(
+                    "INSERT OR REPLACE INTO editorial_reviews \
+                     (id, entity_type, entity_id, source, source_url, text, rating, \
+                      rating_count, reviewer, review_date, created_at) \
+                     VALUES (?, 'album', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                )
+                .bind(&review_id)
+                .bind(album_id)
+                .bind(review_source)
+                .bind(&review.source_url)
+                .bind(text)
+                .bind(review.rating)
+                .bind(review.rating_count.map(|c| c as i64))
+                .bind(&review.reviewer)
+                .bind(&review.review_date)
+                .bind(&now)
+                .execute(pool)
+                .await?;
+                reviews_added += 1;
             }
-            None => {
-                // No review → placeholder
-                insert_placeholder(pool, &review_id, album_id, &source, &now).await?;
-            }
+
+            // Insert placeholder with provider name ("editorial") as the "checked" marker
+            // so the skip-check logic (which uses provider_name()) works correctly.
+            let placeholder_id = Uuid::new_v4().to_string();
+            insert_placeholder(pool, &placeholder_id, album_id, &source, &now).await?;
         }
     }
 
