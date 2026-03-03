@@ -44,6 +44,7 @@ pub struct AlbumResponse {
     pub added_at: String,
     pub play_count: i64,
     pub source: Option<String>,
+    pub apple_music_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -77,6 +78,7 @@ pub struct AlbumDetailResponse {
     pub similar_albums: Vec<SimilarAlbum>,
     pub source: Option<String>,
     pub summary: Option<String>,
+    pub apple_music_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -130,6 +132,7 @@ pub struct TrackSummary {
     pub file_size_bytes: Option<i64>,
     pub isrc: Option<String>,
     pub album_play_count: Option<i64>,
+    pub apple_music_id: Option<String>,
 }
 
 pub async fn list_albums(
@@ -148,7 +151,7 @@ pub async fn list_albums(
     };
 
     let mut builder = QueryBuilder::<Sqlite>::new(
-        "SELECT a.id, a.title, a.artist_id, ar.name, a.year, a.genre, a.style, a.label, a.cover_art_path, a.added_at, a.play_count, COUNT(*) OVER() as total_count, a.source
+        "SELECT a.id, a.title, a.artist_id, ar.name, a.year, a.genre, a.style, a.label, a.cover_art_path, a.added_at, a.play_count, COUNT(*) OVER() as total_count, a.source, a.apple_music_id
          FROM albums a JOIN artists ar ON a.artist_id = ar.id",
     );
 
@@ -316,6 +319,7 @@ pub async fn list_albums(
                 added_at: row.get(9),
                 play_count: row.get(10),
                 source: row.get(12),
+                apple_music_id: row.get(13),
             }
         })
         .collect();
@@ -330,7 +334,7 @@ pub async fn build_album_detail(
     plugin_registry: Option<&riff_core::plugin::registry::PluginRegistry>,
 ) -> Result<AlbumDetailResponse, AppError> {
     let album_row = sqlx::query(
-        "SELECT a.id, a.title, a.artist_id, ar.name, a.year, a.genre, a.style, a.label, a.catalog_number, a.cover_art_path, a.summary, a.rating, a.moods, a.descriptors, a.keywords, a.metadata_status, a.added_at, a.country, a.release_notes, a.all_labels, a.is_compilation, a.play_count, a.source, a.summary_source, a.rating_sources
+        "SELECT a.id, a.title, a.artist_id, ar.name, a.year, a.genre, a.style, a.label, a.catalog_number, a.cover_art_path, a.summary, a.rating, a.moods, a.descriptors, a.keywords, a.metadata_status, a.added_at, a.country, a.release_notes, a.all_labels, a.is_compilation, a.play_count, a.source, a.summary_source, a.rating_sources, a.apple_music_id
          FROM albums a JOIN artists ar ON a.artist_id = ar.id
          WHERE a.id = ?",
     )
@@ -346,7 +350,7 @@ pub async fn build_album_detail(
                     t.album_id, ar.name as artist_name, t.sample_rate, t.bit_depth,
                     t.composer, COALESCE(t.bpm_tag, t.bpm_analyzed) as bpm,
                     COALESCE(t.musical_key, t.key_analyzed) as resolved_key, t.loudness_lufs, t.mood,
-                    t.file_size_bytes, t.isrc, a.play_count as album_play_count
+                    t.file_size_bytes, t.isrc, a.play_count as album_play_count, t.apple_music_id
              FROM tracks t
              JOIN albums a ON t.album_id = a.id
              JOIN artists ar ON a.artist_id = ar.id
@@ -408,6 +412,7 @@ pub async fn build_album_detail(
             file_size_bytes: row.get(15),
             isrc: row.get(16),
             album_play_count: row.get(17),
+            apple_music_id: row.get(18),
         })
         .collect();
 
@@ -507,6 +512,7 @@ pub async fn build_album_detail(
         source: album_row.get(22),
         summary: album_row.get(10),
         reviews,
+        apple_music_id: album_row.get(25),
     })
 }
 
