@@ -4,7 +4,7 @@ use riff_core::config::AiProvider;
 use riff_core::plugin::catalog::RemotePluginEntry;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::error::AppError;
@@ -32,9 +32,10 @@ pub async fn get_config(
 ) -> Result<([(header::HeaderName, &'static str); 1], Json<Value>), AppError> {
     let config = state.config.read().await;
     let remote_catalog = state.remote_catalog.read().await;
+    let dev_names: Vec<&str> = config.dev_plugins.keys().map(|k| k.as_str()).collect();
 
     // Build plugins JSON with secret masking
-    let plugins_json = build_plugins_json(&config.plugins, &remote_catalog);
+    let plugins_json = build_plugins_json(&config.plugins, &remote_catalog, &dev_names);
 
     Ok((
         [(header::CACHE_CONTROL, "private, max-age=3600")],
@@ -76,6 +77,7 @@ pub async fn get_config(
 fn build_plugins_json(
     plugins: &HashMap<String, riff_core::config::PluginConfig>,
     remote_catalog: &[RemotePluginEntry],
+    dev_plugin_names: &[&str],
 ) -> Value {
     // Build lookup: plugin_name -> set of secret field keys
     let secret_keys: HashMap<&str, Vec<String>> = remote_catalog
@@ -83,8 +85,15 @@ fn build_plugins_json(
         .map(|entry| (entry.name.as_str(), entry.secret_keys()))
         .collect();
 
+    // Only include plugins that exist in the catalog or are dev plugins (skip stale config entries)
+    let mut catalog_names: HashSet<&str> = remote_catalog.iter().map(|e| e.name.as_str()).collect();
+    catalog_names.extend(dev_plugin_names);
+
     let mut result = serde_json::Map::new();
     for (name, plugin_cfg) in plugins {
+        if !catalog_names.contains(name.as_str()) {
+            continue;
+        }
         let mut settings = serde_json::Map::new();
         let is_secret_field = |key: &str| -> bool {
             secret_keys
@@ -339,7 +348,8 @@ pub async fn update_config(
     }
 
     let remote_catalog = state.remote_catalog.read().await;
-    let plugins_json = build_plugins_json(&config_snapshot.plugins, &remote_catalog);
+    let dev_names: Vec<&str> = config_snapshot.dev_plugins.keys().map(|k| k.as_str()).collect();
+    let plugins_json = build_plugins_json(&config_snapshot.plugins, &remote_catalog, &dev_names);
     drop(remote_catalog);
 
     // Reload plugins synchronously so we can report health in the response
