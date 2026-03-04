@@ -3535,7 +3535,6 @@ dependencies = [
  "anyhow",
  "argon2",
  "async-trait",
- "base64",
  "bliss-audio",
  "chrono",
  "dirs",
@@ -3556,7 +3555,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
- "unicode-normalization",
  "uuid",
  "walkdir",
 ]
@@ -4880,6 +4878,7 @@ dependencies = [
  "futures-util",
  "http 1.4.0",
  "http-body",
+ "http-body-util",
  "iri-string",
  "pin-project-lite",
  "tokio",

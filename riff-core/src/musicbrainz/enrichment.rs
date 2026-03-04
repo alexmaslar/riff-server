@@ -362,7 +362,6 @@ pub async fn enrich_artist_images_spotify(
         .timeout(std::time::Duration::from_secs(15))
         .user_agent("RiffServer/0.1 (riff-music-server)")
         .build()?;
-
     let mb_client = MusicBrainzClient::new()?;
     let mut enriched_ids: Vec<String> = Vec::new();
 
@@ -481,6 +480,7 @@ fn extract_spotify_artist_id(relations: &[super::types::MBRelation]) -> Option<S
 /// Also fetches artist images from Deezer when not already set.
 pub async fn enrich_artist_top_tracks(
     pool: &SqlitePool,
+    client: &reqwest::Client,
 ) -> anyhow::Result<Vec<String>> {
     let rows: Vec<(String, String)> = sqlx::query_as(
         "SELECT a.id, a.name FROM artists a \
@@ -500,8 +500,6 @@ pub async fn enrich_artist_top_tracks(
     }
 
     info!("enriching {} artists with Deezer top tracks", rows.len());
-
-    let client = reqwest::Client::new();
     let mut enriched_ids: Vec<String> = Vec::new();
 
     for (artist_id, artist_name) in &rows {
@@ -556,6 +554,7 @@ pub async fn enrich_artist_top_tracks(
 /// Resolves Wikidata ID → English Wikipedia article title → Wikipedia summary extract.
 pub async fn enrich_artist_bios_wikipedia(
     pool: &SqlitePool,
+    http_client: &reqwest::Client,
 ) -> anyhow::Result<Vec<String>> {
     let rows: Vec<(String, String, String)> = sqlx::query_as(
         "SELECT id, name, external_id FROM artists \
@@ -572,10 +571,6 @@ pub async fn enrich_artist_bios_wikipedia(
     info!("enriching {} artists with Wikipedia bios", rows.len());
 
     let mb_client = MusicBrainzClient::new()?;
-    let http_client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .user_agent("RiffServer/0.1 (riff-music-server; mailto:riff@example.com)")
-        .build()?;
 
     let mut enriched_ids: Vec<String> = Vec::new();
 

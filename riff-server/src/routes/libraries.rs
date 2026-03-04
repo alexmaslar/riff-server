@@ -6,7 +6,6 @@ use riff_core::{config::LibraryEntry, db, scanner};
 use serde::{Deserialize, Deserializer};
 use serde_json::{json, Value};
 use sqlx::Row;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use crate::error::AppError;
@@ -104,6 +103,9 @@ pub async fn add_library(
             Err(e) => tracing::warn!("scan failed for new library: {e}"),
         }
     });
+
+    // Invalidate library IDs cache
+    *state.library_ids_cache.write().await = None;
 
     Ok(Json(json!({ "status": "added", "id": library_id })))
 }
@@ -218,6 +220,9 @@ pub async fn update_library(
         });
     }
 
+    // Invalidate library IDs cache
+    *state.library_ids_cache.write().await = None;
+
     Ok(Json(json!({ "status": "updated" })))
 }
 
@@ -263,6 +268,9 @@ pub async fn remove_library(
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
+    // Invalidate library IDs cache
+    *state.library_ids_cache.write().await = None;
+
     Ok(Json(json!({ "status": "removed" })))
 }
 
@@ -272,7 +280,7 @@ pub async fn scan_single_library(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, AppError> {
     // Guard: prevent overlap with periodic scanner
-    if state.scan_running.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+    if !state.stage_manager.try_start("scan") {
         return Ok(Json(json!({ "status": "already_running" })));
     }
 
@@ -302,6 +310,6 @@ pub async fn scan_single_library(
         })))
     }.await;
 
-    state.scan_running.store(false, Ordering::SeqCst);
+    state.stage_manager.finish("scan");
     result
 }

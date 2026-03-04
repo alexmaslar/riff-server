@@ -1,6 +1,7 @@
 pub mod error;
 mod discovery;
 mod middleware;
+pub mod pipeline;
 mod plugin_reload;
 mod routes;
 mod tls;
@@ -16,7 +17,7 @@ use axum::{
     BoxError, Json, Router,
 };
 use riff_core::plugin::catalog::RemotePluginEntry;
-use riff_core::{analysis, auth, config::Config, daily_mixes, db, musicbrainz, plugin, scanner::{self, metadata::{detect_library_convention, build_album_dir, build_track_filename, write_flac_tags}}};
+use riff_core::{auth, config::Config, db, musicbrainz, plugin, scanner::{self, metadata::{detect_library_convention, build_album_dir, build_track_filename, write_flac_tags}}};
 use serde_json::{json, Value};
 use socket2::{Domain, Protocol, Socket, TcpKeepalive, Type};
 use sqlx::SqlitePool;
@@ -28,22 +29,78 @@ use std::time::Duration;
 use tokio::sync::{Notify, RwLock};
 use tower::ServiceBuilder;
 use tower::timeout::TimeoutLayer;
+use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::compression::CompressionLayer;
 use tower_http::cors::{Any, CorsLayer};
+use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
+
+pub struct StageManager {
+    enrichment: AtomicBool,
+    editorial: AtomicBool,
+    analysis: AtomicBool,
+    recommendation: AtomicBool,
+    artist_recommendation: AtomicBool,
+    top_tracks: AtomicBool,
+    scan: AtomicBool,
+}
+
+impl Default for StageManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl StageManager {
+    pub fn new() -> Self {
+        Self {
+            enrichment: AtomicBool::new(false),
+            editorial: AtomicBool::new(false),
+            analysis: AtomicBool::new(false),
+            recommendation: AtomicBool::new(false),
+            artist_recommendation: AtomicBool::new(false),
+            top_tracks: AtomicBool::new(false),
+            scan: AtomicBool::new(false),
+        }
+    }
+
+    pub fn try_start(&self, stage: &str) -> bool {
+        let flag = match stage {
+            "enrichment" => &self.enrichment,
+            "editorial" => &self.editorial,
+            "analysis" => &self.analysis,
+            "recommendation" => &self.recommendation,
+            "artist_recommendation" => &self.artist_recommendation,
+            "top_tracks" => &self.top_tracks,
+            "scan" => &self.scan,
+            _ => return false,
+        };
+        flag.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    }
+
+    pub fn finish(&self, stage: &str) {
+        let flag = match stage {
+            "enrichment" => &self.enrichment,
+            "editorial" => &self.editorial,
+            "analysis" => &self.analysis,
+            "recommendation" => &self.recommendation,
+            "artist_recommendation" => &self.artist_recommendation,
+            "top_tracks" => &self.top_tracks,
+            "scan" => &self.scan,
+            _ => return,
+        };
+        flag.store(false, Ordering::SeqCst);
+    }
+}
 
 pub struct AppState {
     pub db: SqlitePool,
     pub config: RwLock<Config>,
     pub jwt_secret: String,
-    pub enrichment_running: AtomicBool,
-    pub editorial_running: AtomicBool,
-    pub analysis_running: AtomicBool,
-    pub recommendation_running: AtomicBool,
-    pub artist_recommendation_running: AtomicBool,
-    pub top_tracks_running: AtomicBool,
-    pub scan_running: AtomicBool,
+    pub stage_manager: StageManager,
+    pub http_client: reqwest::Client,
     pub remote_access: upnp::RemoteAccessManager,
     pub restart: Notify,
     pub ffmpeg_available: bool,
@@ -58,280 +115,12 @@ pub struct AppState {
     pub pipeline_notify: Notify,
     /// Names of plugins loaded from dev_plugins config (invisible to non-admin users).
     pub dev_plugin_names: RwLock<std::collections::HashSet<String>>,
+    /// Cache for resolved library IDs (invalidated on library add/remove/modify).
+    pub library_ids_cache: RwLock<Option<Vec<String>>>,
 }
 
-async fn run_background_pipeline(state: Arc<AppState>) {
-    let mut first_run = true;
-    loop {
-        if !first_run {
-            state.pipeline_notify.notified().await;
-            // Debounce: coalesce rapid triggers (e.g. multiple downloads completing)
-            tokio::time::sleep(Duration::from_secs(5)).await;
-        }
-        first_run = false;
-
-        tracing::info!("background pipeline starting");
-
-        let mut album_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let mut artist_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
-
-        // Step 1: Enrichment (MusicBrainz — no API key needed)
-        {
-            let config = state.config.read().await;
-            if config.metadata.enrichment.auto_enrich {
-                let db = state.db.clone();
-                drop(config);
-                if let Some(r) = run_stage_result(&state.enrichment_running, "enrichment", async move {
-                    musicbrainz::enrich_library(&db).await
-                }).await {
-                    album_ids.extend(r.enriched_album_ids);
-                    artist_ids.extend(r.enriched_artist_ids);
-                }
-            }
-        }
-
-        // Step 1b: Editorial enrichment (editorial plugins)
-        {
-            let db = state.db.clone();
-            let editorial_providers = state.plugin_registry.read().await
-                .editorial_providers().to_vec();
-            if let Some(r) = run_stage_result(&state.editorial_running, "editorial enrichment", async move {
-                riff_core::editorial::enrich_library_editorial(&db, &editorial_providers).await
-            }).await {
-                album_ids.extend(r.enriched_album_ids);
-            }
-        }
-
-        // Step 2: Album recommendations (metadata-based, always run)
-        run_stage(
-            &state.recommendation_running,
-            "recommendations",
-            {
-                let db = state.db.clone();
-                async move {
-                    riff_core::recommendations::generate_recommendations(&db).await
-                }
-            },
-        )
-        .await;
-
-        // Step 2a: Artist recommendations (metadata-based, always run)
-        run_stage(
-            &state.artist_recommendation_running,
-            "artist recommendations",
-            {
-                let db = state.db.clone();
-                async move {
-                    riff_core::recommendations::generate_artist_recommendations(&db).await
-                }
-            },
-        )
-        .await;
-
-        // Step 2b: Spotify artist images + streaming provider fallback
-        {
-            let db = state.db.clone();
-            let providers = state.plugin_registry.read().await.streaming_providers().to_vec();
-            match musicbrainz::enrich_artist_images_spotify(&db, &providers).await {
-                Ok(ids) if !ids.is_empty() => {
-                    tracing::info!("artist images: {} artists updated", ids.len());
-                    artist_ids.extend(ids);
-                }
-                Ok(_) => {}
-                Err(e) => tracing::warn!("artist image enrichment failed: {e}"),
-            }
-        }
-
-        // Step 2c: Deezer top tracks (no API key needed)
-        if let Some(ids) = run_stage_result(&state.top_tracks_running, "top tracks", {
-            let db = state.db.clone();
-            async move { musicbrainz::enrich_artist_top_tracks(&db).await }
-        }).await {
-            artist_ids.extend(ids);
-        }
-
-        // Step 2d: Wikipedia bios (no API key needed)
-        {
-            let db = state.db.clone();
-            let wiki_ids = musicbrainz::enrich_artist_bios_wikipedia(&db).await
-                .unwrap_or_else(|e| { tracing::warn!("Wikipedia bio enrichment failed: {e}"); vec![] });
-            artist_ids.extend(wiki_ids);
-        }
-
-        // Step 3: Analysis (always)
-        if let Some(r) = run_stage_result(&state.analysis_running, "analysis", {
-            let db = state.db.clone();
-            async move { analysis::analyze_library(&db).await }
-        }).await {
-            album_ids.extend(r.enriched_album_ids);
-        }
-
-        // Emit consolidated enrichment event for SSE clients
-        if !album_ids.is_empty() || !artist_ids.is_empty() {
-            state.event_bus.emit(plugin::events::ServerEvent::EnrichmentCompleted {
-                album_ids: album_ids.into_iter().collect(),
-                artist_ids: artist_ids.into_iter().collect(),
-            });
-        }
-
-        // Daily mixes are NOT run here — they regenerate only at midnight UTC via run_daily_refresh()
-
-        // Step 4: Clean up stale caches (not accessed in 24h)
-        routes::hls::cleanup_hls_cache().await;
-        transcode::cleanup_cache(std::time::Duration::from_secs(86400)).await;
-
-        tracing::info!("background pipeline complete, waiting for next trigger");
-    }
-}
-
-async fn run_stage<F, R>(flag: &AtomicBool, name: &str, f: F)
-where
-    F: std::future::Future<Output = anyhow::Result<R>>,
-{
-    if flag
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_ok()
-    {
-        match f.await {
-            Ok(_) => tracing::info!("{name} complete"),
-            Err(e) => tracing::warn!("{name} failed: {e}"),
-        }
-        flag.store(false, Ordering::SeqCst);
-    }
-}
-
-/// Like `run_stage` but returns the successful result for ID collection.
-async fn run_stage_result<F, R>(flag: &AtomicBool, name: &str, f: F) -> Option<R>
-where
-    F: std::future::Future<Output = anyhow::Result<R>>,
-{
-    if flag
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_ok()
-    {
-        let result = match f.await {
-            Ok(r) => {
-                tracing::info!("{name} complete");
-                Some(r)
-            }
-            Err(e) => {
-                tracing::warn!("{name} failed: {e}");
-                None
-            }
-        };
-        flag.store(false, Ordering::SeqCst);
-        result
-    } else {
-        None
-    }
-}
-
-async fn run_periodic_scanner(state: Arc<AppState>) {
-    loop {
-        // Read the minimum scan interval across all libraries
-        let interval_secs = {
-            let config = state.config.read().await;
-            let global = config.library.scan_interval;
-            config
-                .resolved_libraries()
-                .iter()
-                .filter_map(|lib| lib.scan_interval)
-                .min()
-                .unwrap_or(global)
-        };
-
-        // scan_interval = 0 means disabled; re-check every 5 minutes
-        if interval_secs == 0 {
-            tokio::time::sleep(Duration::from_secs(300)).await;
-            continue;
-        }
-        tokio::time::sleep(Duration::from_secs(interval_secs)).await;
-
-        // Guard: skip if a scan is already in progress
-        if state
-            .scan_running
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_err()
-        {
-            tracing::info!("periodic scan skipped — scan already running");
-            continue;
-        }
-
-        let config = state.config.read().await;
-        let libs = config.resolved_libraries();
-        let global_interval = config.library.scan_interval;
-        drop(config);
-
-        let mut new_content_found = false;
-
-        for lib_entry in &libs {
-            let effective_interval = lib_entry.scan_interval.unwrap_or(global_interval);
-            if effective_interval == 0 {
-                continue;
-            }
-
-            let library_id = match db::get_library_id_by_path(&state.db, &lib_entry.path).await {
-                Ok(Some(id)) => id,
-                _ => continue,
-            };
-
-            tracing::info!("periodic scan: {:?} ({})", lib_entry.name, lib_entry.path);
-            match scanner::scan_library(&state.db, &lib_entry.path, &library_id).await {
-                Ok(result) => {
-                    if result.tracks_added > 0
-                        || result.albums_added > 0
-                        || result.artists_added > 0
-                        || result.tracks_removed > 0
-                        || result.albums_removed > 0
-                        || result.artists_removed > 0
-                    {
-                        new_content_found = true;
-                        tracing::info!(
-                            "periodic scan complete for {:?}: +{} artists, +{} albums, +{} tracks, -{} tracks, -{} albums, -{} artists",
-                            lib_entry.name,
-                            result.artists_added,
-                            result.albums_added,
-                            result.tracks_added,
-                            result.tracks_removed,
-                            result.albums_removed,
-                            result.artists_removed,
-                        );
-                    }
-                }
-                Err(e) => tracing::warn!("periodic scan failed for {:?}: {}", lib_entry.name, e),
-            }
-        }
-
-        if new_content_found {
-            tracing::info!("periodic scan found new content, triggering pipeline");
-            state.pipeline_notify.notify_one();
-        }
-
-        state.scan_running.store(false, Ordering::SeqCst);
-    }
-}
-
-async fn run_daily_refresh(state: Arc<AppState>) {
-    loop {
-        // Compute duration until next midnight UTC
-        let now = chrono::Utc::now();
-        let tomorrow = (now.date_naive() + chrono::Days::new(1))
-            .and_hms_opt(0, 0, 0)
-            .unwrap();
-        let until_midnight = tomorrow
-            .signed_duration_since(now.naive_utc())
-            .to_std()
-            .unwrap_or(Duration::from_secs(60));
-
-        tokio::time::sleep(until_midnight).await;
-
-        // Generate daily mixes for all users
-        match daily_mixes::generate_all_daily_mixes(&state.db).await {
-            Ok(_) => tracing::info!("daily mix refresh complete"),
-            Err(e) => tracing::warn!("daily mix refresh failed: {e}"),
-        }
-    }
-}
+// Background pipeline functions are in pipeline.rs
+use pipeline::{run_background_pipeline, run_periodic_scanner, run_daily_refresh};
 
 /// Create a TCP listener with keepalive probes to survive cellular NAT timeouts.
 /// Probes start after 5s idle, repeat every 5s, and give up after 6 failures (~35s total).
@@ -459,17 +248,14 @@ async fn main() -> Result<()> {
     // Fetch community plugin catalog (non-blocking, empty on failure)
     let remote_catalog = plugin::catalog::fetch_remote_catalog().await;
 
+    let http_client = reqwest::Client::builder().build().unwrap();
+
     let state = Arc::new(AppState {
         db: pool,
         config: RwLock::new(config.clone()),
         jwt_secret: config.auth.jwt_secret.clone(),
-        enrichment_running: AtomicBool::new(false),
-        editorial_running: AtomicBool::new(false),
-        analysis_running: AtomicBool::new(false),
-        recommendation_running: AtomicBool::new(false),
-        artist_recommendation_running: AtomicBool::new(false),
-        top_tracks_running: AtomicBool::new(false),
-        scan_running: AtomicBool::new(false),
+        stage_manager: StageManager::new(),
+        http_client,
         remote_access: upnp::RemoteAccessManager::new(config.server.https_port),
         restart: Notify::new(),
         ffmpeg_available,
@@ -482,6 +268,7 @@ async fn main() -> Result<()> {
         event_bus,
         pipeline_notify: Notify::new(),
         dev_plugin_names: RwLock::new(std::collections::HashSet::new()),
+        library_ids_cache: RwLock::new(None),
     });
 
     // Set cert fingerprint on the remote access manager
@@ -731,7 +518,7 @@ async fn main() -> Result<()> {
             middleware::require_auth,
         ));
 
-    // Apply timeout + gzip compression only to JSON API routes (not streaming)
+    // Apply timeout + gzip compression + body limit only to JSON API routes (not streaming)
     let timed_routes = Router::new()
         .merge(protected)
         .merge(admin)
@@ -740,15 +527,17 @@ async fn main() -> Result<()> {
                 .layer(axum::error_handling::HandleErrorLayer::new(|_: BoxError| async {
                     StatusCode::REQUEST_TIMEOUT
                 }))
-                .layer(TimeoutLayer::new(Duration::from_secs(120)))
+                .layer(TimeoutLayer::new(Duration::from_secs(30)))
         )
+        .layer(RequestBodyLimitLayer::new(10 * 1024 * 1024)) // 10MB body limit for API routes
         .layer(CompressionLayer::new().gzip(true));
 
     let app = Router::new()
         .merge(public)
         .merge(sse)            // no timeout — long-lived SSE connections
         .merge(streaming)      // no timeout, no gzip — raw bytes with accurate Content-Length
-        .merge(timed_routes)   // 120s timeout + gzip for JSON API responses
+        .merge(timed_routes)   // 30s timeout + gzip for JSON API responses
+        .layer(CatchPanicLayer::new())
         .layer(TraceLayer::new_for_http())
         .layer(cors)
         .with_state(state.clone());
@@ -1114,7 +903,7 @@ async fn run_download_processor(state: Arc<AppState>) {
         // Download cover art
         if let Some(ref cover_url) = detail.album.cover_url {
             let cover_dest = album_dir.join("cover.jpg");
-            if let Ok(resp) = reqwest::get(cover_url).await {
+            if let Ok(resp) = state.http_client.get(cover_url).send().await {
                 if let Ok(bytes) = resp.bytes().await {
                     let _ = tokio::fs::create_dir_all(&album_dir).await;
                     let _ = tokio::fs::write(&cover_dest, &bytes).await;

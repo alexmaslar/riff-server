@@ -219,7 +219,7 @@ pub async fn stream_track(
 
     let stream = cdn_resp
         .bytes_stream()
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e));
+        .map_err(std::io::Error::other);
     let body = Body::from_stream(stream);
 
     builder

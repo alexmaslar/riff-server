@@ -32,8 +32,6 @@ host_fn!(host_cache_set(user_data: CacheStore; key: String, value: Vec<u8>, ttl_
 pub struct WasmPluginInstance {
     pub(crate) manifest: PluginManifest,
     pub(crate) plugin: tokio::sync::Mutex<extism::Plugin>,
-    #[allow(dead_code)]
-    config: HashMap<String, serde_json::Value>,
 }
 
 impl WasmPluginInstance {
@@ -82,7 +80,6 @@ impl WasmPluginInstance {
         Ok(Self {
             manifest,
             plugin: tokio::sync::Mutex::new(plugin),
-            config,
         })
     }
 

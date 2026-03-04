@@ -12,6 +12,7 @@ use super::wasm_host::WasmPluginInstance;
 
 pub struct WasmStreamingProvider {
     instance: Arc<WasmPluginInstance>,
+    http_client: reqwest::Client,
 }
 
 #[derive(Serialize)]
@@ -32,8 +33,11 @@ struct StreamUrlInput {
 }
 
 impl WasmStreamingProvider {
-    pub fn new(instance: Arc<WasmPluginInstance>) -> Self {
-        Self { instance }
+    pub fn new(instance: Arc<WasmPluginInstance>, http_client: reqwest::Client) -> Self {
+        Self {
+            instance,
+            http_client,
+        }
     }
 }
 
@@ -85,8 +89,7 @@ impl StreamingProvider for WasmStreamingProvider {
     ) -> anyhow::Result<()> {
         let stream_url = self.get_stream_url(provider_track_id, quality).await?;
 
-        let client = reqwest::Client::new();
-        let resp = client
+        let resp = self.http_client
             .get(&stream_url.url)
             .timeout(Duration::from_secs(300))
             .send()

@@ -31,10 +31,6 @@ pub trait AiProviderTrait: Send + Sync {
     async fn generate(&self, system: &str, user: &str, opts: &GenerateOptions) -> anyhow::Result<String>;
 }
 
-pub fn create_provider(config: &AiConfig) -> anyhow::Result<Box<dyn AiProviderTrait>> {
-    create_provider_with_model(config, None)
-}
-
 pub fn create_provider_with_model(config: &AiConfig, model_override: Option<&str>) -> anyhow::Result<Box<dyn AiProviderTrait>> {
     let quota = Quota::per_second(NonZeroU32::new(1).unwrap());
     let limiter = Arc::new(RateLimiter::direct(quota));

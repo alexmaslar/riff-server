@@ -2,15 +2,6 @@ use tokio::sync::broadcast;
 
 #[derive(Debug, Clone)]
 pub enum ServerEvent {
-    TrackStarted {
-        user_id: String,
-        track_id: String,
-        title: String,
-        artist: String,
-        album: String,
-        duration_secs: u32,
-        timestamp: i64,
-    },
     TrackCompleted {
         user_id: String,
         track_id: String,
@@ -20,22 +11,10 @@ pub enum ServerEvent {
         duration_secs: u32,
         played_at: i64,
     },
-    AlbumAdded {
-        album_id: String,
-        title: String,
-        artist: String,
-        year: Option<i32>,
-    },
     ScanCompleted {
         library_id: String,
         tracks_added: u32,
         tracks_removed: u32,
-    },
-    FavoriteToggled {
-        user_id: String,
-        entity_type: String,
-        entity_id: String,
-        is_favorite: bool,
     },
     EnrichmentCompleted {
         album_ids: Vec<String>,
@@ -104,17 +83,16 @@ mod tests {
         let mut rx1 = bus.subscribe();
         let mut rx2 = bus.subscribe();
 
-        bus.emit(ServerEvent::AlbumAdded {
-            album_id: "a1".to_string(),
-            title: "Album".to_string(),
-            artist: "Artist".to_string(),
-            year: Some(2024),
+        bus.emit(ServerEvent::ScanCompleted {
+            library_id: "lib1".to_string(),
+            tracks_added: 10,
+            tracks_removed: 2,
         });
 
         let e1 = rx1.recv().await.unwrap();
         let e2 = rx2.recv().await.unwrap();
-        assert!(matches!(e1, ServerEvent::AlbumAdded { .. }));
-        assert!(matches!(e2, ServerEvent::AlbumAdded { .. }));
+        assert!(matches!(e1, ServerEvent::ScanCompleted { .. }));
+        assert!(matches!(e2, ServerEvent::ScanCompleted { .. }));
     }
 
     #[test]
@@ -135,11 +113,10 @@ mod tests {
 
         // Emit more events than capacity to trigger lag
         for i in 0..5 {
-            bus.emit(ServerEvent::FavoriteToggled {
-                user_id: "u1".to_string(),
-                entity_type: "album".to_string(),
-                entity_id: format!("a{i}"),
-                is_favorite: true,
+            bus.emit(ServerEvent::ScanCompleted {
+                library_id: format!("lib{i}"),
+                tracks_added: 1,
+                tracks_removed: 0,
             });
         }
 

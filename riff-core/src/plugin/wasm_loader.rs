@@ -14,8 +14,8 @@ pub async fn download_wasm_plugin(
     wasm_url: &str,
     manifest_url: &str,
     plugin_dir: &Path,
+    client: &reqwest::Client,
 ) -> anyhow::Result<()> {
-    let client = reqwest::Client::new();
     let dest_dir = plugin_dir.join(plugin_id);
     std::fs::create_dir_all(&dest_dir)?;
 

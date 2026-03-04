@@ -30,8 +30,6 @@ ebur128 = "0.1"
 async-trait = "0.1"
 extism = "1"
 image = { version = "0.25", features = ["png", "jpeg"] }
-base64 = "0.22"
-unicode-normalization = "0.1"
 
 [dev-dependencies]
 tempfile = "3"

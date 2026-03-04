@@ -53,6 +53,7 @@ pub async fn reload_wasm_plugins(state: &AppState) -> HashMap<String, PluginLoad
                 &entry.wasm_url,
                 &entry.manifest_url,
                 &plugin_dir,
+                &state.http_client,
             )
             .await
             {
@@ -123,6 +124,7 @@ pub async fn reload_wasm_plugins(state: &AppState) -> HashMap<String, PluginLoad
                 if instance.capabilities().contains(&Capability::Streaming) {
                     registry.register_streaming(Arc::new(WasmStreamingProvider::new(
                         instance.clone(),
+                        state.http_client.clone(),
                     )));
                 }
                 if instance.capabilities().contains(&Capability::Editorial) {
@@ -295,6 +297,7 @@ async fn load_dev_plugin_from_path(
             if instance.capabilities().contains(&Capability::Streaming) {
                 registry.register_streaming(Arc::new(WasmStreamingProvider::new(
                     instance.clone(),
+                    state.http_client.clone(),
                 )));
             }
             if instance.capabilities().contains(&Capability::Editorial) {

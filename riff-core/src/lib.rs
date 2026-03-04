@@ -9,7 +9,6 @@ pub mod featured;
 pub mod musicbrainz;
 pub mod deezer;
 pub mod mix_collage;
-pub mod models;
 pub mod plugin;
 pub mod recommendations;
 pub mod scanner;
