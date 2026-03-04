@@ -5,7 +5,7 @@ use axum::{
 use riff_core::auth::Claims;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use sqlx::{QueryBuilder, Row, Sqlite};
+use sqlx::{Acquire, QueryBuilder, Row, Sqlite};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -63,8 +63,7 @@ pub async fn list_playlists(
     .bind(&claims.sub)
     .bind(&library_ids)
     .fetch_all(&state.db)
-    .await
-    .map_err(|e| AppError::Internal(e.to_string()))?;
+    .await?;
 
     let playlists: Vec<Value> = rows
         .iter()
@@ -95,8 +94,7 @@ pub async fn get_playlist(
     .bind(&id)
     .bind(&claims.sub)
     .fetch_optional(&state.db)
-    .await
-    .map_err(|e| AppError::Internal(e.to_string()))?;
+    .await?;
 
     let playlist = match playlist {
         Some(row) => row,
@@ -115,8 +113,7 @@ pub async fn get_playlist(
     )
     .bind(&id)
     .fetch_all(&state.db)
-    .await
-    .unwrap_or_default();
+    .await?;
 
     let track_list: Vec<Value> = tracks
         .into_iter()
@@ -169,16 +166,14 @@ pub async fn create_playlist(
     .bind(&body.description)
     .bind(&playlist_library_id)
     .execute(&state.db)
-    .await
-    .map_err(|e| AppError::Internal(e.to_string()))?;
+    .await?;
 
     let (id, name, description, created_at, updated_at) = sqlx::query_as::<_, (String, String, Option<String>, String, String)>(
         "SELECT id, name, description, created_at, updated_at FROM playlists WHERE id = ?",
     )
     .bind(&id)
     .fetch_one(&state.db)
-    .await
-    .map_err(|e| AppError::Internal(e.to_string()))?;
+    .await?;
 
     Ok(Json(json!({
         "id": id,
@@ -200,8 +195,7 @@ pub async fn delete_playlist(
         .bind(&id)
         .bind(&claims.sub)
         .execute(&state.db)
-        .await
-        .map_err(|e| AppError::Internal(e.to_string()))?;
+        .await?;
 
     if result.rows_affected() == 0 {
         return Err(AppError::NotFound("playlist not found".into()));
@@ -223,8 +217,7 @@ pub async fn add_track(
     .bind(&playlist_id)
     .bind(&claims.sub)
     .fetch_one(&state.db)
-    .await
-    .map_err(|e| AppError::Internal(e.to_string()))?;
+    .await?;
 
     if count == 0 {
         return Err(AppError::NotFound("playlist not found".into()));
@@ -235,8 +228,7 @@ pub async fn add_track(
     )
     .bind(&playlist_id)
     .fetch_one(&state.db)
-    .await
-    .unwrap_or((0,));
+    .await?;
 
     let id = Uuid::new_v4().to_string();
     sqlx::query(
@@ -247,8 +239,7 @@ pub async fn add_track(
     .bind(&body.track_id)
     .bind(max_order.0 + 1)
     .execute(&state.db)
-    .await
-    .map_err(|e| AppError::Internal(e.to_string()))?;
+    .await?;
 
     if let Err(e) = sqlx::query("UPDATE playlists SET updated_at = datetime('now') WHERE id = ?")
         .bind(&playlist_id)
@@ -272,8 +263,7 @@ pub async fn remove_track(
     .bind(&playlist_id)
     .bind(&claims.sub)
     .fetch_one(&state.db)
-    .await
-    .map_err(|e| AppError::Internal(e.to_string()))?;
+    .await?;
 
     if count == 0 {
         return Err(AppError::NotFound("playlist not found".into()));
@@ -285,8 +275,7 @@ pub async fn remove_track(
     .bind(&playlist_id)
     .bind(&track_id)
     .execute(&state.db)
-    .await
-    .map_err(|e| AppError::Internal(e.to_string()))?;
+    .await?;
 
     if let Err(e) = sqlx::query("UPDATE playlists SET updated_at = datetime('now') WHERE id = ?")
         .bind(&playlist_id)
@@ -305,14 +294,16 @@ pub async fn reorder_tracks(
     Path(playlist_id): Path<String>,
     Json(body): Json<ReorderTracksBody>,
 ) -> Result<Json<Value>, AppError> {
+    let mut conn = state.db.acquire().await?;
+    let mut tx = conn.begin().await?;
+
     let (count,) = sqlx::query_as::<_, (i64,)>(
         "SELECT COUNT(*) FROM playlists WHERE id = ? AND user_id = ?",
     )
     .bind(&playlist_id)
     .bind(&claims.sub)
-    .fetch_one(&state.db)
-    .await
-    .map_err(|e| AppError::Internal(e.to_string()))?;
+    .fetch_one(&mut *tx)
+    .await?;
 
     if count == 0 {
         return Err(AppError::NotFound("playlist not found".into()));
@@ -338,20 +329,15 @@ pub async fn reorder_tracks(
         }
         sep.push_unseparated(")");
 
-        builder.build().execute(&state.db).await
-            .map_err(|e| {
-                tracing::warn!("playlist reorder failed: {e}");
-                AppError::Internal("reorder failed".into())
-            })?;
+        builder.build().execute(&mut *tx).await?;
     }
 
-    if let Err(e) = sqlx::query("UPDATE playlists SET updated_at = datetime('now') WHERE id = ?")
+    sqlx::query("UPDATE playlists SET updated_at = datetime('now') WHERE id = ?")
         .bind(&playlist_id)
-        .execute(&state.db)
-        .await
-    {
-        tracing::warn!("playlist timestamp update failed: {e}");
-    }
+        .execute(&mut *tx)
+        .await?;
+
+    tx.commit().await?;
 
     Ok(Json(json!({ "ok": true })))
 }

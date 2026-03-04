@@ -9,6 +9,7 @@ pub mod downloads;
 pub mod events;
 pub mod favorites;
 pub mod featured;
+pub mod helpers;
 pub mod history;
 pub mod hls;
 pub mod libraries;

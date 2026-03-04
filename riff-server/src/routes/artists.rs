@@ -233,24 +233,17 @@ pub async fn get_streaming_albums(
     drop(registry);
 
     let Some(provider) = provider else {
-        return Ok(Json(json!({
-            "provider": provider_name,
-            "albums": [],
-            "error": format!("streaming provider '{}' not configured", provider_name),
-        })));
+        return Err(AppError::NotFound(format!(
+            "streaming provider '{}' not configured",
+            provider_name
+        )));
     };
 
     // Search for artist on the provider
-    let search_results = match provider.search(&artist_name, 5).await {
-        Ok(results) => results,
-        Err(e) => {
-            return Ok(Json(json!({
-                "provider": provider_name,
-                "albums": [],
-                "error": format!("provider search failed: {e}"),
-            })));
-        }
-    };
+    let search_results = provider
+        .search(&artist_name, 5)
+        .await
+        .map_err(|e| AppError::Internal(format!("provider search failed: {e}")))?;
 
     // Find matching artist (case-insensitive exact match)
     let artist_name_lower = artist_name.to_lowercase();
@@ -267,16 +260,10 @@ pub async fn get_streaming_albums(
     };
 
     // Get artist albums from provider
-    let streaming_albums = match provider.get_artist_albums(&streaming_artist.provider_id).await {
-        Ok(albums) => albums,
-        Err(e) => {
-            return Ok(Json(json!({
-                "provider": provider_name,
-                "albums": [],
-                "error": format!("album fetch failed: {e}"),
-            })));
-        }
-    };
+    let streaming_albums = provider
+        .get_artist_albums(&streaming_artist.provider_id)
+        .await
+        .map_err(|e| AppError::Internal(format!("album fetch failed: {e}")))?;
 
     // Get library albums for this artist
     let library_albums = sqlx::query_as::<_, (String, String, Option<i32>)>(

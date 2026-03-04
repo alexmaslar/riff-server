@@ -4,7 +4,6 @@ use axum::{
     http::header,
     response::Response,
 };
-use serde::Deserialize;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,10 +13,7 @@ use tracing;
 use crate::error::AppError;
 use crate::AppState;
 
-#[derive(Debug, Deserialize)]
-pub struct StreamParams {
-    pub quality: Option<String>,
-}
+use super::helpers::StreamParams;
 
 /// Mid-bitrate tier (kbps) — 128 for moderate cellular connections.
 const MID_BITRATE: u32 = 128;

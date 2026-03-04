@@ -56,30 +56,30 @@ pub async fn record_play(
     .execute(&state.db)
     .await?;
 
-    // Increment album play count for completed plays
+    // Increment album play count and fetch track info for event concurrently
     if body.completed {
-        sqlx::query(
-            "UPDATE albums SET play_count = play_count + 1
-             WHERE id = (SELECT album_id FROM tracks WHERE id = ?)",
-        )
-        .bind(&body.track_id)
-        .execute(&state.db)
-        .await?;
-    }
+        let (update_result, event_row) = tokio::join!(
+            sqlx::query(
+                "UPDATE albums SET play_count = play_count + 1
+                 WHERE id = (SELECT album_id FROM tracks WHERE id = ?)",
+            )
+            .bind(&body.track_id)
+            .execute(&state.db),
+            sqlx::query(
+                "SELECT t.title, t.duration_seconds, ar.name as artist, al.title as album
+                 FROM tracks t
+                 JOIN albums al ON t.album_id = al.id
+                 JOIN artists ar ON al.artist_id = ar.id
+                 WHERE t.id = ?",
+            )
+            .bind(&body.track_id)
+            .fetch_one(&state.db),
+        );
 
-    // Emit event for plugins (scrobbling, etc.)
-    if body.completed {
-        if let Ok(row) = sqlx::query(
-            "SELECT t.title, t.duration_seconds, ar.name as artist, al.title as album
-             FROM tracks t
-             JOIN albums al ON t.album_id = al.id
-             JOIN artists ar ON al.artist_id = ar.id
-             WHERE t.id = ?",
-        )
-        .bind(&body.track_id)
-        .fetch_one(&state.db)
-        .await
-        {
+        update_result?;
+
+        // Emit event for plugins (scrobbling, etc.)
+        if let Ok(row) = event_row {
             use riff_core::plugin::events::ServerEvent;
             state.event_bus.emit(ServerEvent::TrackCompleted {
                 user_id: claims.sub.clone(),
@@ -128,25 +128,7 @@ pub async fn recently_played_albums(
 
     let albums: Vec<Value> = rows
         .iter()
-        .map(|row| {
-            let genre_str: String = row.get("genre");
-            let style_str: String = row.get("style");
-            let genre: Vec<String> = serde_json::from_str(&genre_str).unwrap_or_default();
-            let style: Vec<String> = serde_json::from_str(&style_str).unwrap_or_default();
-            json!({
-                "id": row.get::<String, _>("id"),
-                "title": row.get::<String, _>("title"),
-                "artist_id": row.get::<String, _>("artist_id"),
-                "artist_name": row.get::<String, _>("name"),
-                "year": row.get::<Option<i32>, _>("year"),
-                "genre": genre,
-                "style": style,
-                "label": row.get::<Option<String>, _>("label"),
-                "cover_art_path": row.get::<Option<String>, _>("cover_art_path"),
-                "added_at": row.get::<String, _>("added_at"),
-                "play_count": row.get::<i64, _>("play_count"),
-            })
-        })
+        .map(|row| super::helpers::album_row_to_json(row))
         .collect();
 
     Ok(Json(json!({ "albums": albums })))
@@ -198,25 +180,7 @@ pub async fn continue_listening(
 
     let albums: Vec<Value> = rows
         .iter()
-        .map(|row| {
-            let genre_str: String = row.get("genre");
-            let style_str: String = row.get("style");
-            let genre: Vec<String> = serde_json::from_str(&genre_str).unwrap_or_default();
-            let style: Vec<String> = serde_json::from_str(&style_str).unwrap_or_default();
-            json!({
-                "id": row.get::<String, _>("id"),
-                "title": row.get::<String, _>("title"),
-                "artist_id": row.get::<String, _>("artist_id"),
-                "artist_name": row.get::<String, _>("name"),
-                "year": row.get::<Option<i32>, _>("year"),
-                "genre": genre,
-                "style": style,
-                "label": row.get::<Option<String>, _>("label"),
-                "cover_art_path": row.get::<Option<String>, _>("cover_art_path"),
-                "added_at": row.get::<String, _>("added_at"),
-                "play_count": row.get::<i64, _>("play_count"),
-            })
-        })
+        .map(|row| super::helpers::album_row_to_json(row))
         .collect();
 
     Ok(Json(json!({ "albums": albums })))
@@ -302,9 +266,9 @@ pub async fn listening_stats(
             json!({
                 "id": row.get::<String, _>("id"),
                 "name": row.get::<String, _>("name"),
-                "imageUrl": row.get::<Option<String>, _>("image_url"),
+                "image_url": row.get::<Option<String>, _>("image_url"),
                 "plays": row.get::<i64, _>("plays"),
-                "listeningSeconds": row.get::<i64, _>("listening_seconds"),
+                "listening_seconds": row.get::<i64, _>("listening_seconds"),
             })
         })
         .collect();
@@ -315,10 +279,10 @@ pub async fn listening_stats(
             json!({
                 "id": row.get::<String, _>("id"),
                 "title": row.get::<String, _>("title"),
-                "artistName": row.get::<String, _>("artist_name"),
-                "coverArtPath": row.get::<Option<String>, _>("cover_art_path"),
+                "artist_name": row.get::<String, _>("artist_name"),
+                "cover_art_path": row.get::<Option<String>, _>("cover_art_path"),
                 "plays": row.get::<i64, _>("plays"),
-                "listeningSeconds": row.get::<i64, _>("listening_seconds"),
+                "listening_seconds": row.get::<i64, _>("listening_seconds"),
             })
         })
         .collect();
@@ -345,7 +309,7 @@ pub async fn listening_stats(
             json!({
                 "name": name,
                 "percentage": (pct * 10.0).round() / 10.0,
-                "listeningSeconds": seconds,
+                "listening_seconds": seconds,
             })
         })
         .collect();
@@ -354,11 +318,11 @@ pub async fn listening_stats(
     let total_seconds: i64 = totals.get("total_seconds");
 
     Ok(Json(json!({
-        "totalPlays": total_plays,
-        "totalListeningSeconds": total_seconds,
-        "topArtists": artists_json,
-        "topAlbums": albums_json,
-        "genreBreakdown": genres_json,
+        "total_plays": total_plays,
+        "total_listening_seconds": total_seconds,
+        "top_artists": artists_json,
+        "top_albums": albums_json,
+        "genre_breakdown": genres_json,
     })))
 }
 

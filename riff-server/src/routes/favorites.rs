@@ -39,6 +39,10 @@ pub async fn toggle_favorite(
     Extension(claims): Extension<Claims>,
     Json(body): Json<ToggleFavoriteBody>,
 ) -> Result<Json<Value>, AppError> {
+    if !matches!(body.entity_type.as_str(), "album" | "artist" | "track") {
+        return Err(AppError::BadRequest("Invalid entity_type".to_string()));
+    }
+
     // Atomic per-statement in SQLite WAL mode: try to delete first.
     let result = sqlx::query(
         "DELETE FROM favorites WHERE user_id = ? AND entity_type = ? AND entity_id = ?",
@@ -102,27 +106,7 @@ pub async fn list_favorites(
 
             let albums: Vec<Value> = rows
                 .iter()
-                .map(|row| {
-                    let genre_str: String = row.get("genre");
-                    let style_str: String = row.get("style");
-                    let genre: Vec<String> =
-                        serde_json::from_str(&genre_str).unwrap_or_default();
-                    let style: Vec<String> =
-                        serde_json::from_str(&style_str).unwrap_or_default();
-                    json!({
-                        "id": row.get::<String, _>("id"),
-                        "title": row.get::<String, _>("title"),
-                        "artist_id": row.get::<String, _>("artist_id"),
-                        "artist_name": row.get::<String, _>("name"),
-                        "year": row.get::<Option<i32>, _>("year"),
-                        "genre": genre,
-                        "style": style,
-                        "label": row.get::<Option<String>, _>("label"),
-                        "cover_art_path": row.get::<Option<String>, _>("cover_art_path"),
-                        "added_at": row.get::<String, _>("added_at"),
-                        "play_count": row.get::<i64, _>("play_count"),
-                    })
-                })
+                .map(|row| super::helpers::album_row_to_json(row))
                 .collect();
             Ok(Json(json!({ "albums": albums })))
         }
@@ -201,6 +185,10 @@ pub async fn check_favorite(
     Extension(claims): Extension<Claims>,
     Query(params): Query<CheckFavoriteParams>,
 ) -> Result<Json<Value>, AppError> {
+    if !matches!(params.entity_type.as_str(), "album" | "artist" | "track") {
+        return Err(AppError::BadRequest("Invalid entity_type".to_string()));
+    }
+
     let (count,) = sqlx::query_as::<_, (i64,)>(
         "SELECT COUNT(*) FROM favorites WHERE user_id = ? AND entity_type = ? AND entity_id = ?",
     )

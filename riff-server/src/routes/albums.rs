@@ -185,12 +185,14 @@ pub async fn list_albums(
 
             match key {
                 "genre" => {
-                    builder.push("a.genre LIKE ");
-                    builder.push_bind(format!("%\"{value}\"%"));
+                    builder.push("EXISTS (SELECT 1 FROM json_each(a.genre) WHERE value = ");
+                    builder.push_bind(value.to_string());
+                    builder.push(")");
                 }
                 "style" => {
-                    builder.push("a.style LIKE ");
-                    builder.push_bind(format!("%\"{value}\"%"));
+                    builder.push("EXISTS (SELECT 1 FROM json_each(a.style) WHERE value = ");
+                    builder.push_bind(value.to_string());
+                    builder.push(")");
                 }
                 "decade" => {
                     if let Some(start_year) =
@@ -606,7 +608,7 @@ pub async fn get_cover(
         }
     };
 
-    let stream = tokio_util::io::ReaderStream::new(file);
+    let stream = tokio_util::io::ReaderStream::with_capacity(file, 256 * 1024);
 
     Response::builder()
         .status(StatusCode::OK)
@@ -707,7 +709,7 @@ pub async fn serve_thumbnail(original_path: &str, entity_id: &str, width: u32) -
         }
     };
 
-    let stream = tokio_util::io::ReaderStream::new(file);
+    let stream = tokio_util::io::ReaderStream::with_capacity(file, 256 * 1024);
 
     Response::builder()
         .status(StatusCode::OK)
@@ -757,12 +759,14 @@ fn append_focus_conditions(
         builder.push(" AND ");
         match f.category.as_str() {
             "genre" => {
-                builder.push("a.genre LIKE ");
-                builder.push_bind(format!("%\"{}\"%" , f.value));
+                builder.push("EXISTS (SELECT 1 FROM json_each(a.genre) WHERE value = ");
+                builder.push_bind(f.value.clone());
+                builder.push(")");
             }
             "style" => {
-                builder.push("a.style LIKE ");
-                builder.push_bind(format!("%\"{}\"%" , f.value));
+                builder.push("EXISTS (SELECT 1 FROM json_each(a.style) WHERE value = ");
+                builder.push_bind(f.value.clone());
+                builder.push(")");
             }
             "decade" => {
                 if let Some(start_year) =
@@ -1011,7 +1015,7 @@ pub async fn refresh_cover(
     let mut cover_bytes: Option<Vec<u8>> = None;
     if let Some(ref mbid) = mbid {
         let caa_url = format!("https://coverartarchive.org/release/{}/front", mbid);
-        if let Ok(resp) = reqwest::get(&caa_url).await {
+        if let Ok(resp) = state.http_client.get(&caa_url).send().await {
             if resp.status().is_success() {
                 if let Ok(bytes) = resp.bytes().await {
                     if !bytes.is_empty() {

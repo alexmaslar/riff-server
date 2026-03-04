@@ -14,10 +14,7 @@ use crate::middleware::IsRemote;
 use crate::transcode;
 use crate::AppState;
 
-#[derive(Debug, Deserialize)]
-pub struct StreamParams {
-    pub quality: Option<String>,
-}
+use super::helpers::StreamParams;
 
 fn mime_for_format(format: &str) -> &'static str {
     match format {

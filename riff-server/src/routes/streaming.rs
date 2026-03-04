@@ -15,15 +15,12 @@ use std::sync::Arc;
 use crate::error::AppError;
 use crate::AppState;
 
+use super::helpers::StreamParams;
+
 #[derive(Debug, Deserialize)]
 pub struct SearchParams {
     pub q: String,
     pub limit: Option<u32>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct StreamParams {
-    pub quality: Option<String>,
 }
 
 /// GET /streaming/search?q=&limit=
@@ -180,8 +177,7 @@ pub async fn stream_track(
         .map_err(|e| AppError::Internal(format!("stream URL resolution failed: {e}")))?;
 
     // Proxy the request to the CDN
-    let http = reqwest::Client::new();
-    let mut cdn_req = http.get(&stream_url.url);
+    let mut cdn_req = state.http_client.get(&stream_url.url);
 
     // Forward Range header for seeking
     if let Some(range) = request.headers().get(header::RANGE) {

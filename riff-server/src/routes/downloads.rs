@@ -23,6 +23,16 @@ pub async fn add_download(
     State(state): State<Arc<AppState>>,
     Json(body): Json<AddDownloadRequest>,
 ) -> Result<Json<Value>, AppError> {
+    // Validate quality if provided
+    if let Some(ref quality) = body.quality {
+        if !matches!(quality.as_str(), "lossless" | "high" | "normal" | "low" | "hires" | "hi_res") {
+            return Err(AppError::BadRequest(format!(
+                "Invalid quality '{}'. Must be one of: lossless, high, normal, low, hires, hi_res",
+                quality
+            )));
+        }
+    }
+
     tracing::info!(
         "add_download: provider={}, album_id={}, quality={:?}, library_id={:?}",
         body.provider, body.provider_album_id, body.quality, body.library_id

@@ -2,7 +2,6 @@ use axum::{extract::{Path, State}, Json};
 use riff_core::{analysis, musicbrainz, scanner};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use crate::error::AppError;
@@ -10,7 +9,7 @@ use crate::AppState;
 
 pub async fn trigger_scan(State(state): State<Arc<AppState>>) -> Result<Json<Value>, AppError> {
     // Guard: prevent overlap with periodic scanner
-    if state.scan_running.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+    if !state.stage_manager.try_start("scan") {
         return Ok(Json(json!({ "status": "already_running" })));
     }
 
@@ -70,7 +69,7 @@ pub async fn trigger_scan(State(state): State<Arc<AppState>>) -> Result<Json<Val
         })))
     }.await;
 
-    state.scan_running.store(false, Ordering::SeqCst);
+    state.stage_manager.finish("scan");
     result
 }
 
@@ -80,7 +79,7 @@ pub async fn trigger_enrichment(State(state): State<Arc<AppState>>) -> Result<Js
 }
 
 pub async fn trigger_editorial(State(state): State<Arc<AppState>>) -> Result<Json<Value>, AppError> {
-    if state.editorial_running.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+    if !state.stage_manager.try_start("editorial") {
         return Ok(Json(json!({ "status": "already_running" })));
     }
 
@@ -98,30 +97,30 @@ pub async fn trigger_editorial(State(state): State<Arc<AppState>>) -> Result<Jso
             }
             Err(e) => tracing::warn!("editorial enrichment failed: {}", e),
         }
-        ed_state.editorial_running.store(false, Ordering::SeqCst);
+        ed_state.stage_manager.finish("editorial");
     });
 
     Ok(Json(json!({ "status": "started" })))
 }
 
 pub async fn library_stats(State(state): State<Arc<AppState>>) -> Result<Json<Value>, AppError> {
-    let (artist_count,): (i64,) =
-        sqlx::query_as("SELECT COUNT(*) FROM artists")
-            .fetch_one(&state.db)
-            .await?;
-    let (album_count,): (i64,) =
-        sqlx::query_as("SELECT COUNT(*) FROM albums")
-            .fetch_one(&state.db)
-            .await?;
-    let (track_count, total_size, analyzed, pending_analysis): (i64, i64, i64, i64) =
-        sqlx::query_as(
+    let (artist_result, album_result, track_result) = tokio::join!(
+        sqlx::query_as::<_, (i64,)>("SELECT COUNT(*) FROM artists")
+            .fetch_one(&state.db),
+        sqlx::query_as::<_, (i64,)>("SELECT COUNT(*) FROM albums")
+            .fetch_one(&state.db),
+        sqlx::query_as::<_, (i64, i64, i64, i64)>(
             "SELECT COUNT(*), COALESCE(SUM(file_size_bytes), 0), \
              SUM(CASE WHEN analysis_status = 'complete' THEN 1 ELSE 0 END), \
              SUM(CASE WHEN analysis_status = 'pending' THEN 1 ELSE 0 END) \
              FROM tracks"
         )
-            .fetch_one(&state.db)
-            .await?;
+            .fetch_one(&state.db),
+    );
+
+    let (artist_count,) = artist_result?;
+    let (album_count,) = album_result?;
+    let (track_count, total_size, analyzed, pending_analysis) = track_result?;
 
     Ok(Json(json!({
         "artists": artist_count,
@@ -143,7 +142,7 @@ pub async fn trigger_analysis(State(state): State<Arc<AppState>>) -> Result<Json
 
 /// Spawn background analysis if not already running. Returns true if analysis was started.
 fn maybe_spawn_analysis(state: &Arc<AppState>) -> bool {
-    if state.analysis_running.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+    if !state.stage_manager.try_start("analysis") {
         tracing::debug!("analysis already running, skipping");
         return false;
     }
@@ -161,7 +160,7 @@ fn maybe_spawn_analysis(state: &Arc<AppState>) -> bool {
             }
             Err(e) => tracing::warn!("analysis failed: {}", e),
         }
-        analysis_state.analysis_running.store(false, Ordering::SeqCst);
+        analysis_state.stage_manager.finish("analysis");
     });
 
     true
@@ -181,7 +180,7 @@ pub async fn enrich_album(
 
 
 pub async fn trigger_recommendations(State(state): State<Arc<AppState>>) -> Result<Json<Value>, AppError> {
-    if state.recommendation_running.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+    if !state.stage_manager.try_start("recommendation") {
         return Ok(Json(json!({ "status": "already_running" })));
     }
 
@@ -197,14 +196,14 @@ pub async fn trigger_recommendations(State(state): State<Arc<AppState>>) -> Resu
             }
             Err(e) => tracing::warn!("recommendations failed: {}", e),
         }
-        rec_state.recommendation_running.store(false, Ordering::SeqCst);
+        rec_state.stage_manager.finish("recommendation");
     });
 
     Ok(Json(json!({ "status": "started" })))
 }
 
 pub async fn trigger_artist_recommendations(State(state): State<Arc<AppState>>) -> Result<Json<Value>, AppError> {
-    if state.artist_recommendation_running.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+    if !state.stage_manager.try_start("artist_recommendation") {
         return Ok(Json(json!({ "status": "already_running" })));
     }
 
@@ -220,7 +219,7 @@ pub async fn trigger_artist_recommendations(State(state): State<Arc<AppState>>) 
             }
             Err(e) => tracing::warn!("artist recommendations failed: {}", e),
         }
-        rec_state.artist_recommendation_running.store(false, Ordering::SeqCst);
+        rec_state.stage_manager.finish("artist_recommendation");
     });
 
     Ok(Json(json!({ "status": "started" })))
