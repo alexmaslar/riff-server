@@ -274,15 +274,6 @@ pub async fn save_mix_as_playlist(
 
     // Create a new playlist
     let playlist_id = Uuid::new_v4().to_string();
-    sqlx::query(
-        "INSERT INTO playlists (id, user_id, name, description) VALUES (?, ?, ?, ?)",
-    )
-    .bind(&playlist_id)
-    .bind(&claims.sub)
-    .bind(&mix_title)
-    .bind(&mix_description)
-    .execute(&state.db)
-    .await?;
 
     // Copy tracks from the mix to the playlist
     let mix_tracks = sqlx::query_as::<_, (String, i64)>(
@@ -292,18 +283,33 @@ pub async fn save_mix_as_playlist(
     .fetch_all(&state.db)
     .await?;
 
-    for (track_id, sort_order) in &mix_tracks {
-        let pt_id = Uuid::new_v4().to_string();
-        sqlx::query(
-            "INSERT INTO playlist_tracks (id, playlist_id, track_id, sort_order) VALUES (?, ?, ?, ?)",
-        )
-        .bind(&pt_id)
-        .bind(&playlist_id)
-        .bind(track_id)
-        .bind(sort_order)
-        .execute(&state.db)
-        .await?;
+    // Insert playlist and all tracks in a single transaction
+    let mut tx = state.db.begin().await?;
+
+    sqlx::query(
+        "INSERT INTO playlists (id, user_id, name, description) VALUES (?, ?, ?, ?)",
+    )
+    .bind(&playlist_id)
+    .bind(&claims.sub)
+    .bind(&mix_title)
+    .bind(&mix_description)
+    .execute(&mut *tx)
+    .await?;
+
+    if !mix_tracks.is_empty() {
+        let mut builder = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
+            "INSERT INTO playlist_tracks (id, playlist_id, track_id, sort_order) "
+        );
+        builder.push_values(&mix_tracks, |mut b, (track_id, sort_order)| {
+            b.push_bind(Uuid::new_v4().to_string())
+                .push_bind(&playlist_id)
+                .push_bind(track_id)
+                .push_bind(sort_order);
+        });
+        builder.build().execute(&mut *tx).await?;
     }
+
+    tx.commit().await?;
 
     Ok(Json(json!({
         "id": playlist_id,

@@ -2,7 +2,7 @@ pub mod metadata;
 
 use metadata::TrackMetadata;
 use sqlx::SqlitePool;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -74,6 +74,15 @@ pub async fn scan_library(pool: &SqlitePool, library_path: &str, library_id: &st
 
     info!("found {} audio files to scan", audio_files.len());
 
+    // Pre-load all existing file paths for this library to avoid N+1 queries
+    let existing_rows: Vec<(String,)> = sqlx::query_as(
+        "SELECT t.file_path FROM tracks t WHERE t.library_id = ?",
+    )
+    .bind(library_id)
+    .fetch_all(pool)
+    .await?;
+    let existing_paths: HashSet<String> = existing_rows.into_iter().map(|(p,)| p).collect();
+
     // Cache: artist name -> artist id, (artist_id, album_title) -> album_id
     let mut artist_cache: HashMap<String, Uuid> = HashMap::new();
     let mut album_cache: HashMap<(Uuid, String), Uuid> = HashMap::new();
@@ -81,13 +90,8 @@ pub async fn scan_library(pool: &SqlitePool, library_path: &str, library_id: &st
     for file_path in &audio_files {
         let file_str = file_path.to_string_lossy().to_string();
 
-        // Skip if track already exists
-        let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tracks WHERE file_path = ?)")
-            .bind(&file_str)
-            .fetch_one(pool)
-            .await?;
-
-        if exists {
+        // Skip if track already exists (checked against pre-loaded set)
+        if existing_paths.contains(&file_str) {
             continue;
         }
 
@@ -330,7 +334,7 @@ async fn remove_stale_entries(
 
     // Identify stale tracks (file no longer on disk)
     let mut stale_track_ids: Vec<String> = Vec::new();
-    let mut affected_album_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut affected_album_ids: HashSet<String> = HashSet::new();
     for (track_id, file_path, album_id) in &all_tracks {
         if !Path::new(file_path).exists() {
             stale_track_ids.push(track_id.clone());
@@ -338,28 +342,33 @@ async fn remove_stale_entries(
         }
     }
 
-    // Delete stale tracks and their related data
-    for track_id in &stale_track_ids {
-        sqlx::query("DELETE FROM play_history WHERE track_id = ?")
-            .bind(track_id)
-            .execute(pool)
+    // Batch-delete stale tracks and their related data in a transaction
+    if !stale_track_ids.is_empty() {
+        let ids_json = serde_json::to_string(&stale_track_ids)?;
+        let mut tx = pool.begin().await?;
+
+        sqlx::query("DELETE FROM play_history WHERE track_id IN (SELECT value FROM json_each(?))")
+            .bind(&ids_json)
+            .execute(&mut *tx)
             .await?;
-        sqlx::query("DELETE FROM playlist_tracks WHERE track_id = ?")
-            .bind(track_id)
-            .execute(pool)
+        sqlx::query("DELETE FROM playlist_tracks WHERE track_id IN (SELECT value FROM json_each(?))")
+            .bind(&ids_json)
+            .execute(&mut *tx)
             .await?;
-        sqlx::query("DELETE FROM daily_mix_tracks WHERE track_id = ?")
-            .bind(track_id)
-            .execute(pool)
+        sqlx::query("DELETE FROM daily_mix_tracks WHERE track_id IN (SELECT value FROM json_each(?))")
+            .bind(&ids_json)
+            .execute(&mut *tx)
             .await?;
-        sqlx::query("DELETE FROM favorites WHERE entity_type = 'track' AND entity_id = ?")
-            .bind(track_id)
-            .execute(pool)
+        sqlx::query("DELETE FROM favorites WHERE entity_type = 'track' AND entity_id IN (SELECT value FROM json_each(?))")
+            .bind(&ids_json)
+            .execute(&mut *tx)
             .await?;
-        sqlx::query("DELETE FROM tracks WHERE id = ?")
-            .bind(track_id)
-            .execute(pool)
+        sqlx::query("DELETE FROM tracks WHERE id IN (SELECT value FROM json_each(?))")
+            .bind(&ids_json)
+            .execute(&mut *tx)
             .await?;
+
+        tx.commit().await?;
     }
 
     let tracks_removed = stale_track_ids.len() as u32;
@@ -376,28 +385,37 @@ async fn remove_stale_entries(
     .fetch_all(pool)
     .await?;
 
-    let mut orphan_candidate_artist_ids: std::collections::HashSet<String> =
-        std::collections::HashSet::new();
+    let mut orphan_candidate_artist_ids: HashSet<String> =
+        HashSet::new();
 
-    for (album_id, artist_id) in &empty_albums {
-        sqlx::query("DELETE FROM favorites WHERE entity_type = 'album' AND entity_id = ?")
-            .bind(album_id)
-            .execute(pool)
+    if !empty_albums.is_empty() {
+        let album_ids: Vec<String> = empty_albums.iter().map(|(id, _)| id.clone()).collect();
+        let album_ids_json = serde_json::to_string(&album_ids)?;
+        let mut tx = pool.begin().await?;
+
+        sqlx::query("DELETE FROM favorites WHERE entity_type = 'album' AND entity_id IN (SELECT value FROM json_each(?))")
+            .bind(&album_ids_json)
+            .execute(&mut *tx)
             .await?;
-        sqlx::query("DELETE FROM album_credits WHERE album_id = ?")
-            .bind(album_id)
-            .execute(pool)
+        sqlx::query("DELETE FROM album_credits WHERE album_id IN (SELECT value FROM json_each(?))")
+            .bind(&album_ids_json)
+            .execute(&mut *tx)
             .await?;
-        sqlx::query("DELETE FROM album_recommendations WHERE album_id = ? OR recommended_album_id = ?")
-            .bind(album_id)
-            .bind(album_id)
-            .execute(pool)
+        sqlx::query("DELETE FROM album_recommendations WHERE album_id IN (SELECT value FROM json_each(?)) OR recommended_album_id IN (SELECT value FROM json_each(?))")
+            .bind(&album_ids_json)
+            .bind(&album_ids_json)
+            .execute(&mut *tx)
             .await?;
-        sqlx::query("DELETE FROM albums WHERE id = ?")
-            .bind(album_id)
-            .execute(pool)
+        sqlx::query("DELETE FROM albums WHERE id IN (SELECT value FROM json_each(?))")
+            .bind(&album_ids_json)
+            .execute(&mut *tx)
             .await?;
-        orphan_candidate_artist_ids.insert(artist_id.clone());
+
+        tx.commit().await?;
+
+        for (_, artist_id) in &empty_albums {
+            orphan_candidate_artist_ids.insert(artist_id.clone());
+        }
     }
 
     let albums_removed = empty_albums.len() as u32;
@@ -414,24 +432,30 @@ async fn remove_stale_entries(
     .fetch_all(pool)
     .await?;
 
-    for (artist_id,) in &orphaned_artists {
-        sqlx::query("DELETE FROM favorites WHERE entity_type = 'artist' AND entity_id = ?")
-            .bind(artist_id)
-            .execute(pool)
+    if !orphaned_artists.is_empty() {
+        let artist_ids: Vec<String> = orphaned_artists.iter().map(|(id,)| id.clone()).collect();
+        let artist_ids_json = serde_json::to_string(&artist_ids)?;
+        let mut tx = pool.begin().await?;
+
+        sqlx::query("DELETE FROM favorites WHERE entity_type = 'artist' AND entity_id IN (SELECT value FROM json_each(?))")
+            .bind(&artist_ids_json)
+            .execute(&mut *tx)
             .await?;
-        sqlx::query("DELETE FROM artist_recommendations WHERE artist_id = ? OR recommended_artist_id = ?")
-            .bind(artist_id)
-            .bind(artist_id)
-            .execute(pool)
+        sqlx::query("DELETE FROM artist_recommendations WHERE artist_id IN (SELECT value FROM json_each(?)) OR recommended_artist_id IN (SELECT value FROM json_each(?))")
+            .bind(&artist_ids_json)
+            .bind(&artist_ids_json)
+            .execute(&mut *tx)
             .await?;
-        sqlx::query("DELETE FROM artist_top_tracks WHERE artist_id = ?")
-            .bind(artist_id)
-            .execute(pool)
+        sqlx::query("DELETE FROM artist_top_tracks WHERE artist_id IN (SELECT value FROM json_each(?))")
+            .bind(&artist_ids_json)
+            .execute(&mut *tx)
             .await?;
-        sqlx::query("DELETE FROM artists WHERE id = ?")
-            .bind(artist_id)
-            .execute(pool)
+        sqlx::query("DELETE FROM artists WHERE id IN (SELECT value FROM json_each(?))")
+            .bind(&artist_ids_json)
+            .execute(&mut *tx)
             .await?;
+
+        tx.commit().await?;
     }
 
     let artists_removed = orphaned_artists.len() as u32;
@@ -474,22 +498,24 @@ async fn deduplicate_artists(pool: &SqlitePool, library_id: &str) -> anyhow::Res
         }
 
         let keep_id = &artists[0].0;
+        let mut tx = pool.begin().await?;
         for dupe in &artists[1..] {
             let dupe_id = &dupe.0;
 
             sqlx::query("UPDATE albums SET artist_id = ? WHERE artist_id = ?")
                 .bind(keep_id)
                 .bind(dupe_id)
-                .execute(pool)
+                .execute(&mut *tx)
                 .await?;
 
             sqlx::query("DELETE FROM artists WHERE id = ?")
                 .bind(dupe_id)
-                .execute(pool)
+                .execute(&mut *tx)
                 .await?;
 
             merged += 1;
         }
+        tx.commit().await?;
     }
 
     if merged > 0 {
@@ -523,6 +549,7 @@ async fn deduplicate_albums(pool: &SqlitePool, library_id: &str) -> anyhow::Resu
         }
 
         let keep_id = &albums[0].0;
+        let mut tx = pool.begin().await?;
         for dupe in &albums[1..] {
             let dupe_id = &dupe.0;
 
@@ -530,29 +557,30 @@ async fn deduplicate_albums(pool: &SqlitePool, library_id: &str) -> anyhow::Resu
             sqlx::query("UPDATE tracks SET album_id = ? WHERE album_id = ?")
                 .bind(keep_id)
                 .bind(dupe_id)
-                .execute(pool)
+                .execute(&mut *tx)
                 .await?;
 
             // Move album credits
             sqlx::query("DELETE FROM album_credits WHERE album_id = ?")
                 .bind(dupe_id)
-                .execute(pool)
+                .execute(&mut *tx)
                 .await?;
 
             // Move favorites
             sqlx::query("UPDATE OR IGNORE favorites SET item_id = ? WHERE item_id = ? AND item_type = 'album'")
                 .bind(keep_id)
                 .bind(dupe_id)
-                .execute(pool)
+                .execute(&mut *tx)
                 .await?;
 
             sqlx::query("DELETE FROM albums WHERE id = ?")
                 .bind(dupe_id)
-                .execute(pool)
+                .execute(&mut *tx)
                 .await?;
 
             merged += 1;
         }
+        tx.commit().await?;
     }
 
     if merged > 0 {

@@ -109,20 +109,32 @@ async fn load_album_features(
         sqlx::query_as(&query_str).fetch_all(pool).await?
     };
 
-    // Fetch all credits grouped by album
-    let credits_rows: Vec<(String, String)> =
-        sqlx::query_as("SELECT album_id, LOWER(artist_name) FROM album_credits")
-            .fetch_all(pool)
-            .await?;
+    // Collect album IDs for filtering credits and bliss features
+    let album_id_set: HashSet<&str> = rows.iter().map(|(id, ..)| id.as_str()).collect();
+    let album_ids_json = serde_json::to_string(
+        &album_id_set.iter().collect::<Vec<_>>()
+    )?;
+
+    // Fetch credits only for albums in this partition
+    let credits_rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT album_id, LOWER(artist_name) FROM album_credits \
+         WHERE album_id IN (SELECT value FROM json_each(?))",
+    )
+    .bind(&album_ids_json)
+    .fetch_all(pool)
+    .await?;
     let mut credits_map: HashMap<String, HashSet<String>> = HashMap::new();
     for (album_id, name) in credits_rows {
         credits_map.entry(album_id).or_default().insert(name);
     }
 
-    // Fetch bliss centroids: average bliss_features per album
+    // Fetch bliss centroids only for tracks in qualifying albums
     let bliss_rows: Vec<(String, String)> = sqlx::query_as(
-        "SELECT album_id, bliss_features FROM tracks WHERE bliss_features IS NOT NULL",
+        "SELECT album_id, bliss_features FROM tracks \
+         WHERE bliss_features IS NOT NULL \
+         AND album_id IN (SELECT value FROM json_each(?))",
     )
+    .bind(&album_ids_json)
     .fetch_all(pool)
     .await?;
 
@@ -339,7 +351,7 @@ async fn generate_inner(
 }
 
 /// Compute similarity score and reason between two albums.
-/// Returns (score, reason) where score is 0.0–1.0.
+/// Returns (score, reason) where score is 0.0-1.0.
 fn compute_similarity(a: &AlbumFeatures, b: &AlbumFeatures) -> (f64, String) {
     let style_sim = jaccard(&a.styles, &b.styles);
     let genre_sim = jaccard(&a.genres, &b.genres);
@@ -467,7 +479,7 @@ fn cosine_similarity(a: &[f64], b: &[f64]) -> f64 {
     }
 }
 
-// ─── Artist Recommendations ─────────────────────────────────────────────────
+// --- Artist Recommendations -------------------------------------------------
 
 struct ArtistFeatures {
     id: String,
@@ -560,14 +572,29 @@ async fn load_artist_features(
         sqlx::query_as(&artist_query).fetch_all(pool).await?
     };
 
-    // Fetch all album metadata grouped by artist
+    // Build a JSON array of qualifying artist IDs for filtering related queries
+    let artist_id_set: HashSet<&str> = artist_ids.iter().map(|(id,)| id.as_str()).collect();
+    let artist_ids_json = serde_json::to_string(
+        &artist_id_set.iter().collect::<Vec<_>>()
+    )?;
+
+    // Fetch album metadata only for qualifying artists (filtered by library partition)
+    let album_query = format!(
+        "SELECT a.artist_id, a.genre, a.style, a.label, a.year, a.moods, a.descriptors, a.keywords \
+         FROM albums a \
+         JOIN libraries l ON a.library_id = l.id \
+         WHERE {where_clause}"
+    );
+
     let album_rows: Vec<(String, String, String, Option<String>, Option<i32>, String, String, String)> =
-        sqlx::query_as(
-            "SELECT artist_id, genre, style, label, year, moods, descriptors, keywords \
-             FROM albums"
-        )
-        .fetch_all(pool)
-        .await?;
+        if let Some(param) = bind_param {
+            sqlx::query_as(&album_query)
+                .bind(param)
+                .fetch_all(pool)
+                .await?
+        } else {
+            sqlx::query_as(&album_query).fetch_all(pool).await?
+        };
 
     let mut artist_genres: HashMap<String, HashSet<String>> = HashMap::new();
     let mut artist_styles: HashMap<String, HashSet<String>> = HashMap::new();
@@ -603,12 +630,14 @@ async fn load_artist_features(
         }
     }
 
-    // Fetch credits: artist names that appear on each artist's albums
+    // Fetch credits only for qualifying artists
     let credits_rows: Vec<(String, String)> = sqlx::query_as(
         "SELECT a.artist_id, LOWER(c.artist_name) \
          FROM album_credits c \
-         JOIN albums a ON c.album_id = a.id",
+         JOIN albums a ON c.album_id = a.id \
+         WHERE a.artist_id IN (SELECT value FROM json_each(?))",
     )
+    .bind(&artist_ids_json)
     .fetch_all(pool)
     .await?;
 
@@ -620,13 +649,15 @@ async fn load_artist_features(
             .insert(credit_name);
     }
 
-    // Fetch bliss centroids per artist (average of all track features)
+    // Fetch bliss centroids only for qualifying artists
     let bliss_rows: Vec<(String, String)> = sqlx::query_as(
         "SELECT a.artist_id, t.bliss_features \
          FROM tracks t \
          JOIN albums a ON t.album_id = a.id \
-         WHERE t.bliss_features IS NOT NULL",
+         WHERE t.bliss_features IS NOT NULL \
+         AND a.artist_id IN (SELECT value FROM json_each(?))",
     )
+    .bind(&artist_ids_json)
     .fetch_all(pool)
     .await?;
 

@@ -29,13 +29,24 @@ pub async fn init_pool() -> anyhow::Result<SqlitePool> {
 
     sqlx::migrate!("./migrations").run(&pool).await?;
 
+    // Apply performance pragmas (safe in WAL mode)
+    sqlx::query("PRAGMA synchronous = NORMAL")
+        .execute(&pool)
+        .await?;
+    sqlx::query("PRAGMA mmap_size = 268435456")
+        .execute(&pool)
+        .await?;
+    sqlx::query("PRAGMA cache_size = -64000")
+        .execute(&pool)
+        .await?;
+
     normalize_genre_casing(&pool).await?;
 
     Ok(pool)
 }
 
-/// Title-case a genre/style string: "alternative rock" → "Alternative Rock".
-/// Handles hyphenated words ("post-punk" → "Post-Punk") and preserves
+/// Title-case a genre/style string: "alternative rock" -> "Alternative Rock".
+/// Handles hyphenated words ("post-punk" -> "Post-Punk") and preserves
 /// all-caps abbreviations like "R&B", "DJ", "UK", "US", "EDM", "IDM".
 pub fn title_case_genre(s: &str) -> String {
     s.split_whitespace()
@@ -45,7 +56,7 @@ pub fn title_case_genre(s: &str) -> String {
             if matches!(upper.as_str(), "R&B" | "DJ" | "UK" | "US" | "EDM" | "IDM" | "EBM" | "MPB" | "II" | "III" | "IV") {
                 return upper;
             }
-            // Handle hyphenated words: "post-punk" → "Post-Punk"
+            // Handle hyphenated words: "post-punk" -> "Post-Punk"
             word.split('-')
                 .map(|part| {
                     let mut chars = part.chars();
@@ -66,7 +77,19 @@ pub fn title_case_genre(s: &str) -> String {
 }
 
 /// One-time normalization: title-case all genre and style JSON arrays in albums.
+/// Uses the `settings` table to track whether normalization has already been done.
 async fn normalize_genre_casing(pool: &SqlitePool) -> anyhow::Result<()> {
+    // Check if normalization was already completed
+    let done: Option<(String,)> = sqlx::query_as(
+        "SELECT value FROM settings WHERE key = 'genre_normalization_done'",
+    )
+    .fetch_optional(pool)
+    .await?;
+
+    if done.is_some() {
+        return Ok(());
+    }
+
     let rows: Vec<(String, String, String)> = sqlx::query_as(
         "SELECT id, genre, style FROM albums",
     )
@@ -97,6 +120,11 @@ async fn normalize_genre_casing(pool: &SqlitePool) -> anyhow::Result<()> {
     if updated > 0 {
         info!("normalized genre/style casing for {} albums", updated);
     }
+
+    // Mark normalization as done so it doesn't run again on next startup
+    sqlx::query("INSERT OR IGNORE INTO settings (key, value) VALUES ('genre_normalization_done', '1')")
+        .execute(pool)
+        .await?;
 
     Ok(())
 }
@@ -209,8 +237,8 @@ pub async fn sync_libraries(pool: &SqlitePool, libraries: &[LibraryEntry]) -> an
 }
 
 /// Resolve a library query param into a JSON array of library IDs for use with `json_each()`.
-/// - `None` → all non-isolated library IDs (the default "All Music" context)
-/// - `Some(id)` → validates that library exists, returns `["id"]`
+/// - `None` -> all non-isolated library IDs (the default "All Music" context)
+/// - `Some(id)` -> validates that library exists, returns `["id"]`
 pub async fn resolve_library_ids(
     pool: &SqlitePool,
     library_id: Option<&str>,
@@ -241,6 +269,8 @@ pub async fn resolve_library_ids(
 
 /// Delete all content belonging to a specific library, preserving users and settings.
 pub async fn wipe_library_data(pool: &SqlitePool, library_id: &str) -> anyhow::Result<()> {
+    let mut tx = pool.begin().await?;
+
     // Order matters: delete children before parents
     sqlx::query(
         "DELETE FROM daily_mix_tracks WHERE mix_id IN (SELECT id FROM daily_mixes WHERE library_id = ?)
@@ -248,11 +278,11 @@ pub async fn wipe_library_data(pool: &SqlitePool, library_id: &str) -> anyhow::R
     )
     .bind(library_id)
     .bind(library_id)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
     sqlx::query("DELETE FROM daily_mixes WHERE library_id = ? OR library_id IS NULL")
         .bind(library_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
 
     sqlx::query(
@@ -261,11 +291,11 @@ pub async fn wipe_library_data(pool: &SqlitePool, library_id: &str) -> anyhow::R
     )
     .bind(library_id)
     .bind(library_id)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
     sqlx::query("DELETE FROM playlists WHERE library_id = ?")
         .bind(library_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
 
     // play_history references tracks — delete via join
@@ -273,7 +303,7 @@ pub async fn wipe_library_data(pool: &SqlitePool, library_id: &str) -> anyhow::R
         "DELETE FROM play_history WHERE track_id IN (SELECT id FROM tracks WHERE library_id = ?)",
     )
     .bind(library_id)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
 
     // favorites can reference albums, artists, or tracks — delete those in library
@@ -285,14 +315,14 @@ pub async fn wipe_library_data(pool: &SqlitePool, library_id: &str) -> anyhow::R
     .bind(library_id)
     .bind(library_id)
     .bind(library_id)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
 
     sqlx::query(
         "DELETE FROM album_credits WHERE album_id IN (SELECT id FROM albums WHERE library_id = ?)",
     )
     .bind(library_id)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
 
     sqlx::query(
@@ -301,7 +331,7 @@ pub async fn wipe_library_data(pool: &SqlitePool, library_id: &str) -> anyhow::R
     )
     .bind(library_id)
     .bind(library_id)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
 
     sqlx::query(
@@ -310,27 +340,29 @@ pub async fn wipe_library_data(pool: &SqlitePool, library_id: &str) -> anyhow::R
     )
     .bind(library_id)
     .bind(library_id)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
 
     sqlx::query("DELETE FROM tracks WHERE library_id = ?")
         .bind(library_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
     sqlx::query("DELETE FROM albums WHERE library_id = ?")
         .bind(library_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
     sqlx::query("DELETE FROM artists WHERE library_id = ?")
         .bind(library_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
 
     // Clear user default_library_id references so the library row can be deleted
     sqlx::query("UPDATE users SET default_library_id = NULL WHERE default_library_id = ?")
         .bind(library_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
+
+    tx.commit().await?;
 
     info!("library data wiped for library_id={}", library_id);
     Ok(())
