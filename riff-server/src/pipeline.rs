@@ -258,7 +258,7 @@ pub async fn run_daily_refresh(state: Arc<AppState>) {
         let now = chrono::Utc::now();
         let tomorrow = (now.date_naive() + chrono::Days::new(1))
             .and_hms_opt(0, 0, 0)
-            .unwrap();
+            .expect("midnight is always a valid time");
         let until_midnight = tomorrow
             .signed_duration_since(now.naive_utc())
             .to_std()

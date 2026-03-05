@@ -195,7 +195,7 @@ pub async fn update_library(
 
     // If path changed, relocate file paths and re-scan at the new path
     if path_changed {
-        db::relocate_library_paths(&state.db, &id, &lib_path, body.path.as_ref().unwrap()).await
+        db::relocate_library_paths(&state.db, &id, &lib_path, body.path.as_ref().expect("path_changed is true")).await
             .map_err(|e| AppError::Internal(e.to_string()))?;
     }
 
@@ -209,7 +209,7 @@ pub async fn update_library(
 
     // Trigger re-scan if path changed
     if path_changed {
-        let new_path = body.path.unwrap();
+        let new_path = body.path.expect("path_changed is true");
         let db = state.db.clone();
         let lib_id = id.clone();
         tokio::spawn(async move {

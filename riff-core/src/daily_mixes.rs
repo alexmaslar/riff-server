@@ -952,7 +952,7 @@ pub async fn score_and_select(
             let duration_seconds: Option<i32> = row.try_get("duration_seconds").ok().flatten();
             let mood: Option<String> = row.try_get("mood").ok().flatten();
             let album_moods_json: String = row.try_get("moods").unwrap_or_default();
-            let album_moods: Vec<String> = serde_json::from_str(&album_moods_json).unwrap_or_default();
+            let album_moods: Vec<String> = crate::db::decode_json_array(&album_moods_json);
             let is_compilation: bool = row.try_get::<i32, _>("is_compilation")
                 .ok()
                 .map(|v| v != 0)

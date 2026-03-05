@@ -98,7 +98,7 @@ impl RemoteAccessManager {
                 status.error_message = None;
                 tracing::info!(
                     "remote access using external URL: {}",
-                    status.public_address.as_ref().unwrap()
+                    status.public_address.as_ref().expect("just assigned above")
                 );
                 Ok(())
             }

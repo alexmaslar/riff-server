@@ -101,7 +101,7 @@ pub async fn recently_played_albums(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<Claims>,
     Query(params): Query<HistoryParams>,
-) -> Result<Json<Value>, AppError> {
+) -> Result<([(axum::http::header::HeaderName, &'static str); 1], Json<Value>), AppError> {
     let limit = params.limit.unwrap_or(20);
     let library_ids = riff_core::db::resolve_library_ids(&state.db, params.library.as_deref()).await?;
 
@@ -131,7 +131,10 @@ pub async fn recently_played_albums(
         .map(|row| super::helpers::album_row_to_json(row))
         .collect();
 
-    Ok(Json(json!({ "albums": albums })))
+    Ok((
+        [(axum::http::header::CACHE_CONTROL, "private, max-age=120")],
+        Json(json!({ "albums": albums })),
+    ))
 }
 
 /// GET /history/continue — Albums with incomplete plays (started but not all tracks completed)
@@ -139,7 +142,7 @@ pub async fn continue_listening(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<Claims>,
     Query(params): Query<HistoryParams>,
-) -> Result<Json<Value>, AppError> {
+) -> Result<([(axum::http::header::HeaderName, &'static str); 1], Json<Value>), AppError> {
     let limit = params.limit.unwrap_or(20);
     let library_ids = riff_core::db::resolve_library_ids(&state.db, params.library.as_deref()).await?;
 
@@ -183,7 +186,10 @@ pub async fn continue_listening(
         .map(|row| super::helpers::album_row_to_json(row))
         .collect();
 
-    Ok(Json(json!({ "albums": albums })))
+    Ok((
+        [(axum::http::header::CACHE_CONTROL, "private, max-age=120")],
+        Json(json!({ "albums": albums })),
+    ))
 }
 
 /// GET /history/stats — Listening statistics for the authenticated user
@@ -192,7 +198,7 @@ pub async fn listening_stats(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<Claims>,
     Query(params): Query<HashMap<String, String>>,
-) -> Result<Json<Value>, AppError> {
+) -> Result<([(axum::http::header::HeaderName, &'static str); 1], Json<Value>), AppError> {
     let date_filter = match params.get("period").map(|s| s.as_str()) {
         Some("week") => "AND ph.played_at >= datetime('now', '-7 days')",
         Some("month") => "AND ph.played_at >= datetime('now', '-30 days')",
@@ -317,13 +323,16 @@ pub async fn listening_stats(
     let total_plays: i64 = totals.get("total_plays");
     let total_seconds: i64 = totals.get("total_seconds");
 
-    Ok(Json(json!({
-        "total_plays": total_plays,
-        "total_listening_seconds": total_seconds,
-        "top_artists": artists_json,
-        "top_albums": albums_json,
-        "genre_breakdown": genres_json,
-    })))
+    Ok((
+        [(axum::http::header::CACHE_CONTROL, "private, max-age=120")],
+        Json(json!({
+            "total_plays": total_plays,
+            "total_listening_seconds": total_seconds,
+            "top_artists": artists_json,
+            "top_albums": albums_json,
+            "genre_breakdown": genres_json,
+        })),
+    ))
 }
 
 /// GET /recommendations/downloads — Albums recommended for offline download

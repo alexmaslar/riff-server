@@ -31,23 +31,6 @@ pub struct ListParams {
 }
 
 #[derive(Debug, Serialize)]
-pub struct AlbumResponse {
-    pub id: String,
-    pub title: String,
-    pub artist_id: String,
-    pub artist_name: String,
-    pub year: Option<i32>,
-    pub genre: Vec<String>,
-    pub style: Vec<String>,
-    pub label: Option<String>,
-    pub cover_art_path: Option<String>,
-    pub added_at: String,
-    pub play_count: i64,
-    pub source: Option<String>,
-    pub apple_music_id: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
 pub struct AlbumDetailResponse {
     pub id: String,
     pub title: String,
@@ -78,7 +61,6 @@ pub struct AlbumDetailResponse {
     pub similar_albums: Vec<SimilarAlbum>,
     pub source: Option<String>,
     pub summary: Option<String>,
-    pub apple_music_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -132,7 +114,6 @@ pub struct TrackSummary {
     pub file_size_bytes: Option<i64>,
     pub isrc: Option<String>,
     pub album_play_count: Option<i64>,
-    pub apple_music_id: Option<String>,
 }
 
 pub async fn list_albums(
@@ -151,7 +132,7 @@ pub async fn list_albums(
     };
 
     let mut builder = QueryBuilder::<Sqlite>::new(
-        "SELECT a.id, a.title, a.artist_id, ar.name, a.year, a.genre, a.style, a.label, a.cover_art_path, a.added_at, a.play_count, COUNT(*) OVER() as total_count, a.source, a.apple_music_id
+        "SELECT a.id, a.title, a.artist_id, ar.name, a.year, a.genre, a.style, a.label, a.cover_art_path, a.added_at, a.play_count, COUNT(*) OVER() as total_count, a.source
          FROM albums a JOIN artists ar ON a.artist_id = ar.id",
     );
 
@@ -303,27 +284,9 @@ pub async fn list_albums(
     let rows = builder.build().fetch_all(&state.db).await?;
 
     let total: Option<i64> = rows.first().map(|r| r.get("total_count"));
-    let albums: Vec<AlbumResponse> = rows
+    let albums: Vec<Value> = rows
         .iter()
-        .map(|row| {
-            let genre_str: String = row.get(5);
-            let style_str: String = row.get(6);
-            AlbumResponse {
-                id: row.get(0),
-                title: row.get(1),
-                artist_id: row.get(2),
-                artist_name: row.get(3),
-                year: row.get(4),
-                genre: serde_json::from_str(&genre_str).unwrap_or_default(),
-                style: serde_json::from_str(&style_str).unwrap_or_default(),
-                label: row.get(7),
-                cover_art_path: row.get(8),
-                added_at: row.get(9),
-                play_count: row.get(10),
-                source: row.get(12),
-                apple_music_id: row.get(13),
-            }
-        })
+        .map(|row| super::helpers::album_row_to_json(row))
         .collect();
 
     Ok(Json(json!({ "albums": albums, "total": total })))
@@ -336,7 +299,7 @@ pub async fn build_album_detail(
     plugin_registry: Option<&riff_core::plugin::registry::PluginRegistry>,
 ) -> Result<AlbumDetailResponse, AppError> {
     let album_row = sqlx::query(
-        "SELECT a.id, a.title, a.artist_id, ar.name, a.year, a.genre, a.style, a.label, a.catalog_number, a.cover_art_path, a.summary, a.rating, a.moods, a.descriptors, a.keywords, a.metadata_status, a.added_at, a.country, a.release_notes, a.all_labels, a.is_compilation, a.play_count, a.source, a.summary_source, a.rating_sources, a.apple_music_id
+        "SELECT a.id, a.title, a.artist_id, ar.name, a.year, a.genre, a.style, a.label, a.catalog_number, a.cover_art_path, a.summary, a.rating, a.moods, a.descriptors, a.keywords, a.metadata_status, a.added_at, a.country, a.release_notes, a.all_labels, a.is_compilation, a.play_count, a.source, a.summary_source, a.rating_sources
          FROM albums a JOIN artists ar ON a.artist_id = ar.id
          WHERE a.id = ?",
     )
@@ -352,7 +315,7 @@ pub async fn build_album_detail(
                     t.album_id, ar.name as artist_name, t.sample_rate, t.bit_depth,
                     t.composer, COALESCE(t.bpm_tag, t.bpm_analyzed) as bpm,
                     COALESCE(t.musical_key, t.key_analyzed) as resolved_key, t.loudness_lufs, t.mood,
-                    t.file_size_bytes, t.isrc, a.play_count as album_play_count, t.apple_music_id
+                    t.file_size_bytes, t.isrc, a.play_count as album_play_count
              FROM tracks t
              JOIN albums a ON t.album_id = a.id
              JOIN artists ar ON a.artist_id = ar.id
@@ -396,25 +359,24 @@ pub async fn build_album_detail(
     let track_summaries: Vec<TrackSummary> = track_rows
         .iter()
         .map(|row| TrackSummary {
-            id: row.get(0),
-            title: row.get(1),
-            track_number: row.get(2),
-            disc_number: row.get(3),
-            duration_seconds: row.get(4),
-            format: row.get(5),
-            album_id: row.get(6),
-            artist_name: row.get(7),
-            sample_rate: row.get(8),
-            bit_depth: row.get(9),
-            composer: row.get(10),
-            bpm: row.get(11),
-            musical_key: row.get(12),
-            loudness_lufs: row.get(13),
-            mood: row.get(14),
-            file_size_bytes: row.get(15),
-            isrc: row.get(16),
-            album_play_count: row.get(17),
-            apple_music_id: row.get(18),
+            id: row.get("id"),
+            title: row.get("title"),
+            track_number: row.get("track_number"),
+            disc_number: row.get("disc_number"),
+            duration_seconds: row.get("duration_seconds"),
+            format: row.get("format"),
+            album_id: row.get("album_id"),
+            artist_name: row.get("artist_name"),
+            sample_rate: row.get("sample_rate"),
+            bit_depth: row.get("bit_depth"),
+            composer: row.get("composer"),
+            bpm: row.get("bpm"),
+            musical_key: row.get("resolved_key"),
+            loudness_lufs: row.get("loudness_lufs"),
+            mood: row.get("mood"),
+            file_size_bytes: row.get("file_size_bytes"),
+            isrc: row.get("isrc"),
+            album_play_count: row.get("album_play_count"),
         })
         .collect();
 
@@ -440,15 +402,15 @@ pub async fn build_album_detail(
         })
         .collect();
 
-    let genre_str: String = album_row.get(5);
-    let style_str: String = album_row.get(6);
-    let moods_str: String = album_row.get(12);
-    let descriptors_str: String = album_row.get(13);
-    let keywords_str: String = album_row.get(14);
-    let all_labels_str: String = album_row.get(19);
-    let is_compilation_int: i32 = album_row.get(20);
-    let play_count: i64 = album_row.get(21);
-    let rating_sources_str: String = album_row.get(24);
+    let genre_str: String = album_row.get("genre");
+    let style_str: String = album_row.get("style");
+    let moods_str: String = album_row.get("moods");
+    let descriptors_str: String = album_row.get("descriptors");
+    let keywords_str: String = album_row.get("keywords");
+    let all_labels_str: String = album_row.get("all_labels");
+    let is_compilation_int: i32 = album_row.get("is_compilation");
+    let play_count: i64 = album_row.get("play_count");
+    let rating_sources_str: String = album_row.get("rating_sources");
     // Fetch editorial reviews for this album
     let review_rows = sqlx::query_as::<_, (String, Option<String>, String, Option<f64>, Option<i64>, Option<String>, Option<String>, Option<String>)>(
         "SELECT source, source_url, text, rating, rating_count, license, reviewer, review_date \
@@ -485,25 +447,25 @@ pub async fn build_album_detail(
         .collect();
 
     Ok(AlbumDetailResponse {
-        id: album_row.get(0),
-        title: album_row.get(1),
-        artist_id: album_row.get(2),
-        artist_name: album_row.get(3),
-        year: album_row.get(4),
-        genre: serde_json::from_str(&genre_str).unwrap_or_default(),
-        style: serde_json::from_str(&style_str).unwrap_or_default(),
-        label: album_row.get(7),
-        catalog_number: album_row.get(8),
-        cover_art_path: album_row.get(9),
-        rating: album_row.get(11),
+        id: album_row.get("id"),
+        title: album_row.get("title"),
+        artist_id: album_row.get("artist_id"),
+        artist_name: album_row.get("name"),
+        year: album_row.get("year"),
+        genre: super::helpers::decode_json_array(&genre_str),
+        style: super::helpers::decode_json_array(&style_str),
+        label: album_row.get("label"),
+        catalog_number: album_row.get("catalog_number"),
+        cover_art_path: album_row.get("cover_art_path"),
+        rating: album_row.get("rating"),
         rating_sources: serde_json::from_str(&rating_sources_str).unwrap_or_default(),
-        moods: serde_json::from_str(&moods_str).unwrap_or_default(),
-        descriptors: serde_json::from_str(&descriptors_str).unwrap_or_default(),
-        keywords: serde_json::from_str(&keywords_str).unwrap_or_default(),
-        metadata_status: album_row.get(15),
-        added_at: album_row.get(16),
-        country: album_row.get(17),
-        release_notes: album_row.get(18),
+        moods: super::helpers::decode_json_array(&moods_str),
+        descriptors: super::helpers::decode_json_array(&descriptors_str),
+        keywords: super::helpers::decode_json_array(&keywords_str),
+        metadata_status: album_row.get("metadata_status"),
+        added_at: album_row.get("added_at"),
+        country: album_row.get("country"),
+        release_notes: album_row.get("release_notes"),
         all_labels: serde_json::from_str(&all_labels_str).unwrap_or_default(),
         is_compilation: is_compilation_int != 0,
         play_count,
@@ -511,10 +473,9 @@ pub async fn build_album_detail(
         credits: credit_summaries,
         is_favorited,
         similar_albums,
-        source: album_row.get(22),
-        summary: album_row.get(10),
+        source: album_row.get("source"),
+        summary: album_row.get("summary"),
         reviews,
-        apple_music_id: album_row.get(25),
     })
 }
 
@@ -570,7 +531,7 @@ pub async fn get_cover(
             .header(header::LOCATION, &cover_path)
             .header(header::CACHE_CONTROL, "public, max-age=86400")
             .body(Body::empty())
-            .unwrap();
+            .expect("response builder with valid headers");
     }
 
     // If ?w= is specified, serve a cached thumbnail
@@ -616,7 +577,7 @@ pub async fn get_cover(
         .header(header::CONTENT_LENGTH, file_size.to_string())
         .header(header::CACHE_CONTROL, "public, max-age=86400")
         .body(Body::from_stream(stream))
-        .unwrap()
+        .expect("response builder with valid headers")
 }
 
 /// Serve a resized thumbnail, caching it to disk.
@@ -717,7 +678,7 @@ pub async fn serve_thumbnail(original_path: &str, entity_id: &str, width: u32) -
         .header(header::CONTENT_LENGTH, file_size.to_string())
         .header(header::CACHE_CONTROL, "public, max-age=86400")
         .body(Body::from_stream(stream))
-        .unwrap()
+        .expect("response builder with valid headers")
 }
 
 #[derive(Debug, Deserialize)]
@@ -956,14 +917,18 @@ pub async fn list_genres(
     let library_ids = riff_core::db::resolve_library_ids(&state.db, params.library.as_deref()).await?;
 
     let rows = sqlx::query(
-        "SELECT j.value as name, COUNT(DISTINCT a.id) as album_count,
-                (SELECT a2.id FROM albums a2, json_each(a2.genre) j2
-                 WHERE j2.value = j.value AND a2.library_id IN (SELECT value FROM json_each(?1))
-                 ORDER BY a2.play_count DESC LIMIT 1) as representative_album_id
-         FROM albums a, json_each(a.genre) j
-         WHERE j.value IS NOT NULL AND a.library_id IN (SELECT value FROM json_each(?1))
-         GROUP BY j.value
-         ORDER BY j.value"
+        "WITH ranked AS (
+             SELECT j.value as genre_name, a.id as album_id, a.play_count,
+                    ROW_NUMBER() OVER (PARTITION BY j.value ORDER BY a.play_count DESC) as rn
+             FROM albums a, json_each(a.genre) j
+             WHERE j.value IS NOT NULL AND a.library_id IN (SELECT value FROM json_each(?1))
+         )
+         SELECT genre_name as name,
+                COUNT(DISTINCT album_id) as album_count,
+                MAX(CASE WHEN rn = 1 THEN album_id END) as representative_album_id
+         FROM ranked
+         GROUP BY genre_name
+         ORDER BY genre_name"
     )
     .bind(&library_ids)
     .fetch_all(&state.db)

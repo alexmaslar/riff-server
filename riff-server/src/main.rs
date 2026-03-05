@@ -248,7 +248,7 @@ async fn main() -> Result<()> {
     // Fetch community plugin catalog (non-blocking, empty on failure)
     let remote_catalog = plugin::catalog::fetch_remote_catalog().await;
 
-    let http_client = reqwest::Client::builder().build().unwrap();
+    let http_client = reqwest::Client::builder().build().expect("reqwest client build with default config");
 
     let state = Arc::new(AppState {
         db: pool,

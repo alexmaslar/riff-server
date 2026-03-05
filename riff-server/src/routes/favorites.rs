@@ -76,7 +76,7 @@ pub async fn list_favorites(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<Claims>,
     Query(params): Query<ListFavoritesParams>,
-) -> Result<Json<Value>, AppError> {
+) -> Result<([(axum::http::header::HeaderName, &'static str); 1], Json<Value>), AppError> {
     let limit = params.limit.unwrap_or(50);
     let library_ids = riff_core::db::resolve_library_ids(&state.db, params.library.as_deref()).await?;
 
@@ -108,7 +108,10 @@ pub async fn list_favorites(
                 .iter()
                 .map(|row| super::helpers::album_row_to_json(row))
                 .collect();
-            Ok(Json(json!({ "albums": albums })))
+            Ok((
+                [(axum::http::header::CACHE_CONTROL, "private, max-age=60")],
+                Json(json!({ "albums": albums })),
+            ))
         }
         "artist" => {
             let rows = sqlx::query(
@@ -137,7 +140,10 @@ pub async fn list_favorites(
                     })
                 })
                 .collect();
-            Ok(Json(json!({ "artists": artists })))
+            Ok((
+                [(axum::http::header::CACHE_CONTROL, "private, max-age=60")],
+                Json(json!({ "artists": artists })),
+            ))
         }
         "track" => {
             let rows = sqlx::query(
@@ -173,7 +179,10 @@ pub async fn list_favorites(
                     })
                 })
                 .collect();
-            Ok(Json(json!({ "tracks": tracks })))
+            Ok((
+                [(axum::http::header::CACHE_CONTROL, "private, max-age=60")],
+                Json(json!({ "tracks": tracks })),
+            ))
         }
         _ => Err(AppError::BadRequest("invalid type, must be album, artist, or track".to_string())),
     }

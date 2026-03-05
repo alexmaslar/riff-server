@@ -803,7 +803,7 @@ async fn query_candidates(pool: &SqlitePool, filters: &CandidateFilters) -> Resu
         .iter()
         .map(|row| {
             let genre_json: String = row.get("genre");
-            let genres: Vec<String> = serde_json::from_str(&genre_json).unwrap_or_default();
+            let genres = crate::db::decode_json_array(&genre_json);
             let moods_json: String = row.try_get("moods").unwrap_or_default();
             let descriptors_json: String = row.try_get("descriptors").unwrap_or_default();
 
@@ -827,8 +827,8 @@ async fn query_candidates(pool: &SqlitePool, filters: &CandidateFilters) -> Resu
                 bit_depth: row.try_get("bit_depth").ok().flatten(),
                 composer: row.try_get("composer").ok().flatten(),
                 loudness_lufs: row.try_get("loudness_lufs").ok().flatten(),
-                album_moods: serde_json::from_str(&moods_json).unwrap_or_default(),
-                album_descriptors: serde_json::from_str(&descriptors_json).unwrap_or_default(),
+                album_moods: crate::db::decode_json_array(&moods_json),
+                album_descriptors: crate::db::decode_json_array(&descriptors_json),
             }
         })
         .collect();
@@ -868,7 +868,7 @@ async fn fetch_candidates_by_ids(pool: &SqlitePool, ids: &[String]) -> Result<Ve
         .iter()
         .map(|row| {
             let genre_json: String = row.get("genre");
-            let genres: Vec<String> = serde_json::from_str(&genre_json).unwrap_or_default();
+            let genres = crate::db::decode_json_array(&genre_json);
             let moods_json: String = row.try_get("moods").unwrap_or_default();
             let descriptors_json: String = row.try_get("descriptors").unwrap_or_default();
 
@@ -892,8 +892,8 @@ async fn fetch_candidates_by_ids(pool: &SqlitePool, ids: &[String]) -> Result<Ve
                 bit_depth: row.try_get("bit_depth").ok().flatten(),
                 composer: row.try_get("composer").ok().flatten(),
                 loudness_lufs: row.try_get("loudness_lufs").ok().flatten(),
-                album_moods: serde_json::from_str(&moods_json).unwrap_or_default(),
-                album_descriptors: serde_json::from_str(&descriptors_json).unwrap_or_default(),
+                album_moods: crate::db::decode_json_array(&moods_json),
+                album_descriptors: crate::db::decode_json_array(&descriptors_json),
             }
         })
         .collect();

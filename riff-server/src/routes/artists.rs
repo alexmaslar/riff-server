@@ -39,11 +39,14 @@ pub struct SimilarArtist {
 
 #[derive(Debug, Serialize)]
 pub struct PopularTrack {
+    pub id: String,
     pub rank: i32,
     pub name: String,
     pub playcount: i64,
     pub track_id: String,
     pub title: String,
+    pub track_number: Option<i32>,
+    pub disc_number: Option<i32>,
     pub duration_seconds: Option<i32>,
     pub format: Option<String>,
     pub sample_rate: Option<i32>,
@@ -371,10 +374,10 @@ pub async fn build_artist_detail(
         )
         .bind(artist_id)
         .fetch_all(db),
-        sqlx::query_as::<_, (String, i32, i64, String, String, Option<i32>, Option<String>, Option<i32>, Option<i32>, String, String, Option<String>)>(
+        sqlx::query_as::<_, (String, i32, i64, String, String, Option<i32>, Option<String>, Option<i32>, Option<i32>, Option<i32>, Option<i32>, String, String, Option<String>)>(
             "SELECT att.track_name, att.rank, att.playcount, \
                     t.id, t.title, t.duration_seconds, t.format, \
-                    t.sample_rate, t.bit_depth, \
+                    t.sample_rate, t.bit_depth, t.track_number, t.disc_number, \
                     al.id, al.title, al.cover_art_path \
              FROM artist_top_tracks att \
              JOIN albums al ON al.artist_id = att.artist_id \
@@ -417,13 +420,16 @@ pub async fn build_artist_detail(
 
     let popular_tracks: Vec<PopularTrack> = top_tracks_rows
         .into_iter()
-        .map(|(track_name, rank, playcount, track_id, title, duration_seconds, format, sample_rate, bit_depth, album_id, album_title, cover_art_path)| {
+        .map(|(track_name, rank, playcount, track_id, title, duration_seconds, format, sample_rate, bit_depth, track_number, disc_number, album_id, album_title, cover_art_path)| {
             PopularTrack {
+                id: track_id.clone(),
                 rank,
                 name: track_name,
                 playcount,
                 track_id,
                 title,
+                track_number,
+                disc_number,
                 duration_seconds,
                 format,
                 sample_rate,

@@ -135,7 +135,7 @@ pub async fn stream_track(
                                 .header("X-Riff-Quality", effective_quality)
                                 .header("X-Riff-Original-Format", &format)
                                 .body(Body::from_stream(stream))
-                                .unwrap())
+                                .expect("response builder with valid headers"))
                         }
                         None => {
                             let f = File::open(&path)
@@ -153,7 +153,7 @@ pub async fn stream_track(
                                 .header("X-Riff-Quality", effective_quality)
                                 .header("X-Riff-Original-Format", &format)
                                 .body(Body::from_stream(stream))
-                                .unwrap())
+                                .expect("response builder with valid headers"))
                         }
                     };
                 }
@@ -172,7 +172,7 @@ pub async fn stream_track(
                         builder = builder.header("X-Riff-Estimated-Length", estimated_bytes.to_string());
                     }
 
-                    return Ok(builder.body(body).unwrap());
+                    return Ok(builder.body(body).expect("response builder with valid headers"));
                 }
                 Err(e) => {
                     tracing::warn!("transcode failed, falling back to raw: {e}");
@@ -244,7 +244,7 @@ pub async fn stream_track(
                 .header(header::ETAG, &etag)
                 .header("X-Riff-Quality", if is_lossless_format(&format) { "lossless" } else { "original" })
                 .body(Body::from_stream(stream))
-                .unwrap())
+                .expect("response builder with valid headers"))
         }
         None => {
             // Full content (200)
@@ -262,7 +262,7 @@ pub async fn stream_track(
                 .header(header::ETAG, &etag)
                 .header("X-Riff-Quality", if is_lossless_format(&format) { "lossless" } else { "original" })
                 .body(Body::from_stream(stream))
-                .unwrap())
+                .expect("response builder with valid headers"))
         }
     }
 }
@@ -304,7 +304,7 @@ pub async fn download_track(
             format!("attachment; filename=\"{}\"", filename),
         )
         .body(Body::from_stream(stream))
-        .unwrap())
+        .expect("response builder with valid headers"))
 }
 
 #[derive(Debug, Deserialize)]

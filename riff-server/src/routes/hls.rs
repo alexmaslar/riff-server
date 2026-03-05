@@ -128,7 +128,7 @@ pub async fn master_playlist(
         .header(header::CONTENT_TYPE, "application/vnd.apple.mpegurl")
         .header(header::CACHE_CONTROL, "private, max-age=3600")
         .body(Body::from(master))
-        .unwrap())
+        .expect("response builder with valid headers"))
 }
 
 /// GET /tracks/{id}/hls/{variant}/playlist.m3u8
@@ -254,7 +254,7 @@ pub async fn variant_playlist(
         .header(header::CONTENT_TYPE, "application/vnd.apple.mpegurl")
         .header(header::CACHE_CONTROL, "private, max-age=3600")
         .body(Body::from(content))
-        .unwrap())
+        .expect("response builder with valid headers"))
 }
 
 /// GET /tracks/{id}/hls/{variant}/{segment}
@@ -306,7 +306,7 @@ pub async fn serve_segment(
         .header(header::CONTENT_LENGTH, file_size.to_string())
         .header(header::CACHE_CONTROL, "private, max-age=86400")
         .body(Body::from_stream(stream))
-        .unwrap())
+        .expect("response builder with valid headers"))
 }
 
 /// Run FFmpeg to generate HLS segments for a variant tier.

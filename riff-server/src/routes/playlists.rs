@@ -44,14 +44,15 @@ pub async fn list_playlists(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<Claims>,
     Query(params): Query<ListPlaylistsParams>,
-) -> Result<Json<Value>, AppError> {
+) -> Result<([(axum::http::header::HeaderName, &'static str); 1], Json<Value>), AppError> {
     let library_ids = riff_core::db::resolve_library_ids(&state.db, params.library.as_deref()).await?;
 
     let rows = sqlx::query(
         "SELECT p.id, p.name, p.description,
                 COUNT(pt.id) as track_count,
                 COALESCE(SUM(t.duration_seconds), 0) as total_duration,
-                p.created_at, p.updated_at
+                p.created_at, p.updated_at,
+                COUNT(*) OVER() as total_count
          FROM playlists p
          LEFT JOIN playlist_tracks pt ON p.id = pt.playlist_id
          LEFT JOIN tracks t ON pt.track_id = t.id
@@ -65,6 +66,7 @@ pub async fn list_playlists(
     .fetch_all(&state.db)
     .await?;
 
+    let total: Option<i64> = rows.first().map(|r| r.get("total_count"));
     let playlists: Vec<Value> = rows
         .iter()
         .map(|row| {
@@ -79,7 +81,10 @@ pub async fn list_playlists(
             })
         })
         .collect();
-    Ok(Json(json!({ "playlists": playlists })))
+    Ok((
+        [(axum::http::header::CACHE_CONTROL, "private, max-age=60")],
+        Json(json!({ "playlists": playlists, "total": total })),
+    ))
 }
 
 pub async fn get_playlist(
@@ -154,7 +159,7 @@ pub async fn create_playlist(
     let id = Uuid::new_v4().to_string();
 
     let library_ids = riff_core::db::resolve_library_ids(&state.db, params.library.as_deref()).await?;
-    let lib_ids: Vec<String> = serde_json::from_str(&library_ids).unwrap_or_default();
+    let lib_ids: Vec<String> = super::helpers::decode_json_array(&library_ids);
     let playlist_library_id = lib_ids.first().cloned();
 
     sqlx::query(

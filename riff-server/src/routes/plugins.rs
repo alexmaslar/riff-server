@@ -167,7 +167,7 @@ pub async fn get_plugin_icon(
                         .header(header::CONTENT_TYPE, *content_type)
                         .header(header::CACHE_CONTROL, "public, max-age=86400")
                         .body(Body::from(data))
-                        .unwrap();
+                        .expect("response builder with valid headers");
                 }
             }
         }
@@ -176,5 +176,5 @@ pub async fn get_plugin_icon(
     Response::builder()
         .status(StatusCode::NOT_FOUND)
         .body(Body::empty())
-        .unwrap()
+        .expect("response builder with valid headers")
 }

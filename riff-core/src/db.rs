@@ -6,6 +6,13 @@ use std::time::Duration;
 use tracing::info;
 use uuid::Uuid;
 
+/// Decode a JSON string array, logging a warning on parse failure.
+pub fn decode_json_array(s: &str) -> Vec<String> {
+    serde_json::from_str(s)
+        .inspect_err(|e| tracing::warn!("failed to decode JSON array: {e}"))
+        .unwrap_or_default()
+}
+
 pub async fn init_pool() -> anyhow::Result<SqlitePool> {
     let data_dir = dirs::data_dir()
         .ok_or_else(|| anyhow::anyhow!("could not determine data directory"))?
@@ -96,10 +103,11 @@ async fn normalize_genre_casing(pool: &SqlitePool) -> anyhow::Result<()> {
     .fetch_all(pool)
     .await?;
 
+    let mut tx = pool.begin().await?;
     let mut updated = 0u64;
     for (id, genre_str, style_str) in &rows {
-        let genres: Vec<String> = serde_json::from_str(genre_str).unwrap_or_default();
-        let styles: Vec<String> = serde_json::from_str(style_str).unwrap_or_default();
+        let genres = decode_json_array(genre_str);
+        let styles = decode_json_array(style_str);
 
         let new_genres: Vec<String> = genres.iter().map(|g| title_case_genre(g)).collect();
         let new_styles: Vec<String> = styles.iter().map(|s| title_case_genre(s)).collect();
@@ -111,7 +119,7 @@ async fn normalize_genre_casing(pool: &SqlitePool) -> anyhow::Result<()> {
                 .bind(&genre_json)
                 .bind(&style_json)
                 .bind(id)
-                .execute(pool)
+                .execute(&mut *tx)
                 .await?;
             updated += 1;
         }
@@ -123,8 +131,10 @@ async fn normalize_genre_casing(pool: &SqlitePool) -> anyhow::Result<()> {
 
     // Mark normalization as done so it doesn't run again on next startup
     sqlx::query("INSERT OR IGNORE INTO settings (key, value) VALUES ('genre_normalization_done', '1')")
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
+
+    tx.commit().await?;
 
     Ok(())
 }

@@ -41,7 +41,7 @@ impl IntoResponse for AppError {
                     .into_response();
                 response.headers_mut().insert(
                     "Retry-After",
-                    retry_after_secs.to_string().parse().unwrap(),
+                    retry_after_secs.to_string().parse().expect("numeric string is valid header value"),
                 );
                 response
             }

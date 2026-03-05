@@ -2,6 +2,13 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::Row;
 
+/// Decode a JSON string array, logging a warning on parse failure.
+pub fn decode_json_array(s: &str) -> Vec<String> {
+    serde_json::from_str(s)
+        .inspect_err(|e| tracing::warn!("failed to decode JSON array: {e}"))
+        .unwrap_or_default()
+}
+
 /// Shared query parameter for streaming quality selection.
 /// Used by tracks.rs, streaming.rs, and hls.rs.
 #[derive(Debug, Deserialize)]
@@ -17,8 +24,9 @@ pub struct StreamParams {
 pub fn album_row_to_json(row: &sqlx::sqlite::SqliteRow) -> Value {
     let genre_str: String = row.get("genre");
     let style_str: String = row.get("style");
-    let genre: Vec<String> = serde_json::from_str(&genre_str).unwrap_or_default();
-    let style: Vec<String> = serde_json::from_str(&style_str).unwrap_or_default();
+    let genre = decode_json_array(&genre_str);
+    let style = decode_json_array(&style_str);
+    let source: Option<String> = row.try_get("source").ok().flatten();
     json!({
         "id": row.get::<String, _>("id"),
         "title": row.get::<String, _>("title"),
@@ -31,5 +39,6 @@ pub fn album_row_to_json(row: &sqlx::sqlite::SqliteRow) -> Value {
         "cover_art_path": row.get::<Option<String>, _>("cover_art_path"),
         "added_at": row.get::<String, _>("added_at"),
         "play_count": row.get::<i64, _>("play_count"),
+        "source": source,
     })
 }

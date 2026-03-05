@@ -89,7 +89,7 @@ fn generate_certificate(cert_path: &Path, key_path: &Path) -> Result<()> {
 
     // SANs for local access
     params.subject_alt_names = vec![
-        SanType::DnsName("localhost".try_into().unwrap()),
+        SanType::DnsName("localhost".try_into().expect("localhost is a valid DNS name")),
         SanType::IpAddress(IpAddr::from([127, 0, 0, 1])),
     ];
 
