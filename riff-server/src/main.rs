@@ -560,6 +560,48 @@ async fn main() -> Result<()> {
     tracing::info!("HTTPS listening on {}", https_addr);
 
     let http_app = app.clone().layer(axum_mw::from_fn(middleware::mark_local));
+
+    // Tailscale listener (optional — only when method=tailscale and auth key is available)
+    #[cfg(feature = "tailscale")]
+    {
+        let ts_method = config.remote_access.method.as_str();
+        let ts_auth_key = config
+            .remote_access
+            .tailscale_auth_key
+            .clone()
+            .or_else(|| std::env::var("TS_AUTHKEY").ok());
+
+        if ts_method == "tailscale" && config.remote_access.enabled {
+            if let Some(auth_key) = ts_auth_key {
+                let ts_app = app.clone().layer(axum_mw::from_fn(middleware::mark_remote));
+                let ts_state = state.clone();
+                let ts_port = config.server.port;
+
+                match start_tailscale_listener(auth_key, ts_port, ts_app, &ts_state).await {
+                    Ok(()) => {}
+                    Err(e) => {
+                        tracing::error!("tailscale startup failed: {e}");
+                        let mut status = ts_state.remote_access.status.write().await;
+                        status.enabled = true;
+                        status.method = "tailscale".to_string();
+                        status.status = "error".to_string();
+                        status.error_message = Some(format!("{e}"));
+                    }
+                }
+            } else {
+                tracing::warn!(
+                    "tailscale remote access enabled but no auth key — \
+                     set tailscale_auth_key in config or TS_AUTHKEY env var"
+                );
+                let mut status = state.remote_access.status.write().await;
+                status.enabled = true;
+                status.method = "tailscale".to_string();
+                status.status = "error".to_string();
+                status.error_message = Some("no auth key configured".into());
+            }
+        }
+    }
+
     let https_app = app.layer(axum_mw::from_fn(middleware::mark_remote));
 
     // Run HTTP and HTTPS listeners as independent tasks so one failing
@@ -628,6 +670,71 @@ async fn main() -> Result<()> {
         tracing::error!("exec failed: {err}");
         std::process::exit(1);
     }
+
+    Ok(())
+}
+
+/// Start a Tailscale node and serve the axum app on the tailnet.
+#[cfg(feature = "tailscale")]
+async fn start_tailscale_listener(
+    auth_key: String,
+    port: u16,
+    app: Router,
+    state: &Arc<AppState>,
+) -> anyhow::Result<()> {
+    use rust_tailscale::{TailscaleConfig, TailscaleServer};
+
+    let system_hostname = hostname::get()
+        .ok()
+        .and_then(|h| h.into_string().ok())
+        .unwrap_or_else(|| "riff".to_string());
+    // Tailscale hostnames can't have dots
+    let ts_hostname = system_hostname.split('.').next().unwrap_or("riff");
+
+    let ts_config = TailscaleConfig::builder()
+        .hostname(format!("riff-{ts_hostname}"))
+        .auth_key(auth_key)
+        .ephemeral(true)
+        .build()
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    let ts_server = TailscaleServer::new(ts_config);
+    ts_server.start().await.map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    let identity = ts_server.identity().await.map_err(|e| anyhow::anyhow!("{e}"))?;
+    tracing::info!(
+        ipv4 = %identity.ipv4,
+        fqdn = %identity.fqdn,
+        "tailscale node joined tailnet"
+    );
+
+    let ts_listener = ts_server
+        .listen_tcp(&format!(":{port}"))
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    // Update remote access status
+    let fqdn = identity.fqdn.trim_end_matches('.').to_string();
+    {
+        let mut status = state.remote_access.status.write().await;
+        status.enabled = true;
+        status.method = "tailscale".to_string();
+        status.status = "active".to_string();
+        status.public_address = Some(format!("http://{}:{}", fqdn, port));
+        status.tailscale_fqdn = Some(fqdn.clone());
+        status.error_message = None;
+    }
+
+    let handle = tokio::spawn(async move {
+        // Keep ts_server alive — dropping it would tear down the WireGuard tunnel
+        let _ts_server = ts_server;
+        if let Err(e) = axum::serve(ts_listener, app).await {
+            tracing::error!("tailscale serve error: {e}");
+        }
+    });
+
+    state.remote_access.set_tailscale_handle(handle).await;
+    tracing::info!("tailscale remote access active on http://{}:{}", fqdn, port);
 
     Ok(())
 }

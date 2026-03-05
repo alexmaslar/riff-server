@@ -24,6 +24,7 @@ fn status_json(status: &crate::upnp::RemoteAccessStatus, https_port: u16) -> Val
         "local_ip": local_ip,
         "nat_type": status.nat_type,
         "port_reachable": status.port_reachable,
+        "tailscale_fqdn": status.tailscale_fqdn,
     })
 }
 
@@ -45,8 +46,20 @@ pub async fn enable(
     let method = config.remote_access.method.clone();
     drop(config);
 
-    // Start is best-effort — don't fail the request if remote access method isn't available
-    let _ = state.remote_access.start(external_url, &method).await;
+    if method == "tailscale" {
+        // Tailscale listener is set up at startup — persist enabled and restart
+        {
+            let mut config = state.config.write().await;
+            config.remote_access.enabled = true;
+            if let Err(e) = config.save() {
+                tracing::warn!("failed to save config: {e}");
+            }
+        }
+        state.restart.notify_one();
+    } else {
+        // Start is best-effort — don't fail the request if remote access method isn't available
+        let _ = state.remote_access.start(external_url, &method).await;
+    }
 
     // Persist enabled state and cert fingerprint
     {
@@ -104,13 +117,14 @@ pub async fn disable(
     Ok(Json(status_json(&status, https_port)))
 }
 
-const VALID_METHODS: &[&str] = &["upnp", "port_forwarding", "external_url"];
+const VALID_METHODS: &[&str] = &["upnp", "port_forwarding", "external_url", "tailscale"];
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConfigureRequest {
     pub method: Option<String>,
     pub external_url: Option<String>,
+    pub tailscale_auth_key: Option<String>,
 }
 
 pub async fn configure(
@@ -130,6 +144,13 @@ pub async fn configure(
         }
     }
 
+    // Check if switching to/from tailscale (requires restart)
+    let old_method = state.config.read().await.remote_access.method.clone();
+    let needs_restart = body
+        .method
+        .as_deref()
+        .is_some_and(|m| m == "tailscale" || old_method == "tailscale");
+
     // Save to config
     {
         let mut config = state.config.write().await;
@@ -139,6 +160,9 @@ pub async fn configure(
         if body.external_url.is_some() {
             config.remote_access.external_url = body.external_url.clone();
         }
+        if body.tailscale_auth_key.is_some() {
+            config.remote_access.tailscale_auth_key = body.tailscale_auth_key.clone();
+        }
         if let Err(e) = config.save() {
             tracing::warn!("failed to save config: {e}");
         }
@@ -147,23 +171,29 @@ pub async fn configure(
     // If currently enabled, restart with new settings
     let is_enabled = state.remote_access.status.read().await.enabled;
     if is_enabled {
-        state.remote_access.stop().await;
-        let config = state.config.read().await;
-        let method = config.remote_access.method.clone();
-        let external_url = config.remote_access.external_url.clone();
-        drop(config);
-        let _ = state.remote_access.start(external_url, &method).await;
+        if needs_restart {
+            // Tailscale listener is set up at startup — trigger server restart
+            state.restart.notify_one();
+        } else {
+            state.remote_access.stop().await;
+            let config = state.config.read().await;
+            let method = config.remote_access.method.clone();
+            let external_url = config.remote_access.external_url.clone();
+            drop(config);
+            let _ = state.remote_access.start(external_url, &method).await;
 
-        // Re-persist enabled state
-        let mut config = state.config.write().await;
-        config.remote_access.enabled = true;
-        let _ = config.save();
+            // Re-persist enabled state
+            let mut config = state.config.write().await;
+            config.remote_access.enabled = true;
+            let _ = config.save();
+        }
     }
 
     let details = format!(
-        "method={}, external_url={}",
+        "method={}, external_url={}, tailscale_auth_key={}",
         body.method.as_deref().unwrap_or("unchanged"),
         body.external_url.as_deref().unwrap_or("unchanged"),
+        if body.tailscale_auth_key.is_some() { "set" } else { "unchanged" },
     );
     super::audit::log(
         &state.db,

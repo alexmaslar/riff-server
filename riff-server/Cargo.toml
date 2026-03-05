@@ -37,3 +37,8 @@ rustls-pemfile = "2"
 socket2 = { version = "0.5", features = ["all"] }
 filetime = "0.2"
 unicode-normalization = "0.1"
+rust_tailscale = { path = "../../../rust_tailscale", features = ["axum"], optional = true }
+
+[features]
+default = ["tailscale"]
+tailscale = ["dep:rust_tailscale"]

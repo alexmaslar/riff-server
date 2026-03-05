@@ -24,6 +24,9 @@ pub struct RemoteAccessStatus {
     pub local_ip: Option<String>,
     pub nat_type: Option<String>,
     pub port_reachable: Option<bool>,
+    /// Tailscale FQDN when method is "tailscale" (e.g. "riff.tail12345.ts.net")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tailscale_fqdn: Option<String>,
 }
 
 impl Default for RemoteAccessStatus {
@@ -40,6 +43,7 @@ impl Default for RemoteAccessStatus {
             local_ip: None,
             nat_type: None,
             port_reachable: None,
+            tailscale_fqdn: None,
         }
     }
 }
@@ -47,6 +51,7 @@ impl Default for RemoteAccessStatus {
 pub struct RemoteAccessManager {
     pub status: Arc<RwLock<RemoteAccessStatus>>,
     renewal_handle: Arc<RwLock<Option<JoinHandle<()>>>>,
+    tailscale_handle: Arc<RwLock<Option<JoinHandle<()>>>>,
     https_port: u16,
 }
 
@@ -58,8 +63,15 @@ impl RemoteAccessManager {
                 ..Default::default()
             })),
             renewal_handle: Arc::new(RwLock::new(None)),
+            tailscale_handle: Arc::new(RwLock::new(None)),
             https_port,
         }
+    }
+
+    /// Store the Tailscale task handle so it can be aborted on stop().
+    pub async fn set_tailscale_handle(&self, handle: JoinHandle<()>) {
+        let mut h = self.tailscale_handle.write().await;
+        *h = Some(handle);
     }
 
     /// Set the certificate fingerprint (called once on startup).
@@ -103,6 +115,20 @@ impl RemoteAccessManager {
                 Ok(())
             }
             "port_forwarding" => self.start_port_forwarding().await,
+            "tailscale" => {
+                // Tailscale listener is set up in main.rs at startup (like HTTPS).
+                // Mark status so the enable/disable API knows a restart is needed.
+                let mut status = self.status.write().await;
+                status.enabled = true;
+                status.method = "tailscale".to_string();
+                // If not already active (set by main.rs), mark as pending restart
+                if status.status != "active" {
+                    status.status = "pending_restart".to_string();
+                    status.error_message =
+                        Some("server restart required to start tailscale".into());
+                }
+                Ok(())
+            }
             _ => self.start_upnp().await,
         }
     }
@@ -200,13 +226,21 @@ impl RemoteAccessManager {
         }
     }
 
-    /// Stop remote access (UPnP or manual).
+    /// Stop remote access (UPnP, manual, or tailscale).
     pub async fn stop(&self) {
         // Cancel renewal loop
         {
             let mut handle = self.renewal_handle.write().await;
             if let Some(h) = handle.take() {
                 h.abort();
+            }
+        }
+        // Cancel tailscale task
+        {
+            let mut handle = self.tailscale_handle.write().await;
+            if let Some(h) = handle.take() {
+                h.abort();
+                tracing::info!("tailscale listener stopped");
             }
         }
 
@@ -241,6 +275,7 @@ impl RemoteAccessManager {
         status.error_message = None;
         status.nat_type = None;
         status.port_reachable = None;
+        status.tailscale_fqdn = None;
         // Keep cert_fingerprint — it doesn't change
         tracing::info!("remote access stopped");
     }

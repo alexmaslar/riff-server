@@ -122,13 +122,16 @@ pub struct EnrichmentConfig {
 pub struct RemoteAccessConfig {
     #[serde(default)]
     pub enabled: bool,
-    /// Preferred remote access method: upnp | port_forwarding | external_url
+    /// Preferred remote access method: upnp | port_forwarding | external_url | tailscale
     #[serde(default = "default_remote_method")]
     pub method: String,
     #[serde(default)]
     pub external_url: Option<String>,
     #[serde(default)]
     pub cert_fingerprint: Option<String>,
+    /// Tailscale auth key (or set TS_AUTHKEY env var)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tailscale_auth_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
