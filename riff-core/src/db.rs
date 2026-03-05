@@ -27,7 +27,8 @@ pub async fn init_pool() -> anyhow::Result<SqlitePool> {
         .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
         .create_if_missing(true)
         .optimize_on_close(true, Some(1000))
-        .busy_timeout(Duration::from_secs(5));
+        .busy_timeout(Duration::from_secs(30))
+        .pragma("temp_store", "2");
 
     let pool = SqlitePoolOptions::new()
         .max_connections(20)

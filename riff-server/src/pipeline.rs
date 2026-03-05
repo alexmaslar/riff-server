@@ -154,6 +154,25 @@ pub async fn run_background_pipeline(state: Arc<AppState>) {
         routes::hls::cleanup_hls_cache().await;
         transcode::cleanup_cache(std::time::Duration::from_secs(86400)).await;
 
+        // Step 5: WAL checkpoint — reclaim disk space after bulk writes
+        if let Err(e) = sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+            .execute(&state.db)
+            .await
+        {
+            tracing::warn!("WAL checkpoint failed: {e}");
+        }
+
+        // Step 6: Update query planner statistics for long-running server
+        let _ = sqlx::query("PRAGMA analysis_limit=400")
+            .execute(&state.db)
+            .await;
+        if let Err(e) = sqlx::query("PRAGMA optimize")
+            .execute(&state.db)
+            .await
+        {
+            tracing::warn!("PRAGMA optimize failed: {e}");
+        }
+
         tracing::info!("background pipeline complete, waiting for next trigger");
     }
 }
