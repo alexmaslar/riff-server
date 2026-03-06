@@ -31,23 +31,16 @@ async fn run_pipeline_iteration(state: &Arc<AppState>) {
         let mut artist_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
 
         // Step 1: Enrichment (MusicBrainz — no API key needed)
-        {
-            let config = state.config.read().await;
-            if config.metadata.enrichment.auto_enrich {
-                let db = state.db.clone();
-                drop(config);
-                if state.stage_manager.try_start("enrichment") {
-                        match musicbrainz::enrich_library(&db).await {
-                        Ok(r) => {
-                            tracing::info!(stage = "enrichment", "complete");
-                            album_ids.extend(r.enriched_album_ids);
-                            artist_ids.extend(r.enriched_artist_ids);
-                        }
-                        Err(e) => tracing::warn!(stage = "enrichment", error = %e, "failed"),
-                    }
-                    state.stage_manager.finish("enrichment");
+        if state.stage_manager.try_start("enrichment") {
+            match musicbrainz::enrich_library(&state.db).await {
+                Ok(r) => {
+                    tracing::info!(stage = "enrichment", "complete");
+                    album_ids.extend(r.enriched_album_ids);
+                    artist_ids.extend(r.enriched_artist_ids);
                 }
+                Err(e) => tracing::warn!(stage = "enrichment", error = %e, "failed"),
             }
+            state.stage_manager.finish("enrichment");
         }
 
         // Step 1b: Editorial enrichment (editorial plugins)

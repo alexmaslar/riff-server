@@ -6,7 +6,6 @@ use uuid::Uuid;
 
 use std::sync::Arc;
 
-use crate::config::EnrichmentConfig;
 use crate::deezer;
 use crate::plugin::capabilities::StreamingProvider;
 use super::client::MusicBrainzClient;
@@ -26,10 +25,6 @@ pub async fn enrich_library(
 ) -> anyhow::Result<EnrichmentResult> {
     let client = MusicBrainzClient::new()?;
 
-    let config = crate::config::Config::load()
-        .map(|c| c.metadata.enrichment)
-        .unwrap_or_default();
-
     let mut result = EnrichmentResult {
         albums_enriched: 0,
         artists_enriched: 0,
@@ -40,7 +35,7 @@ pub async fn enrich_library(
     };
 
     // Album enrichment
-    enrich_albums(pool, &client, &config, &mut result).await;
+    enrich_albums(pool, &client, &mut result).await;
 
     info!(
         albums = result.albums_enriched,
@@ -72,12 +67,9 @@ pub async fn enrich_album(
     };
 
     let client = MusicBrainzClient::new()?;
-    let config = crate::config::Config::load()
-        .map(|c| c.metadata.enrichment)
-        .unwrap_or_default();
 
     let matched = enrich_one_album(
-        pool, &client, &config, album_id, &title, &artist_name, year, cover_path.as_deref(),
+        pool, &client, album_id, &title, &artist_name, year, cover_path.as_deref(),
     ).await?;
 
     Ok(matched)
@@ -86,15 +78,12 @@ pub async fn enrich_album(
 async fn enrich_albums(
     pool: &SqlitePool,
     client: &MusicBrainzClient,
-    config: &EnrichmentConfig,
     result: &mut EnrichmentResult,
 ) {
     let rows: Vec<(String, String, String, Option<i32>, Option<String>)> = match sqlx::query_as(
         "SELECT a.id, a.title, ar.name, a.year, a.cover_art_path \
          FROM albums a JOIN artists ar ON a.artist_id = ar.id \
-         JOIN libraries l ON a.library_id = l.id \
-         WHERE a.metadata_status IN ('pending', 'not_found') \
-         AND COALESCE(l.auto_enrich, 1) = 1"
+         WHERE a.metadata_status IN ('pending', 'not_found')"
     )
     .fetch_all(pool)
     .await
@@ -109,7 +98,7 @@ async fn enrich_albums(
     info!(count = rows.len(), "enriching albums from MusicBrainz");
 
     for (album_id, title, artist_name, year, cover_path) in &rows {
-        match enrich_one_album(pool, client, config, album_id, title, artist_name, *year, cover_path.as_deref()).await {
+        match enrich_one_album(pool, client, album_id, title, artist_name, *year, cover_path.as_deref()).await {
             Ok(true) => {
                 result.albums_enriched += 1;
                 result.enriched_album_ids.push(album_id.clone());
@@ -139,7 +128,6 @@ async fn enrich_albums(
 async fn enrich_one_album(
     pool: &SqlitePool,
     client: &MusicBrainzClient,
-    config: &EnrichmentConfig,
     album_id: &str,
     title: &str,
     artist_name: &str,
@@ -282,8 +270,8 @@ async fn enrich_one_album(
         }
     }
 
-    // Download cover art from Cover Art Archive if missing and enabled
-    if config.download_covers && cover_path.is_none() {
+    // Download cover art from Cover Art Archive if missing
+    if cover_path.is_none() {
         match download_cover(client, mbid, pool, album_id).await {
             Ok(true) => {
                 info!(album = %title, "downloaded cover");

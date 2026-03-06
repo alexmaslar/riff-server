@@ -12,8 +12,6 @@ pub struct Config {
     #[serde(default)]
     pub auth: AuthConfig,
     #[serde(default)]
-    pub metadata: MetadataConfig,
-    #[serde(default)]
     pub streaming: StreamingConfig,
     #[serde(default)]
     pub plugins: HashMap<String, PluginConfig>,
@@ -70,9 +68,6 @@ pub struct LibraryEntry {
     pub path: String,
     #[serde(default)]
     pub isolated: bool,
-    /// Per-library overrides (None = follow global setting)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auto_enrich: Option<bool>,
     /// Per-library scan interval in seconds (None = use global default)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scan_interval: Option<u64>,
@@ -98,20 +93,6 @@ pub struct AuthConfig {
     pub admin_username: String,
     #[serde(default)]
     pub admin_password: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct MetadataConfig {
-    #[serde(default)]
-    pub enrichment: EnrichmentConfig,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EnrichmentConfig {
-    #[serde(default = "default_true")]
-    pub auto_enrich: bool,
-    #[serde(default = "default_true")]
-    pub download_covers: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -160,15 +141,6 @@ fn default_true() -> bool {
     true
 }
 
-impl Default for EnrichmentConfig {
-    fn default() -> Self {
-        Self {
-            auto_enrich: true,
-            download_covers: true,
-        }
-    }
-}
-
 fn default_server() -> ServerConfig {
     ServerConfig {
         port: default_port(),
@@ -209,7 +181,6 @@ impl Default for Config {
             server: default_server(),
             library: LibraryConfig::default(),
             auth: AuthConfig::default(),
-            metadata: MetadataConfig::default(),
             streaming: StreamingConfig::default(),
             plugins: HashMap::new(),
             plugin_directory: None,
@@ -273,7 +244,6 @@ impl Config {
                 name: "Music".to_string(),
                 path: path.clone(),
                 isolated: false,
-                auto_enrich: None,
                 scan_interval: None,
             }]
         } else {
@@ -351,13 +321,6 @@ mod tests {
         assert_eq!(config.remote_bitrate, 256);
         assert_eq!(config.remote_format, "aac");
         assert_eq!(config.max_transcode_processes, 2);
-    }
-
-    #[test]
-    fn test_default_enrichment_config() {
-        let config = EnrichmentConfig::default();
-        assert!(config.auto_enrich);
-        assert!(config.download_covers);
     }
 
     #[test]

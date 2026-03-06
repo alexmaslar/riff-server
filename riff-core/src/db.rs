@@ -179,13 +179,12 @@ pub async fn sync_libraries(pool: &SqlitePool, libraries: &[LibraryEntry]) -> an
             // Update name/isolated/display_order and per-library config if changed
             sqlx::query(
                 "UPDATE libraries SET name = ?, isolated = ?, display_order = ?, \
-                 auto_enrich = ?, scan_interval = ? \
+                 scan_interval = ? \
                  WHERE id = ?",
             )
             .bind(&entry.name)
             .bind(entry.isolated)
             .bind(i as i64)
-            .bind(entry.auto_enrich)
             .bind(entry.scan_interval.map(|v| v as i64))
             .bind(db_id)
             .execute(pool)
@@ -195,15 +194,14 @@ pub async fn sync_libraries(pool: &SqlitePool, libraries: &[LibraryEntry]) -> an
             let id = Uuid::new_v4().to_string();
             sqlx::query(
                 "INSERT INTO libraries (id, name, path, isolated, display_order, \
-                 auto_enrich, scan_interval) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?)",
+                 scan_interval) \
+                 VALUES (?, ?, ?, ?, ?, ?)",
             )
             .bind(&id)
             .bind(&entry.name)
             .bind(&entry.path)
             .bind(entry.isolated)
             .bind(i as i64)
-            .bind(entry.auto_enrich)
             .bind(entry.scan_interval.map(|v| v as i64))
             .execute(pool)
             .await?;

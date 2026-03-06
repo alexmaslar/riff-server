@@ -38,12 +38,6 @@ pub async fn get_config(
                 "path": config.library.path,
                 "scan_interval": config.library.scan_interval,
             },
-            "metadata": {
-                "enrichment": {
-                    "auto_enrich": config.metadata.enrichment.auto_enrich,
-                    "download_covers": config.metadata.enrichment.download_covers,
-                },
-            },
             "streaming": {
                 "remote_bitrate": config.streaming.remote_bitrate,
                 "remote_format": config.streaming.remote_format,
@@ -109,7 +103,6 @@ fn build_plugins_json(
 pub struct ConfigUpdate {
     pub server: Option<ServerUpdate>,
     pub library: Option<LibraryUpdate>,
-    pub metadata: Option<MetadataUpdate>,
     pub streaming: Option<StreamingUpdate>,
     pub plugins: Option<HashMap<String, PluginUpdate>>,
 }
@@ -135,17 +128,6 @@ pub struct ServerUpdate {
 pub struct LibraryUpdate {
     pub path: Option<String>,
     pub scan_interval: Option<u64>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct MetadataUpdate {
-    pub enrichment: Option<EnrichmentUpdate>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct EnrichmentUpdate {
-    pub auto_enrich: Option<bool>,
-    pub download_covers: Option<bool>,
 }
 
 pub async fn update_config(
@@ -175,18 +157,6 @@ pub async fn update_config(
             if let Some(interval) = lib.scan_interval {
                 config.library.scan_interval = interval;
             }
-        }
-
-        if let Some(meta) = update.metadata {
-            if let Some(enrichment) = meta.enrichment {
-                if let Some(auto_enrich) = enrichment.auto_enrich {
-                    config.metadata.enrichment.auto_enrich = auto_enrich;
-                }
-                if let Some(download_covers) = enrichment.download_covers {
-                    config.metadata.enrichment.download_covers = download_covers;
-                }
-            }
-
         }
 
         // Plugins
@@ -299,12 +269,6 @@ pub async fn update_config(
         "library": {
             "path": config_snapshot.library.path,
             "scan_interval": config_snapshot.library.scan_interval,
-        },
-        "metadata": {
-            "enrichment": {
-                "auto_enrich": config_snapshot.metadata.enrichment.auto_enrich,
-                "download_covers": config_snapshot.metadata.enrichment.download_covers,
-            },
         },
         "streaming": {
             "remote_bitrate": config_snapshot.streaming.remote_bitrate,

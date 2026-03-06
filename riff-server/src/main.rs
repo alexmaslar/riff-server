@@ -169,10 +169,6 @@ async fn main() -> Result<()> {
     let config = Config::load()?;
     tracing::info!(port = config.server.port, "config loaded");
 
-    if config.metadata.enrichment.auto_enrich {
-        tracing::info!("metadata enrichment enabled (MusicBrainz)");
-    }
-
     let pool = db::init_pool().await?;
     tracing::info!("database initialized");
 

@@ -17,7 +17,7 @@ pub async fn list_libraries(
 ) -> Result<Json<Value>, AppError> {
     let rows = sqlx::query(
         "SELECT l.id, l.name, l.path, l.isolated, l.display_order,
-                l.auto_enrich, l.scan_interval,
+                l.scan_interval,
                 (SELECT COUNT(*) FROM albums WHERE library_id = l.id) as album_count,
                 (SELECT COUNT(*) FROM tracks WHERE library_id = l.id) as track_count
          FROM libraries l
@@ -36,7 +36,6 @@ pub async fn list_libraries(
                 "isolated": row.get::<bool, _>("isolated"),
                 "albumCount": row.get::<i64, _>("album_count"),
                 "trackCount": row.get::<i64, _>("track_count"),
-                "autoEnrich": row.get::<Option<bool>, _>("auto_enrich"),
                 "scanInterval": row.get::<Option<i64>, _>("scan_interval"),
             })
         })
@@ -74,7 +73,6 @@ pub async fn add_library(
             name: body.name.clone(),
             path: body.path.clone(),
             isolated: body.isolated,
-            auto_enrich: None,
             scan_interval: None,
         });
         config.save().map_err(|e| AppError::Internal(e.to_string()))?;
@@ -118,18 +116,6 @@ pub async fn add_library(
     Ok(Json(json!({ "status": "added", "id": library_id })))
 }
 
-/// Deserialize helper: distinguishes between missing key (None) and explicit null (Some(None)).
-/// Used for per-library config overrides where:
-/// - absent key = don't change the value
-/// - explicit null = reset to global (None)
-/// - explicit true/false = set override
-fn deserialize_optional_nullable<'de, D>(deserializer: D) -> Result<Option<Option<bool>>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    Ok(Some(Option::deserialize(deserializer)?))
-}
-
 fn deserialize_optional_nullable_u64<'de, D>(deserializer: D) -> Result<Option<Option<u64>>, D::Error>
 where
     D: Deserializer<'de>,
@@ -142,8 +128,6 @@ pub struct UpdateLibraryBody {
     pub name: Option<String>,
     pub path: Option<String>,
     pub isolated: Option<bool>,
-    #[serde(default, deserialize_with = "deserialize_optional_nullable")]
-    pub auto_enrich: Option<Option<bool>>,
     #[serde(default, deserialize_with = "deserialize_optional_nullable_u64")]
     pub scan_interval: Option<Option<u64>>,
 }
@@ -176,7 +160,6 @@ pub async fn update_library(
                     name: "Music".to_string(),
                     path: legacy_path,
                     isolated: false,
-                    auto_enrich: None,
                     scan_interval: None,
                 });
             }
@@ -190,9 +173,6 @@ pub async fn update_library(
             }
             if let Some(isolated) = body.isolated {
                 entry.isolated = isolated;
-            }
-            if let Some(v) = body.auto_enrich {
-                entry.auto_enrich = v;
             }
             if let Some(v) = body.scan_interval {
                 entry.scan_interval = v;
@@ -268,7 +248,6 @@ pub async fn remove_library(
                     name: "Music".to_string(),
                     path: legacy_path,
                     isolated: false,
-                    auto_enrich: None,
                     scan_interval: None,
                 });
             }
