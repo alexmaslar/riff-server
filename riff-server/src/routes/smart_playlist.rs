@@ -5,33 +5,8 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use uuid::Uuid;
 
-use riff_core::config::AiProvider;
-
 use crate::error::AppError;
 use crate::AppState;
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct GenerateBody {
-    pub prompt: String,
-    pub track_count: Option<u32>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RefineBody {
-    pub prompt: String,
-    pub current_track_ids: Vec<String>,
-    pub track_count: Option<u32>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SaveBody {
-    pub title: String,
-    pub description: Option<String>,
-    pub track_ids: Vec<String>,
-}
 
 /// GET /playlists/ai/suggestions
 pub async fn get_suggestions(
@@ -51,155 +26,17 @@ pub async fn get_suggestions(
         })
         .collect();
 
-    let config = state.config.read().await;
-    let estimated_cost =
-        riff_core::smart_playlist::estimate_generation_cost(&config.metadata.ai);
-    let provider = match config.metadata.ai.provider {
-        AiProvider::Ollama => "ollama",
-        AiProvider::OpenAi => "openai",
-        AiProvider::Anthropic => "anthropic",
-    };
-
     Ok(Json(json!({
         "suggestions": items,
-        "estimatedCost": estimated_cost,
-        "provider": provider,
     })))
 }
 
-/// POST /playlists/ai/generate
-pub async fn generate(
-    State(state): State<Arc<AppState>>,
-    Extension(claims): Extension<Claims>,
-    Json(body): Json<GenerateBody>,
-) -> Result<Json<Value>, AppError> {
-    let config = state.config.read().await;
-    if !config.metadata.ai.enabled {
-        return Err(AppError::BadRequest("AI is not enabled".to_string()));
-    }
-    if !config.metadata.ai.playlist_generation {
-        return Err(AppError::BadRequest("AI playlist generation is not enabled".to_string()));
-    }
-    let ai_config = config.metadata.ai.clone();
-    drop(config);
-
-    // Rate limit
-    if let Err(msg) = riff_core::smart_playlist::check_rate_limit(&claims.sub).await {
-        return Err(AppError::BadRequest(msg));
-    }
-
-    let prompt = body.prompt.trim();
-    if prompt.is_empty() {
-        return Err(AppError::BadRequest("prompt is required".to_string()));
-    }
-
-    let result = riff_core::smart_playlist::generate_smart_playlist(
-        &state.db,
-        &ai_config,
-        prompt,
-        body.track_count,
-    )
-    .await?;
-
-    let tracks: Vec<Value> = result
-        .tracks
-        .iter()
-        .map(|t| {
-            json!({
-                "id": t.id,
-                "title": t.title,
-                "trackNumber": t.track_number,
-                "discNumber": t.disc_number,
-                "durationSeconds": t.duration_seconds,
-                "format": t.format,
-                "albumId": t.album_id,
-                "artistName": t.artist_name,
-                "sampleRate": t.sample_rate,
-                "bitDepth": t.bit_depth,
-                "composer": t.composer,
-                "bpm": t.bpm,
-                "musicalKey": t.musical_key,
-                "loudnessLufs": t.loudness_lufs,
-                "mood": t.mood,
-                "albumPlayCount": t.album_play_count,
-            })
-        })
-        .collect();
-
-    Ok(Json(json!({
-        "title": result.title,
-        "description": result.description,
-        "tracks": tracks,
-        "candidateCount": result.candidate_count,
-    })))
-}
-
-/// POST /playlists/ai/refine
-pub async fn refine(
-    State(state): State<Arc<AppState>>,
-    Extension(claims): Extension<Claims>,
-    Json(body): Json<RefineBody>,
-) -> Result<Json<Value>, AppError> {
-    let config = state.config.read().await;
-    if !config.metadata.ai.enabled {
-        return Err(AppError::BadRequest("AI is not enabled".to_string()));
-    }
-    if !config.metadata.ai.playlist_generation {
-        return Err(AppError::BadRequest("AI playlist generation is not enabled".to_string()));
-    }
-    let ai_config = config.metadata.ai.clone();
-    drop(config);
-
-    // Rate limit
-    if let Err(msg) = riff_core::smart_playlist::check_rate_limit(&claims.sub).await {
-        return Err(AppError::BadRequest(msg));
-    }
-
-    let prompt = body.prompt.trim();
-    if prompt.is_empty() {
-        return Err(AppError::BadRequest("prompt is required".to_string()));
-    }
-
-    let result = riff_core::smart_playlist::refine_smart_playlist(
-        &state.db,
-        &ai_config,
-        prompt,
-        &body.current_track_ids,
-        body.track_count,
-    )
-    .await?;
-
-    let tracks: Vec<Value> = result
-        .tracks
-        .iter()
-        .map(|t| {
-            json!({
-                "id": t.id,
-                "title": t.title,
-                "trackNumber": t.track_number,
-                "discNumber": t.disc_number,
-                "durationSeconds": t.duration_seconds,
-                "format": t.format,
-                "albumId": t.album_id,
-                "artistName": t.artist_name,
-                "sampleRate": t.sample_rate,
-                "bitDepth": t.bit_depth,
-                "composer": t.composer,
-                "bpm": t.bpm,
-                "musicalKey": t.musical_key,
-                "loudnessLufs": t.loudness_lufs,
-                "mood": t.mood,
-                "albumPlayCount": t.album_play_count,
-            })
-        })
-        .collect();
-
-    Ok(Json(json!({
-        "title": result.title,
-        "description": result.description,
-        "tracks": tracks,
-        "candidateCount": result.candidate_count,
-    })))
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveBody {
+    pub title: String,
+    pub description: Option<String>,
+    pub track_ids: Vec<String>,
 }
 
 /// POST /playlists/ai/save

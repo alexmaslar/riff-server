@@ -1,6 +1,5 @@
 use axum::{extract::State, http::header, Extension, Json};
 use riff_core::auth::Claims;
-use riff_core::config::AiProvider;
 use riff_core::plugin::catalog::RemotePluginEntry;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -16,14 +15,6 @@ fn mask_secret(s: &str) -> String {
         "*".repeat(s.len())
     } else {
         format!("{}...{}", &s[..3], &s[s.len() - 3..])
-    }
-}
-
-fn provider_to_str(p: &AiProvider) -> &'static str {
-    match p {
-        AiProvider::OpenAi => "openai",
-        AiProvider::Anthropic => "anthropic",
-        AiProvider::Ollama => "ollama",
     }
 }
 
@@ -51,15 +42,6 @@ pub async fn get_config(
                 "enrichment": {
                     "auto_enrich": config.metadata.enrichment.auto_enrich,
                     "download_covers": config.metadata.enrichment.download_covers,
-                },
-                "ai": {
-                    "enabled": config.metadata.ai.enabled,
-                    "provider": provider_to_str(&config.metadata.ai.provider),
-                    "api_key": config.metadata.ai.api_key.as_deref().map(mask_secret),
-                    "model": config.metadata.ai.model,
-                    "fast_model": config.metadata.ai.fast_model,
-                    "base_url": config.metadata.ai.base_url,
-                    "playlist_generation": config.metadata.ai.playlist_generation,
                 },
             },
             "streaming": {
@@ -158,24 +140,12 @@ pub struct LibraryUpdate {
 #[derive(Debug, Deserialize)]
 pub struct MetadataUpdate {
     pub enrichment: Option<EnrichmentUpdate>,
-    pub ai: Option<AiUpdate>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct EnrichmentUpdate {
     pub auto_enrich: Option<bool>,
     pub download_covers: Option<bool>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct AiUpdate {
-    pub enabled: Option<bool>,
-    pub provider: Option<String>,
-    pub api_key: Option<String>,
-    pub model: Option<String>,
-    pub fast_model: Option<String>,
-    pub base_url: Option<Option<String>>,
-    pub playlist_generation: Option<bool>,
 }
 
 pub async fn update_config(
@@ -185,11 +155,8 @@ pub async fn update_config(
     Json(update): Json<ConfigUpdate>,
 ) -> Result<Json<Value>, AppError> {
     // Clone config under write lock, apply mutations, then drop lock before disk I/O
-    let (config_snapshot, any_newly_enabled, https_port_changed, plugins_changed) = {
+    let (config_snapshot, https_port_changed, plugins_changed) = {
         let mut config = state.config.write().await;
-
-        // Snapshot AI flags before mutations
-        let old_ai_enabled = config.metadata.ai.enabled;
 
         let mut https_port_changed = false;
         if let Some(srv) = update.server {
@@ -217,34 +184,6 @@ pub async fn update_config(
                 }
                 if let Some(download_covers) = enrichment.download_covers {
                     config.metadata.enrichment.download_covers = download_covers;
-                }
-            }
-
-            if let Some(ai) = meta.ai {
-                if let Some(enabled) = ai.enabled {
-                    config.metadata.ai.enabled = enabled;
-                }
-                if let Some(provider_str) = ai.provider {
-                    config.metadata.ai.provider = match provider_str.as_str() {
-                        "anthropic" => AiProvider::Anthropic,
-                        "ollama" => AiProvider::Ollama,
-                        _ => AiProvider::OpenAi,
-                    };
-                }
-                if let Some(key) = ai.api_key {
-                    config.metadata.ai.api_key = if key.is_empty() { None } else { Some(key) };
-                }
-                if let Some(model) = ai.model {
-                    config.metadata.ai.model = if model.is_empty() { None } else { Some(model) };
-                }
-                if let Some(fast_model) = ai.fast_model {
-                    config.metadata.ai.fast_model = if fast_model.is_empty() { None } else { Some(fast_model) };
-                }
-                if let Some(base_url) = ai.base_url {
-                    config.metadata.ai.base_url = base_url.filter(|s| !s.is_empty());
-                }
-                if let Some(v) = ai.playlist_generation {
-                    config.metadata.ai.playlist_generation = v;
                 }
             }
 
@@ -293,14 +232,8 @@ pub async fn update_config(
             }
         }
 
-        let any_newly_enabled = !old_ai_enabled && config.metadata.ai.enabled;
-
-        if any_newly_enabled {
-            tracing::info!("AI features enabled");
-        }
-
         let snapshot = config.clone();
-        (snapshot, any_newly_enabled, https_port_changed, plugins_changed)
+        (snapshot, https_port_changed, plugins_changed)
     }; // write lock dropped before disk I/O
 
     // Save to disk outside the lock
@@ -311,9 +244,6 @@ pub async fn update_config(
         let mut changed = Vec::new();
         if https_port_changed {
             changed.push(format!("https_port={}", config_snapshot.server.https_port));
-        }
-        if any_newly_enabled {
-            changed.push("ai_features_enabled".to_string());
         }
         if plugins_changed {
             changed.push("plugins".to_string());
@@ -375,15 +305,6 @@ pub async fn update_config(
                 "auto_enrich": config_snapshot.metadata.enrichment.auto_enrich,
                 "download_covers": config_snapshot.metadata.enrichment.download_covers,
             },
-            "ai": {
-                "enabled": config_snapshot.metadata.ai.enabled,
-                "provider": provider_to_str(&config_snapshot.metadata.ai.provider),
-                "api_key": config_snapshot.metadata.ai.api_key.as_deref().map(mask_secret),
-                "model": config_snapshot.metadata.ai.model,
-                "fast_model": config_snapshot.metadata.ai.fast_model,
-                "base_url": config_snapshot.metadata.ai.base_url,
-                "playlist_generation": config_snapshot.metadata.ai.playlist_generation,
-            },
         },
         "streaming": {
             "remote_bitrate": config_snapshot.streaming.remote_bitrate,
@@ -393,9 +314,6 @@ pub async fn update_config(
         "plugins": plugins_json,
         "plugin_health": plugin_results,
     });
-
-    // AI was enabled — no automatic content generation since editorial enrichment is used instead
-    let _ = any_newly_enabled;
 
     Ok(Json(response))
 }

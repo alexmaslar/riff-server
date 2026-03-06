@@ -173,10 +173,6 @@ async fn main() -> Result<()> {
         tracing::info!("metadata enrichment enabled (MusicBrainz)");
     }
 
-    if config.metadata.ai.enabled {
-        tracing::info!(provider = ?config.metadata.ai.provider, "AI playlist generation enabled");
-    }
-
     let pool = db::init_pool().await?;
     tracing::info!("database initialized");
 
@@ -442,8 +438,6 @@ async fn main() -> Result<()> {
         .route("/playlists/{id}/tracks/{track_id}", delete(routes::playlists::remove_track))
         // Smart Playlists (AI)
         .route("/playlists/ai/suggestions", get(routes::smart_playlist::get_suggestions))
-        .route("/playlists/ai/generate", post(routes::smart_playlist::generate))
-        .route("/playlists/ai/refine", post(routes::smart_playlist::refine))
         .route("/playlists/ai/save", post(routes::smart_playlist::save))
         // History
         .route("/history", post(routes::history::record_play))

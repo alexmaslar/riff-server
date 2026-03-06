@@ -104,34 +104,6 @@ pub struct AuthConfig {
 pub struct MetadataConfig {
     #[serde(default)]
     pub enrichment: EnrichmentConfig,
-    #[serde(default)]
-    pub ai: AiConfig,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum AiProvider {
-    OpenAi,
-    Anthropic,
-    Ollama,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AiConfig {
-    #[serde(default)]
-    pub enabled: bool,
-    #[serde(default = "default_ai_provider")]
-    pub provider: AiProvider,
-    #[serde(default)]
-    pub api_key: Option<String>,
-    #[serde(default)]
-    pub model: Option<String>,
-    #[serde(default)]
-    pub fast_model: Option<String>,
-    #[serde(default)]
-    pub base_url: Option<String>,
-    #[serde(default = "default_true")]
-    pub playlist_generation: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -187,25 +159,6 @@ pub struct PluginConfig {
 fn default_true() -> bool {
     true
 }
-
-fn default_ai_provider() -> AiProvider {
-    AiProvider::OpenAi
-}
-
-impl Default for AiConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            provider: default_ai_provider(),
-            api_key: None,
-            model: None,
-            fast_model: None,
-            base_url: None,
-            playlist_generation: true,
-        }
-    }
-}
-
 
 impl Default for EnrichmentConfig {
     fn default() -> Self {
@@ -401,14 +354,6 @@ mod tests {
     }
 
     #[test]
-    fn test_default_ai_config() {
-        let config = AiConfig::default();
-        assert!(!config.enabled);
-        assert!(config.api_key.is_none());
-        assert!(config.playlist_generation);
-    }
-
-    #[test]
     fn test_default_enrichment_config() {
         let config = EnrichmentConfig::default();
         assert!(config.auto_enrich);
@@ -456,19 +401,6 @@ server:
         // Other fields should use defaults
         assert_eq!(config.server.https_port, 8443);
         assert_eq!(config.library.scan_interval, 3600);
-    }
-
-    #[test]
-    fn test_ai_provider_deserialize() {
-        let yaml = r#"
-metadata:
-  ai:
-    enabled: true
-    provider: anthropic
-"#;
-        let config = Config::load_from_str(yaml).unwrap();
-        assert!(config.metadata.ai.enabled);
-        assert!(matches!(config.metadata.ai.provider, AiProvider::Anthropic));
     }
 
     #[test]
