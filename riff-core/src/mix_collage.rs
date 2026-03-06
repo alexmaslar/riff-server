@@ -348,12 +348,12 @@ pub fn generate_decade_mix_cover(decade: i32, cover_images: &[RgbaImage]) -> Res
     let (bg_color, _) = decade_gradient_colors(decade);
     let mut canvas = RgbaImage::from_pixel(size, size, bg_color);
 
-    // Triangular layout: two smaller behind, one large in front (drawn last)
-    // Draw order matters — back circles first, then large on top
+    // Horizontal row: side circles bleed off edges, center is larger and slightly higher
+    // Draw order: left, right (behind), then center (in front)
     let layout: [(u32, i64, i64); 3] = [
-        (300, 270, 490),  // left (behind)
-        (300, 754, 490),  // right (behind)
-        (420, 512, 370),  // center-top (in front)
+        (480, -30, 480),   // left — bleeds off left edge
+        (480, 1054, 480),  // right — bleeds off right edge
+        (560, 512, 400),   // center — larger, slightly higher, in front
     ];
 
     let draw_circle = |canvas: &mut RgbaImage, idx: usize, diam: u32, cx: i64, cy: i64| {
@@ -373,7 +373,7 @@ pub fn generate_decade_mix_cover(decade: i32, cover_images: &[RgbaImage]) -> Res
         }
     };
 
-    // Index mapping: cover_images[0] → large front, [1] → left, [2] → right
+    // Index mapping: cover_images[0] → center front, [1] → left, [2] → right
     draw_circle(&mut canvas, 1, layout[0].0, layout[0].1, layout[0].2);
     draw_circle(&mut canvas, 2, layout[1].0, layout[1].1, layout[1].2);
     draw_circle(&mut canvas, 0, layout[2].0, layout[2].1, layout[2].2);
