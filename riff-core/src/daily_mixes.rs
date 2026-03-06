@@ -1711,11 +1711,12 @@ async fn generate_deep_cuts_cover_dispatch(
 ) -> Result<Option<image::DynamicImage>> {
     // Find the most-represented artist in this mix
     let top_artist = sqlx::query_as::<_, (String,)>(
-        "SELECT t.artist_id
+        "SELECT a.artist_id
          FROM daily_mix_tracks dmt
          JOIN tracks t ON dmt.track_id = t.id
+         JOIN albums a ON t.album_id = a.id
          WHERE dmt.mix_id = ?
-         GROUP BY t.artist_id
+         GROUP BY a.artist_id
          ORDER BY COUNT(*) DESC
          LIMIT 1",
     )
