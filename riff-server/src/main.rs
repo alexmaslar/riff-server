@@ -1040,7 +1040,7 @@ async fn run_download_processor(state: Arc<AppState>) {
                 artist_ids: Vec::new(),
             });
 
-            // Trigger full pipeline for recommendations, Discogs/Deezer, and analysis
+            // Trigger full pipeline for recommendations, artist images, and analysis
             state.pipeline_notify.notify_one();
         }
 
