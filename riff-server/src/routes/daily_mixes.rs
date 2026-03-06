@@ -302,8 +302,14 @@ pub async fn get_mix_cover(
     let cover_path = match row {
         Ok(Some((Some(path),))) => path,
         Ok(Some((None,))) => {
-            return (StatusCode::NOT_FOUND, Json(json!({ "error": "no cover art" })))
-                .into_response()
+            // Cover not generated yet — generate on-demand
+            match daily_mixes::generate_mix_cover(&state.db, &id).await {
+                Ok(Some(path)) => path.to_string_lossy().to_string(),
+                _ => {
+                    return (StatusCode::NOT_FOUND, Json(json!({ "error": "no cover art" })))
+                        .into_response()
+                }
+            }
         }
         Ok(None) => {
             return (StatusCode::NOT_FOUND, Json(json!({ "error": "mix not found" })))

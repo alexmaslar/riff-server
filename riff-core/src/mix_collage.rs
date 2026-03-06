@@ -348,15 +348,28 @@ pub fn generate_decade_mix_cover(decade: i32, cover_images: &[RgbaImage]) -> Res
     let (bg_color, _) = decade_gradient_colors(decade);
     let mut canvas = RgbaImage::from_pixel(size, size, bg_color);
 
-    // Horizontal row: side circles bleed off edges, center is larger and slightly higher
-    // Draw order: left, right (behind), then center (in front)
+    // Horizontal inline row: all circles share the same vertical center.
+    // Side circles show ~90% (10% cut off = 40px off-screen for 400px circles).
+    // Draw order: left, right (behind), then center (in front).
+    let cy: i64 = 480;
     let layout: [(u32, i64, i64); 3] = [
-        (480, -30, 480),   // left — bleeds off left edge
-        (480, 1054, 480),  // right — bleeds off right edge
-        (560, 512, 400),   // center — larger, slightly higher, in front
+        (400, 160, cy),    // left — 90% visible (40px off left edge)
+        (400, 864, cy),    // right — 90% visible (40px off right edge)
+        (520, 512, cy),    // center — larger, same vertical center
     ];
 
+    let border_width: u32 = 16;
+
     let draw_circle = |canvas: &mut RgbaImage, idx: usize, diam: u32, cx: i64, cy: i64| {
+        // Draw border circle (bg-colored, slightly larger) behind the art
+        let border_diam = diam + border_width * 2;
+        let mut border_circle = RgbaImage::from_pixel(border_diam, border_diam, bg_color);
+        apply_circular_mask(&mut border_circle);
+        let bx = cx - (border_diam as i64 / 2);
+        let by = cy - (border_diam as i64 / 2);
+        image::imageops::overlay(canvas, &border_circle, bx, by);
+
+        // Draw album art circle
         let x = cx - (diam as i64 / 2);
         let y = cy - (diam as i64 / 2);
 

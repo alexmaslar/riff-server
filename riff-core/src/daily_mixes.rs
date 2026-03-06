@@ -1583,7 +1583,7 @@ fn camelot_distance(key_a: &str, key_b: &str) -> f64 {
 
 // ─── Cover Generation ────────────────────────────────────────────────────────
 
-async fn generate_mix_cover(pool: &SqlitePool, mix_id: &str) -> Result<Option<PathBuf>> {
+pub async fn generate_mix_cover(pool: &SqlitePool, mix_id: &str) -> Result<Option<PathBuf>> {
     // Query mix metadata
     let mix_row = sqlx::query_as::<_, (String, String)>(
         "SELECT mix_type, seed_value FROM daily_mixes WHERE id = ?",
