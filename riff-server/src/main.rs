@@ -6,7 +6,6 @@ mod plugin_reload;
 mod routes;
 mod tls;
 mod transcode;
-mod upnp;
 
 use anyhow::Result;
 use axum::{
@@ -33,8 +32,9 @@ use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::compression::CompressionLayer;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
-use tower_http::trace::TraceLayer;
-use tracing_subscriber::EnvFilter;
+use tower_http::trace::{DefaultMakeSpan, DefaultOnRequest, DefaultOnResponse, TraceLayer};
+use tracing::Level;
+use tracing_subscriber::{fmt, EnvFilter, prelude::*};
 
 pub struct StageManager {
     enrichment: AtomicBool,
@@ -101,7 +101,6 @@ pub struct AppState {
     pub jwt_secret: String,
     pub stage_manager: StageManager,
     pub http_client: reqwest::Client,
-    pub remote_access: upnp::RemoteAccessManager,
     pub restart: Notify,
     pub ffmpeg_available: bool,
     pub ffmpeg_has_fdk_aac: bool,
@@ -148,19 +147,28 @@ async fn main() -> Result<()> {
     // so we must explicitly pick one. This covers reqwest's outbound HTTPS calls.
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+    let fmt_layer = fmt::layer()
+        .with_target(false)
+        .with_thread_ids(false)
+        .compact();
+
+    let filter_layer = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info,sqlx=warn,hyper=warn,tower_http=debug"));
+
+    tracing_subscriber::registry()
+        .with(filter_layer)
+        .with(fmt_layer)
         .init();
 
     let config = Config::load()?;
-    tracing::info!("loaded config, port={}", config.server.port);
+    tracing::info!(port = config.server.port, "config loaded");
 
     if config.metadata.enrichment.auto_enrich {
         tracing::info!("metadata enrichment enabled (MusicBrainz)");
     }
 
     if config.metadata.ai.enabled {
-        tracing::info!("AI playlist generation enabled (provider: {:?})", config.metadata.ai.provider);
+        tracing::info!(provider = ?config.metadata.ai.provider, "AI playlist generation enabled");
     }
 
     let pool = db::init_pool().await?;
@@ -181,24 +189,24 @@ async fn main() -> Result<()> {
             .await?
             .unwrap_or_default();
         if library_id.is_empty() {
-            tracing::warn!("no library_id found for path {:?}, skipping scan", lib_entry.path);
+            tracing::warn!(path = %lib_entry.path, "no library_id found, skipping scan");
             continue;
         }
-        tracing::info!("scanning library {:?}: {}", lib_entry.name, lib_entry.path);
+        tracing::info!(library = %lib_entry.name, path = %lib_entry.path, "scanning library");
         match scanner::scan_library(&pool, &lib_entry.path, &library_id).await {
             Ok(result) => {
                 tracing::info!(
-                    "scan complete for {:?}: +{} artists, +{} albums, +{} tracks, -{} tracks, -{} albums, -{} artists",
-                    lib_entry.name,
-                    result.artists_added,
-                    result.albums_added,
-                    result.tracks_added,
-                    result.tracks_removed,
-                    result.albums_removed,
-                    result.artists_removed,
+                    library = %lib_entry.name,
+                    artists_added = result.artists_added,
+                    albums_added = result.albums_added,
+                    tracks_added = result.tracks_added,
+                    tracks_removed = result.tracks_removed,
+                    albums_removed = result.albums_removed,
+                    artists_removed = result.artists_removed,
+                    "scan complete",
                 );
             }
-            Err(e) => tracing::warn!("library scan failed for {:?}: {}", lib_entry.name, e),
+            Err(e) => tracing::warn!(library = %lib_entry.name, error = %e, "library scan failed"),
         }
     }
 
@@ -231,7 +239,7 @@ async fn main() -> Result<()> {
 
     if ffmpeg_available {
         let codec = if ffmpeg_has_fdk_aac { "libfdk_aac" } else { "native aac" };
-        tracing::info!("ffmpeg found ({codec}) — remote transcoding enabled");
+        tracing::info!(codec = codec, "ffmpeg found, remote transcoding enabled");
     } else {
         tracing::warn!("ffmpeg not found — remote clients will receive lossless files");
     }
@@ -239,7 +247,7 @@ async fn main() -> Result<()> {
     // Generate TLS certificate for HTTPS
     let (cert_path, key_path) = tls::ensure_certificate()?;
     let cert_fingerprint = tls::cert_fingerprint(&cert_path)?;
-    tracing::info!("TLS cert fingerprint: {}", cert_fingerprint);
+    tracing::info!(fingerprint = %cert_fingerprint, "TLS cert loaded");
 
     let max_transcodes = config.streaming.max_transcode_processes;
     let event_bus = plugin::events::EventBus::new(512);
@@ -256,7 +264,6 @@ async fn main() -> Result<()> {
         jwt_secret: config.auth.jwt_secret.clone(),
         stage_manager: StageManager::new(),
         http_client,
-        remote_access: upnp::RemoteAccessManager::new(config.server.https_port),
         restart: Notify::new(),
         ffmpeg_available,
         ffmpeg_has_fdk_aac,
@@ -271,19 +278,15 @@ async fn main() -> Result<()> {
         library_ids_cache: RwLock::new(None),
     });
 
-    // Set cert fingerprint on the remote access manager
-    state
-        .remote_access
-        .set_cert_fingerprint(cert_fingerprint)
-        .await;
 
     // Download and load enabled WASM plugins from the remote catalog
     let plugin_results = plugin_reload::reload_wasm_plugins(&state).await;
     for (name, result) in &plugin_results {
         if !result.healthy {
             tracing::warn!(
-                "plugin {name} is unhealthy: {}",
-                result.message.as_deref().unwrap_or("unknown error")
+                plugin = %name,
+                error = result.message.as_deref().unwrap_or("unknown error"),
+                "plugin unhealthy",
             );
         }
     }
@@ -292,11 +295,12 @@ async fn main() -> Result<()> {
     let (dev_results, dev_names) = plugin_reload::reload_dev_plugins(&state).await;
     for (name, result) in &dev_results {
         if result.loaded {
-            tracing::info!("dev plugin {name}: loaded (healthy={})", result.healthy);
+            tracing::info!(plugin = %name, healthy = result.healthy, "dev plugin loaded");
         } else {
             tracing::warn!(
-                "dev plugin {name}: {}",
-                result.message.as_deref().unwrap_or("failed to load")
+                plugin = %name,
+                error = result.message.as_deref().unwrap_or("failed to load"),
+                "dev plugin failed",
             );
         }
     }
@@ -355,18 +359,6 @@ async fn main() -> Result<()> {
         }
     };
 
-    // Start remote access if enabled
-    if config.remote_access.enabled {
-        let ra_state = state.clone();
-        let external_url = config.remote_access.external_url.clone();
-        let method = config.remote_access.method.clone();
-        tokio::spawn(async move {
-            if let Err(e) = ra_state.remote_access.start(external_url, &method).await {
-                tracing::warn!("remote access setup failed: {e}");
-            }
-        });
-    }
-
     let cors = if let Some(ref origins) = config.server.cors_origins {
         let allowed: Vec<_> = origins
             .iter()
@@ -423,7 +415,6 @@ async fn main() -> Result<()> {
 
     // Protected routes (require valid JWT)
     let protected = Router::new()
-        .route("/remote-access/status", get(routes::remote_access::get_status))
         .route("/artists", get(routes::artists::list_artists))
         .route("/artists/stories", get(routes::artists::artist_stories))
         .route("/artists/{id}", get(routes::artists::get_artist))
@@ -487,9 +478,6 @@ async fn main() -> Result<()> {
 
     // Admin routes (require auth + admin role)
     let admin = Router::new()
-        .route("/remote-access/enable", post(routes::remote_access::enable))
-        .route("/remote-access/disable", post(routes::remote_access::disable))
-        .route("/remote-access/configure", put(routes::remote_access::configure))
         .route("/library/scan", post(routes::library::trigger_scan))
         .route("/library/enrich", post(routes::library::trigger_enrichment))
         .route("/library/enrich/{album_id}", post(routes::library::enrich_album))
@@ -538,7 +526,16 @@ async fn main() -> Result<()> {
         .merge(streaming)      // no timeout, no gzip — raw bytes with accurate Content-Length
         .merge(timed_routes)   // 30s timeout + gzip for JSON API responses
         .layer(CatchPanicLayer::new())
-        .layer(TraceLayer::new_for_http())
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
+                .on_request(DefaultOnRequest::new().level(Level::INFO))
+                .on_response(
+                    DefaultOnResponse::new()
+                        .level(Level::INFO)
+                        .latency_unit(tower_http::LatencyUnit::Millis),
+                ),
+        )
         .layer(cors)
         .with_state(state.clone());
 
@@ -547,7 +544,7 @@ async fn main() -> Result<()> {
     let std_listener = create_keepalive_listener(http_addr)?;
     std_listener.set_nonblocking(true)?;
     let http_listener = tokio::net::TcpListener::from_std(std_listener)?;
-    tracing::info!("HTTP listening on {}", http_addr);
+    tracing::info!(addr = %http_addr, "HTTP listening");
 
     // HTTPS server (remote access via UPnP) — with TCP keepalive for cellular resilience
     // Build rustls ServerConfig with explicit ring provider to avoid
@@ -557,50 +554,9 @@ async fn main() -> Result<()> {
     let https_listener = create_keepalive_listener(https_addr)?;
     https_listener.set_nonblocking(true)?;
     let tls_config = tls::build_rustls_config(&cert_path, &key_path)?;
-    tracing::info!("HTTPS listening on {}", https_addr);
+    tracing::info!(addr = %https_addr, "HTTPS listening");
 
     let http_app = app.clone().layer(axum_mw::from_fn(middleware::mark_local));
-
-    // Tailscale listener (optional — only when method=tailscale and auth key is available)
-    #[cfg(feature = "tailscale")]
-    {
-        let ts_method = config.remote_access.method.as_str();
-        let ts_auth_key = config
-            .remote_access
-            .tailscale_auth_key
-            .clone()
-            .or_else(|| std::env::var("TS_AUTHKEY").ok());
-
-        if ts_method == "tailscale" && config.remote_access.enabled {
-            if let Some(auth_key) = ts_auth_key {
-                let ts_app = app.clone().layer(axum_mw::from_fn(middleware::mark_remote));
-                let ts_state = state.clone();
-                let ts_port = config.server.port;
-
-                match start_tailscale_listener(auth_key, ts_port, ts_app, &ts_state).await {
-                    Ok(()) => {}
-                    Err(e) => {
-                        tracing::error!("tailscale startup failed: {e}");
-                        let mut status = ts_state.remote_access.status.write().await;
-                        status.enabled = true;
-                        status.method = "tailscale".to_string();
-                        status.status = "error".to_string();
-                        status.error_message = Some(format!("{e}"));
-                    }
-                }
-            } else {
-                tracing::warn!(
-                    "tailscale remote access enabled but no auth key — \
-                     set tailscale_auth_key in config or TS_AUTHKEY env var"
-                );
-                let mut status = state.remote_access.status.write().await;
-                status.enabled = true;
-                status.method = "tailscale".to_string();
-                status.status = "error".to_string();
-                status.error_message = Some("no auth key configured".into());
-            }
-        }
-    }
 
     let https_app = app.layer(axum_mw::from_fn(middleware::mark_remote));
 
@@ -650,9 +606,6 @@ async fn main() -> Result<()> {
         }
     };
 
-    // Cleanup UPnP
-    state.remote_access.stop().await;
-
     // Abort both listeners
     http_task.abort();
     https_task.abort();
@@ -670,71 +623,6 @@ async fn main() -> Result<()> {
         tracing::error!("exec failed: {err}");
         std::process::exit(1);
     }
-
-    Ok(())
-}
-
-/// Start a Tailscale node and serve the axum app on the tailnet.
-#[cfg(feature = "tailscale")]
-async fn start_tailscale_listener(
-    auth_key: String,
-    port: u16,
-    app: Router,
-    state: &Arc<AppState>,
-) -> anyhow::Result<()> {
-    use rust_tailscale::{TailscaleConfig, TailscaleServer};
-
-    let system_hostname = hostname::get()
-        .ok()
-        .and_then(|h| h.into_string().ok())
-        .unwrap_or_else(|| "riff".to_string());
-    // Tailscale hostnames can't have dots
-    let ts_hostname = system_hostname.split('.').next().unwrap_or("riff");
-
-    let ts_config = TailscaleConfig::builder()
-        .hostname(format!("riff-{ts_hostname}"))
-        .auth_key(auth_key)
-        .ephemeral(true)
-        .build()
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
-
-    let ts_server = TailscaleServer::new(ts_config);
-    ts_server.start().await.map_err(|e| anyhow::anyhow!("{e}"))?;
-
-    let identity = ts_server.identity().await.map_err(|e| anyhow::anyhow!("{e}"))?;
-    tracing::info!(
-        ipv4 = %identity.ipv4,
-        fqdn = %identity.fqdn,
-        "tailscale node joined tailnet"
-    );
-
-    let ts_listener = ts_server
-        .listen_tcp(&format!(":{port}"))
-        .await
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
-
-    // Update remote access status
-    let fqdn = identity.fqdn.trim_end_matches('.').to_string();
-    {
-        let mut status = state.remote_access.status.write().await;
-        status.enabled = true;
-        status.method = "tailscale".to_string();
-        status.status = "active".to_string();
-        status.public_address = Some(format!("http://{}:{}", fqdn, port));
-        status.tailscale_fqdn = Some(fqdn.clone());
-        status.error_message = None;
-    }
-
-    let handle = tokio::spawn(async move {
-        // Keep ts_server alive — dropping it would tear down the WireGuard tunnel
-        let _ts_server = ts_server;
-        if let Err(e) = axum::serve(ts_listener, app).await {
-            tracing::error!("tailscale serve error: {e}");
-        }
-    });
-
-    state.remote_access.set_tailscale_handle(handle).await;
-    tracing::info!("tailscale remote access active on http://{}:{}", fqdn, port);
 
     Ok(())
 }
@@ -830,7 +718,7 @@ async fn run_download_processor(state: Arc<AppState>) {
         .await;
         if let Ok(r) = recovered {
             if r.rows_affected() > 0 {
-                tracing::info!("re-queued {} interrupted download(s)", r.rows_affected());
+                tracing::info!(count = r.rows_affected(), "re-queued interrupted downloads");
             }
         }
 
@@ -965,7 +853,7 @@ async fn run_download_processor(state: Arc<AppState>) {
                         track.disc_number,
                         detail.album.year,
                     ) {
-                        tracing::warn!("failed to write tags for {}: {e}", track.title);
+                        tracing::warn!(track = %track.title, error = %e, "failed to write tags");
                     }
                     completed += 1;
                     let _ = sqlx::query("UPDATE download_queue SET tracks_completed = ? WHERE id = ?")
@@ -975,7 +863,7 @@ async fn run_download_processor(state: Arc<AppState>) {
                         .await;
                 }
                 Err(e) => {
-                    tracing::warn!("download track {} failed: {e}", track.title);
+                    tracing::warn!(track = %track.title, error = %e, "download track failed");
                     let _ = sqlx::query("UPDATE download_queue SET status = 'failed', error = ? WHERE id = ?")
                         .bind(format!("track '{}' failed: {e}", track.title))
                         .bind(&dl_id)
@@ -1002,7 +890,7 @@ async fn run_download_processor(state: Arc<AppState>) {
             st.as_ref().map(|s| s.0.as_str()) == Some("cancelled")
         };
         if was_cancelled {
-            tracing::info!("download {dl_id} cancelled, cleaning up {completed} tracks on disk");
+            tracing::info!(download_id = %dl_id, tracks = completed, "download cancelled, cleaning up");
             cleanup_cancelled_download(&state.db, &album_dir, None).await;
             continue;
         }
@@ -1027,10 +915,10 @@ async fn run_download_processor(state: Arc<AppState>) {
         .await;
 
         tracing::info!(
-            "download complete: {} - {} ({} tracks), starting post-processing",
-            detail.album.artist.name,
-            detail.album.title,
-            completed
+            artist = %detail.album.artist.name,
+            album = %detail.album.title,
+            tracks = completed,
+            "download complete, starting post-processing",
         );
 
         // Scan library so the new album appears in the DB immediately
@@ -1039,8 +927,10 @@ async fn run_download_processor(state: Arc<AppState>) {
             match scanner::scan_library(&state.db, &library_path, &resolved_library_id).await {
                 Ok(result) => {
                     tracing::info!(
-                        "post-download scan: +{} artists, +{} albums, +{} tracks",
-                        result.artists_added, result.albums_added, result.tracks_added
+                        artists_added = result.artists_added,
+                        albums_added = result.albums_added,
+                        tracks_added = result.tracks_added,
+                        "post-download scan complete",
                     );
                     state.event_bus.emit(plugin::events::ServerEvent::ScanCompleted {
                         library_id: resolved_library_id.clone(),
@@ -1078,7 +968,7 @@ async fn run_download_processor(state: Arc<AppState>) {
                             .await;
                     }
                 }
-                Err(e) => tracing::warn!("post-download scan failed: {e}"),
+                Err(e) => tracing::warn!(error = %e, "post-download scan failed"),
             }
         }
 
@@ -1091,7 +981,7 @@ async fn run_download_processor(state: Arc<AppState>) {
                 let _ = sqlx::query("UPDATE download_queue SET processing_stage = 'enriching' WHERE id = ?")
                     .bind(&dl_id).execute(&state.db).await;
                 if let Err(e) = musicbrainz::enrichment::enrich_album(&state.db, local_album_id).await {
-                    tracing::warn!("post-download enrichment failed for {}: {e}", local_album_id);
+                    tracing::warn!(album_id = %local_album_id, error = %e, "post-download enrichment failed");
                 }
             }
 
@@ -1124,8 +1014,8 @@ async fn run_download_processor(state: Arc<AppState>) {
                             artist_name,
                             release_date.as_deref(),
                         ).await {
-                            Ok(count) => tracing::info!("post-download editorial: {count} reviews added for {local_album_id}"),
-                            Err(e) => tracing::warn!("post-download editorial failed for {local_album_id}: {e}"),
+                            Ok(count) => tracing::info!(album_id = %local_album_id, reviews = count, "post-download editorial complete"),
+                            Err(e) => tracing::warn!(album_id = %local_album_id, error = %e, "post-download editorial failed"),
                         }
                     }
                 }
@@ -1152,7 +1042,7 @@ async fn run_download_processor(state: Arc<AppState>) {
             st.as_ref().map(|s| s.0.as_str()) == Some("cancelled")
         };
         if was_cancelled {
-            tracing::info!("download {dl_id} cancelled during processing, cleaning up");
+            tracing::info!(download_id = %dl_id, "download cancelled during processing, cleaning up");
             cleanup_cancelled_download(
                 &state.db,
                 &album_dir,

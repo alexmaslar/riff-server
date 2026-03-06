@@ -14,8 +14,6 @@ pub struct Config {
     #[serde(default)]
     pub metadata: MetadataConfig,
     #[serde(default)]
-    pub remote_access: RemoteAccessConfig,
-    #[serde(default)]
     pub streaming: StreamingConfig,
     #[serde(default)]
     pub plugins: HashMap<String, PluginConfig>,
@@ -118,22 +116,6 @@ pub struct EnrichmentConfig {
     pub download_covers: bool,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct RemoteAccessConfig {
-    #[serde(default)]
-    pub enabled: bool,
-    /// Preferred remote access method: upnp | port_forwarding | external_url | tailscale
-    #[serde(default = "default_remote_method")]
-    pub method: String,
-    #[serde(default)]
-    pub external_url: Option<String>,
-    #[serde(default)]
-    pub cert_fingerprint: Option<String>,
-    /// Tailscale auth key (or set TS_AUTHKEY env var)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tailscale_auth_key: Option<String>,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StreamingConfig {
     #[serde(default = "default_remote_bitrate")]
@@ -174,10 +156,6 @@ pub struct PluginConfig {
     pub enabled: bool,
     #[serde(flatten)]
     pub settings: HashMap<String, serde_json::Value>,
-}
-
-fn default_remote_method() -> String {
-    "upnp".to_string()
 }
 
 fn default_true() -> bool {
@@ -253,7 +231,6 @@ impl Default for Config {
             library: LibraryConfig::default(),
             auth: AuthConfig::default(),
             metadata: MetadataConfig::default(),
-            remote_access: RemoteAccessConfig::default(),
             streaming: StreamingConfig::default(),
             plugins: HashMap::new(),
             plugin_directory: None,
@@ -397,22 +374,6 @@ mod tests {
         let config = EnrichmentConfig::default();
         assert!(config.auto_enrich);
         assert!(config.download_covers);
-    }
-
-    #[test]
-    fn test_default_remote_access_config() {
-        let config = RemoteAccessConfig::default();
-        assert!(!config.enabled);
-        assert!(config.external_url.is_none());
-    }
-
-    #[test]
-    fn test_remote_access_serde_default_method() {
-        // When remote_access section exists but method is omitted,
-        // serde uses the default_remote_method function
-        let yaml = "remote_access:\n  enabled: false\n";
-        let config = Config::load_from_str(yaml).unwrap();
-        assert_eq!(config.remote_access.method, "upnp");
     }
 
     #[test]

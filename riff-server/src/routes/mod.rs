@@ -17,7 +17,6 @@ pub mod library;
 pub mod plugins;
 pub mod playlists;
 pub mod podcasts;
-pub mod remote_access;
 pub mod smart_playlist;
 pub mod streaming;
 pub mod tracks;
