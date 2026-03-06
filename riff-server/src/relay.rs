@@ -19,6 +19,51 @@ use crate::AppState;
 
 /// Run the relay tunnel client as a background task.
 /// Connects outbound to the relay service and processes proxied requests.
+/// Derive the HTTP base URL from the WebSocket tunnel URL.
+/// e.g. "wss://relay.riff.audio/ws/tunnel" -> "https://relay.riff.audio"
+fn relay_base_url(ws_url: &str) -> String {
+    let http_url = ws_url
+        .replace("wss://", "https://")
+        .replace("ws://", "http://");
+    // Strip path — find the first '/' after the scheme's "://"
+    let after_scheme = if http_url.starts_with("https://") { 8 } else { 7 };
+    if let Some(slash_pos) = http_url[after_scheme..].find('/') {
+        http_url[..after_scheme + slash_pos].to_string()
+    } else {
+        http_url
+    }
+}
+
+/// Register with the relay service to obtain server_id and api_key.
+async fn register_with_relay(state: &Arc<AppState>, base_url: &str) -> anyhow::Result<(String, String)> {
+    let url = format!("{base_url}/register");
+    tracing::info!(url = %url, "registering with relay");
+
+    let resp = reqwest::Client::new()
+        .post(&url)
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let body: serde_json::Value = resp.json().await?;
+    let server_id = body["server_id"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("missing server_id in registration response"))?
+        .to_string();
+    let api_key = body["api_key"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("missing api_key in registration response"))?
+        .to_string();
+
+    // Save credentials to config
+    let mut config = state.config.write().await;
+    config.set_relay_identity(server_id.clone(), api_key.clone());
+    config.save()?;
+    tracing::info!(server_id = %server_id, "registered with relay");
+
+    Ok((server_id, api_key))
+}
+
 pub async fn run_relay_tunnel(state: Arc<AppState>, router: Router) {
     let config = state.config.read().await;
     if !config.relay.enabled {
@@ -27,21 +72,24 @@ pub async fn run_relay_tunnel(state: Arc<AppState>, router: Router) {
     }
 
     let url = config.relay.url.clone();
-    let server_id = match config.relay.server_id.clone() {
-        Some(id) => id,
-        None => {
-            tracing::warn!("relay enabled but no server_id configured");
-            return;
-        }
-    };
-    let api_key = match config.relay.api_key.clone() {
-        Some(key) => key,
-        None => {
-            tracing::warn!("relay enabled but no api_key configured");
-            return;
-        }
-    };
+    let has_identity = config.has_relay_identity();
+    let existing_server_id = config.relay.server_id.clone();
+    let existing_api_key = config.relay.api_key.clone();
     drop(config);
+
+    // Register with relay if we don't have credentials yet
+    let (server_id, api_key) = if has_identity {
+        (existing_server_id.unwrap(), existing_api_key.unwrap())
+    } else {
+        let base_url = relay_base_url(&url);
+        match register_with_relay(&state, &base_url).await {
+            Ok(creds) => creds,
+            Err(e) => {
+                tracing::error!(error = %e, "failed to register with relay");
+                return;
+            }
+        }
+    };
 
     let mut backoff = Duration::from_secs(1);
     let max_backoff = Duration::from_secs(30);

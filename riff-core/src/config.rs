@@ -345,29 +345,16 @@ impl Config {
         })
     }
 
-    /// Derive deterministic relay identity from the JWT secret.
-    /// Returns true if identity was newly generated (caller should save config).
-    pub fn ensure_relay_identity(&mut self) -> bool {
-        if self.relay.server_id.is_some() && self.relay.api_key.is_some() {
-            return false;
-        }
-        use hmac::{Hmac, Mac};
-        use sha2::{Digest, Sha256};
-        type HmacSha256 = Hmac<Sha256>;
+    /// Check whether relay credentials (server_id + api_key) are present.
+    /// If missing, they must be obtained by calling the relay's registration endpoint.
+    pub fn has_relay_identity(&self) -> bool {
+        self.relay.server_id.is_some() && self.relay.api_key.is_some()
+    }
 
-        // server_id = first 12 hex chars of SHA256(jwt_secret)
-        let hash = Sha256::digest(self.auth.jwt_secret.as_bytes());
-        let server_id = hex::encode(&hash[..6]); // 6 bytes = 12 hex chars
-
-        // api_key = HMAC-SHA256(jwt_secret, server_id) as hex
-        let mut mac = HmacSha256::new_from_slice(self.auth.jwt_secret.as_bytes())
-            .expect("HMAC accepts any key length");
-        mac.update(server_id.as_bytes());
-        let api_key = hex::encode(mac.finalize().into_bytes());
-
+    /// Store relay credentials obtained from the relay registration endpoint.
+    pub fn set_relay_identity(&mut self, server_id: String, api_key: String) {
         self.relay.server_id = Some(server_id);
         self.relay.api_key = Some(api_key);
-        true
     }
 
     pub fn save(&self) -> anyhow::Result<()> {
@@ -610,32 +597,18 @@ relay:
     }
 
     #[test]
-    fn test_ensure_relay_identity() {
-        let mut config = Config::default();
-        assert!(config.relay.server_id.is_none());
-        let generated = config.ensure_relay_identity();
-        assert!(generated);
-        assert!(config.relay.server_id.is_some());
-        assert!(config.relay.api_key.is_some());
-        // Deterministic: same jwt_secret → same identity
-        let sid1 = config.relay.server_id.clone().unwrap();
-        let key1 = config.relay.api_key.clone().unwrap();
-        config.relay.server_id = None;
-        config.relay.api_key = None;
-        config.ensure_relay_identity();
-        assert_eq!(config.relay.server_id.as_deref(), Some(sid1.as_str()));
-        assert_eq!(config.relay.api_key.as_deref(), Some(key1.as_str()));
+    fn test_has_relay_identity() {
+        let config = Config::default();
+        assert!(!config.has_relay_identity());
     }
 
     #[test]
-    fn test_ensure_relay_identity_idempotent() {
+    fn test_set_relay_identity() {
         let mut config = Config::default();
-        config.ensure_relay_identity();
-        let sid = config.relay.server_id.clone();
-        let key = config.relay.api_key.clone();
-        let generated = config.ensure_relay_identity();
-        assert!(!generated); // no-op when already set
-        assert_eq!(config.relay.server_id, sid);
-        assert_eq!(config.relay.api_key, key);
+        assert!(!config.has_relay_identity());
+        config.set_relay_identity("test-id".to_string(), "test-key".to_string());
+        assert!(config.has_relay_identity());
+        assert_eq!(config.relay.server_id.as_deref(), Some("test-id"));
+        assert_eq!(config.relay.api_key.as_deref(), Some("test-key"));
     }
 }

@@ -3505,7 +3505,6 @@ dependencies = [
  "extism",
  "governor",
  "hex",
- "hmac",
  "image",
  "jsonwebtoken",
  "rand 0.8.5",

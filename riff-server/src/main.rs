@@ -166,14 +166,8 @@ async fn main() -> Result<()> {
         .with(fmt_layer)
         .init();
 
-    let mut config = Config::load()?;
+    let config = Config::load()?;
     tracing::info!(port = config.server.port, "config loaded");
-
-    // Generate relay identity on first run (deterministic from jwt_secret)
-    if config.ensure_relay_identity() {
-        config.save()?;
-        tracing::info!(server_id = config.relay.server_id.as_deref().unwrap_or("?"), "relay identity generated");
-    }
 
     if config.metadata.enrichment.auto_enrich {
         tracing::info!("metadata enrichment enabled (MusicBrainz)");
