@@ -1,5 +1,6 @@
 use anyhow::Result;
 use chrono::{NaiveDate, NaiveDateTime, Utc};
+use image::RgbaImage;
 use sqlx::{Row, SqlitePool};
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
@@ -1583,34 +1584,32 @@ fn camelot_distance(key_a: &str, key_b: &str) -> f64 {
 // ─── Cover Generation ────────────────────────────────────────────────────────
 
 async fn generate_mix_cover(pool: &SqlitePool, mix_id: &str) -> Result<Option<PathBuf>> {
-    // Get distinct album cover paths from the mix's tracks (up to 4)
-    let rows = sqlx::query_as::<_, (String,)>(
-        "SELECT DISTINCT a.cover_art_path
-         FROM daily_mix_tracks dmt
-         JOIN tracks t ON dmt.track_id = t.id
-         JOIN albums a ON t.album_id = a.id
-         WHERE dmt.mix_id = ? AND a.cover_art_path IS NOT NULL
-         ORDER BY dmt.sort_order
-         LIMIT 4",
+    // Query mix metadata
+    let mix_row = sqlx::query_as::<_, (String, String)>(
+        "SELECT mix_type, seed_value FROM daily_mixes WHERE id = ?",
     )
     .bind(mix_id)
-    .fetch_all(pool)
+    .fetch_optional(pool)
     .await?;
 
-    if rows.is_empty() {
+    let Some((mix_type, seed_value)) = mix_row else {
         return Ok(None);
-    }
+    };
 
-    let cover_paths: Vec<PathBuf> = rows.iter().map(|(p,)| PathBuf::from(p)).collect();
+    let result = match mix_type.as_str() {
+        "artist" => generate_artist_cover(pool, mix_id, &seed_value).await?,
+        "genre" => generate_genre_cover(pool, mix_id, &seed_value).await?,
+        "deep_cuts" => generate_deep_cuts_cover_dispatch(pool, mix_id).await?,
+        "decade" => generate_decade_cover(pool, mix_id, &seed_value).await?,
+        _ => generate_legacy_collage_cover(pool, mix_id).await?,
+    };
 
-    let result = tokio::task::spawn_blocking(move || {
-        let path_refs: Vec<&Path> = cover_paths.iter().map(|p| p.as_path()).collect();
-        crate::mix_collage::generate_mix_collage(&path_refs)
-    })
-    .await??;
-    let mix_id_owned = mix_id.to_string();
+    let Some(cover_image) = result else {
+        return Ok(None);
+    };
 
     // Save as JPEG to cache dir
+    let mix_id_owned = mix_id.to_string();
     let cache_dir = crate::mix_collage::get_cache_dir()?;
     let filename = format!("mix_{}.jpg", mix_id_owned);
     let file_path = cache_dir.join(&filename);
@@ -1618,17 +1617,203 @@ async fn generate_mix_cover(pool: &SqlitePool, mix_id: &str) -> Result<Option<Pa
     let file = std::fs::File::create(&file_path)?;
     let mut buf = std::io::BufWriter::new(file);
     let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, 85);
-    result.write_with_encoder(encoder)?;
+    cover_image.write_with_encoder(encoder)?;
 
-    // Update the mix row with the cover path
     sqlx::query("UPDATE daily_mixes SET cover_path = ? WHERE id = ?")
         .bind(file_path.to_str().unwrap())
         .bind(&mix_id_owned)
         .execute(pool)
         .await?;
 
-    info!("generated collage cover for mix {mix_id_owned}");
+    info!("generated {mix_type} cover for mix {mix_id_owned}");
     Ok(Some(file_path))
+}
+
+/// Fetch distinct album cover paths for a mix (up to `limit`).
+async fn fetch_mix_cover_paths(pool: &SqlitePool, mix_id: &str, limit: u32) -> Result<Vec<PathBuf>> {
+    let rows = sqlx::query_as::<_, (String,)>(
+        "SELECT DISTINCT a.cover_art_path
+         FROM daily_mix_tracks dmt
+         JOIN tracks t ON dmt.track_id = t.id
+         JOIN albums a ON t.album_id = a.id
+         WHERE dmt.mix_id = ? AND a.cover_art_path IS NOT NULL
+         ORDER BY dmt.sort_order
+         LIMIT ?",
+    )
+    .bind(mix_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows.into_iter().map(|(p,)| PathBuf::from(p)).collect())
+}
+
+/// Load cover images from paths (skips files that fail to open).
+fn load_cover_images(paths: &[PathBuf]) -> Vec<RgbaImage> {
+    paths
+        .iter()
+        .filter_map(|p| image::open(p).ok().map(|img| img.to_rgba8()))
+        .collect()
+}
+
+async fn generate_artist_cover(
+    pool: &SqlitePool,
+    mix_id: &str,
+    seed_value: &str,
+) -> Result<Option<image::DynamicImage>> {
+    // Parse "artist:<uuid>"
+    let artist_id = seed_value.strip_prefix("artist:").unwrap_or(seed_value);
+
+    // Try to download the artist image
+    let artist_image = fetch_artist_image(pool, artist_id).await;
+
+    let cover_paths = fetch_mix_cover_paths(pool, mix_id, 4).await?;
+    if cover_paths.is_empty() && artist_image.is_none() {
+        return Ok(None);
+    }
+
+    let artist_rgba = artist_image.map(|img| img.to_rgba8());
+
+    let result = tokio::task::spawn_blocking(move || {
+        let path_refs: Vec<&Path> = cover_paths.iter().map(|p| p.as_path()).collect();
+        crate::mix_collage::generate_artist_mix_cover(artist_rgba.as_ref(), &path_refs)
+    })
+    .await??;
+
+    Ok(Some(result))
+}
+
+async fn generate_genre_cover(
+    pool: &SqlitePool,
+    mix_id: &str,
+    seed_value: &str,
+) -> Result<Option<image::DynamicImage>> {
+    let genre = seed_value.strip_prefix("genre:").unwrap_or(seed_value);
+    let cover_paths = fetch_mix_cover_paths(pool, mix_id, 5).await?;
+
+    if cover_paths.is_empty() {
+        return Ok(None);
+    }
+
+    let genre_owned = genre.to_string();
+    let result = tokio::task::spawn_blocking(move || {
+        let images = load_cover_images(&cover_paths);
+        crate::mix_collage::generate_genre_mix_cover(&genre_owned, &images)
+    })
+    .await??;
+
+    Ok(Some(result))
+}
+
+async fn generate_deep_cuts_cover_dispatch(
+    pool: &SqlitePool,
+    mix_id: &str,
+) -> Result<Option<image::DynamicImage>> {
+    // Find the most-represented artist in this mix
+    let top_artist = sqlx::query_as::<_, (String,)>(
+        "SELECT t.artist_id
+         FROM daily_mix_tracks dmt
+         JOIN tracks t ON dmt.track_id = t.id
+         WHERE dmt.mix_id = ?
+         GROUP BY t.artist_id
+         ORDER BY COUNT(*) DESC
+         LIMIT 1",
+    )
+    .bind(mix_id)
+    .fetch_optional(pool)
+    .await?;
+
+    let artist_image = if let Some((artist_id,)) = &top_artist {
+        fetch_artist_image(pool, artist_id).await
+    } else {
+        None
+    };
+
+    let cover_paths = fetch_mix_cover_paths(pool, mix_id, 4).await?;
+    if cover_paths.is_empty() && artist_image.is_none() {
+        return Ok(None);
+    }
+
+    let artist_rgba = artist_image.map(|img| img.to_rgba8());
+
+    let result = tokio::task::spawn_blocking(move || {
+        let path_refs: Vec<&Path> = cover_paths.iter().map(|p| p.as_path()).collect();
+        crate::mix_collage::generate_deep_cuts_cover(artist_rgba.as_ref(), &path_refs)
+    })
+    .await??;
+
+    Ok(Some(result))
+}
+
+async fn generate_decade_cover(
+    pool: &SqlitePool,
+    mix_id: &str,
+    seed_value: &str,
+) -> Result<Option<image::DynamicImage>> {
+    // Parse "decade:1980s" → 1980
+    let decade_str = seed_value.strip_prefix("decade:").unwrap_or(seed_value);
+    let decade: i32 = decade_str
+        .trim_end_matches('s')
+        .parse()
+        .unwrap_or(2000);
+
+    let cover_paths = fetch_mix_cover_paths(pool, mix_id, 4).await?;
+
+    if cover_paths.is_empty() {
+        return Ok(None);
+    }
+
+    let result = tokio::task::spawn_blocking(move || {
+        let images = load_cover_images(&cover_paths);
+        crate::mix_collage::generate_decade_mix_cover(decade, &images)
+    })
+    .await??;
+
+    Ok(Some(result))
+}
+
+/// Fetch artist image_url from DB and download it.
+async fn fetch_artist_image(pool: &SqlitePool, artist_id: &str) -> Option<image::DynamicImage> {
+    let row = sqlx::query_as::<_, (Option<String>,)>(
+        "SELECT image_url FROM artists WHERE id = ?",
+    )
+    .bind(artist_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten();
+
+    let image_url = row.and_then(|(url,)| url)?;
+    if image_url.is_empty() {
+        return None;
+    }
+
+    match crate::mix_collage::download_artist_image(artist_id, &image_url).await {
+        Ok(img) => img,
+        Err(e) => {
+            warn!("failed to download artist image for {artist_id}: {e}");
+            None
+        }
+    }
+}
+
+/// Legacy fallback: 2×2 collage (for unknown mix types).
+async fn generate_legacy_collage_cover(
+    pool: &SqlitePool,
+    mix_id: &str,
+) -> Result<Option<image::DynamicImage>> {
+    let cover_paths = fetch_mix_cover_paths(pool, mix_id, 4).await?;
+    if cover_paths.is_empty() {
+        return Ok(None);
+    }
+
+    let result = tokio::task::spawn_blocking(move || {
+        let path_refs: Vec<&Path> = cover_paths.iter().map(|p| p.as_path()).collect();
+        crate::mix_collage::generate_mix_collage(&path_refs)
+    })
+    .await??;
+
+    Ok(Some(result))
 }
 
 // ─── DB Insert ───────────────────────────────────────────────────────────────
