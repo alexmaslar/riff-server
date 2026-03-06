@@ -336,31 +336,35 @@ pub fn generate_decade_mix_cover(decade: i32, cover_images: &[RgbaImage]) -> Res
     let (bg_color, _) = decade_gradient_colors(decade);
     let mut canvas = RgbaImage::from_pixel(size, size, bg_color);
 
-    // 2×2 balanced layout: (diameter, center_x, center_y)
-    let circles: [(u32, i64, i64); 4] = [
-        (340, 280, 300),
-        (340, 744, 300),
-        (340, 280, 724),
-        (340, 744, 724),
+    // Triangular layout: two smaller behind, one large in front (drawn last)
+    // Draw order matters — back circles first, then large on top
+    let layout: [(u32, i64, i64); 3] = [
+        (300, 270, 490),  // left (behind)
+        (300, 754, 490),  // right (behind)
+        (420, 512, 370),  // center-top (in front)
     ];
 
-    for (i, &(diam, cx, cy)) in circles.iter().enumerate() {
+    let draw_circle = |canvas: &mut RgbaImage, idx: usize, diam: u32, cx: i64, cy: i64| {
         let x = cx - (diam as i64 / 2);
         let y = cy - (diam as i64 / 2);
 
-        if let Some(img) = cover_images.get(i) {
+        if let Some(img) = cover_images.get(idx) {
             let resized = image::imageops::resize(img, diam, diam, image::imageops::FilterType::Lanczos3);
             let mut circle = resized;
             apply_circular_mask(&mut circle);
-            image::imageops::overlay(&mut canvas, &circle, x, y);
+            image::imageops::overlay(canvas, &circle, x, y);
         } else {
-            // Solid warm-tone circle fallback
             let fill = darken(bg_color, 0.4);
             let mut solid = RgbaImage::from_pixel(diam, diam, fill);
             apply_circular_mask(&mut solid);
-            image::imageops::overlay(&mut canvas, &solid, x, y);
+            image::imageops::overlay(canvas, &solid, x, y);
         }
-    }
+    };
+
+    // Index mapping: cover_images[0] → large front, [1] → left, [2] → right
+    draw_circle(&mut canvas, 1, layout[0].0, layout[0].1, layout[0].2);
+    draw_circle(&mut canvas, 2, layout[1].0, layout[1].1, layout[1].2);
+    draw_circle(&mut canvas, 0, layout[2].0, layout[2].1, layout[2].2);
 
     Ok(DynamicImage::ImageRgba8(canvas))
 }

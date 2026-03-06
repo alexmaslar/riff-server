@@ -1758,7 +1758,7 @@ async fn generate_decade_cover(
         .parse()
         .unwrap_or(2000);
 
-    let cover_paths = fetch_mix_cover_paths(pool, mix_id, 4).await?;
+    let cover_paths = fetch_mix_cover_paths(pool, mix_id, 3).await?;
 
     if cover_paths.is_empty() {
         return Ok(None);
