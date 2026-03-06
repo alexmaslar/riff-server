@@ -4,6 +4,8 @@ mod middleware;
 pub mod pipeline;
 mod plugin_reload;
 mod routes;
+mod relay;
+mod relay_protocol;
 mod tls;
 mod transcode;
 
@@ -116,6 +118,10 @@ pub struct AppState {
     pub dev_plugin_names: RwLock<std::collections::HashSet<String>>,
     /// Cache for resolved library IDs (invalidated on library add/remove/modify).
     pub library_ids_cache: RwLock<Option<Vec<String>>>,
+    /// TLS certificate fingerprint (SHA-256, base64).
+    pub cert_fingerprint: String,
+    /// Whether the relay tunnel is currently connected.
+    pub relay_connected: AtomicBool,
 }
 
 // Background pipeline functions are in pipeline.rs
@@ -160,8 +166,14 @@ async fn main() -> Result<()> {
         .with(fmt_layer)
         .init();
 
-    let config = Config::load()?;
+    let mut config = Config::load()?;
     tracing::info!(port = config.server.port, "config loaded");
+
+    // Generate relay identity on first run (deterministic from jwt_secret)
+    if config.ensure_relay_identity() {
+        config.save()?;
+        tracing::info!(server_id = config.relay.server_id.as_deref().unwrap_or("?"), "relay identity generated");
+    }
 
     if config.metadata.enrichment.auto_enrich {
         tracing::info!("metadata enrichment enabled (MusicBrainz)");
@@ -276,6 +288,8 @@ async fn main() -> Result<()> {
         pipeline_notify: Notify::new(),
         dev_plugin_names: RwLock::new(std::collections::HashSet::new()),
         library_ids_cache: RwLock::new(None),
+        cert_fingerprint: cert_fingerprint.clone(),
+        relay_connected: AtomicBool::new(false),
     });
 
 
@@ -471,6 +485,8 @@ async fn main() -> Result<()> {
         .route("/user/account", put(routes::users::update_account))
         // Libraries (read-only for non-admin)
         .route("/libraries", get(routes::libraries::list_libraries))
+        // Relay info
+        .route("/relay-info", get(routes::relay::relay_info))
         .route_layer(axum_mw::from_fn_with_state(
             state.clone(),
             middleware::require_auth,
@@ -538,6 +554,15 @@ async fn main() -> Result<()> {
         )
         .layer(cors)
         .with_state(state.clone());
+
+    // Relay tunnel (outbound WS to relay service for remote access)
+    {
+        let relay_state = state.clone();
+        let relay_router = app.clone();
+        tokio::spawn(async move {
+            relay::run_relay_tunnel(relay_state, relay_router).await;
+        });
+    }
 
     // HTTP server (local LAN access) — with TCP keepalive for cellular resilience
     let http_addr: SocketAddr = format!("0.0.0.0:{}", config.server.port).parse()?;

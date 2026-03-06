@@ -21,6 +21,35 @@ pub struct Config {
     pub plugin_directory: Option<PathBuf>,
     #[serde(default)]
     pub dev_plugins: HashMap<String, DevPluginConfig>,
+    #[serde(default)]
+    pub relay: RelayConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RelayConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_relay_url")]
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+}
+
+fn default_relay_url() -> String {
+    "wss://relay.riff.audio/ws/tunnel".to_string()
+}
+
+impl Default for RelayConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            url: default_relay_url(),
+            server_id: None,
+            api_key: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -235,6 +264,7 @@ impl Default for Config {
             plugins: HashMap::new(),
             plugin_directory: None,
             dev_plugins: HashMap::new(),
+            relay: RelayConfig::default(),
         }
     }
 }
@@ -313,6 +343,31 @@ impl Config {
                 .join("riff")
                 .join("plugins")
         })
+    }
+
+    /// Derive deterministic relay identity from the JWT secret.
+    /// Returns true if identity was newly generated (caller should save config).
+    pub fn ensure_relay_identity(&mut self) -> bool {
+        if self.relay.server_id.is_some() && self.relay.api_key.is_some() {
+            return false;
+        }
+        use hmac::{Hmac, Mac};
+        use sha2::{Digest, Sha256};
+        type HmacSha256 = Hmac<Sha256>;
+
+        // server_id = first 12 hex chars of SHA256(jwt_secret)
+        let hash = Sha256::digest(self.auth.jwt_secret.as_bytes());
+        let server_id = hex::encode(&hash[..6]); // 6 bytes = 12 hex chars
+
+        // api_key = HMAC-SHA256(jwt_secret, server_id) as hex
+        let mut mac = HmacSha256::new_from_slice(self.auth.jwt_secret.as_bytes())
+            .expect("HMAC accepts any key length");
+        mac.update(server_id.as_bytes());
+        let api_key = hex::encode(mac.finalize().into_bytes());
+
+        self.relay.server_id = Some(server_id);
+        self.relay.api_key = Some(api_key);
+        true
     }
 
     pub fn save(&self) -> anyhow::Result<()> {
@@ -531,5 +586,56 @@ plugins:
         let genius = &config.plugins["genius"];
         assert!(genius.enabled);
         assert_eq!(genius.settings["api_key"], "token");
+    }
+
+    #[test]
+    fn test_default_relay_config() {
+        let config = RelayConfig::default();
+        assert!(config.enabled);
+        assert_eq!(config.url, "wss://relay.riff.audio/ws/tunnel");
+        assert!(config.server_id.is_none());
+        assert!(config.api_key.is_none());
+    }
+
+    #[test]
+    fn test_relay_config_deserialize() {
+        let yaml = r#"
+relay:
+  enabled: false
+  url: "wss://custom.relay.example.com/ws/tunnel"
+"#;
+        let config = Config::load_from_str(yaml).unwrap();
+        assert!(!config.relay.enabled);
+        assert_eq!(config.relay.url, "wss://custom.relay.example.com/ws/tunnel");
+    }
+
+    #[test]
+    fn test_ensure_relay_identity() {
+        let mut config = Config::default();
+        assert!(config.relay.server_id.is_none());
+        let generated = config.ensure_relay_identity();
+        assert!(generated);
+        assert!(config.relay.server_id.is_some());
+        assert!(config.relay.api_key.is_some());
+        // Deterministic: same jwt_secret → same identity
+        let sid1 = config.relay.server_id.clone().unwrap();
+        let key1 = config.relay.api_key.clone().unwrap();
+        config.relay.server_id = None;
+        config.relay.api_key = None;
+        config.ensure_relay_identity();
+        assert_eq!(config.relay.server_id.as_deref(), Some(sid1.as_str()));
+        assert_eq!(config.relay.api_key.as_deref(), Some(key1.as_str()));
+    }
+
+    #[test]
+    fn test_ensure_relay_identity_idempotent() {
+        let mut config = Config::default();
+        config.ensure_relay_identity();
+        let sid = config.relay.server_id.clone();
+        let key = config.relay.api_key.clone();
+        let generated = config.ensure_relay_identity();
+        assert!(!generated); // no-op when already set
+        assert_eq!(config.relay.server_id, sid);
+        assert_eq!(config.relay.api_key, key);
     }
 }

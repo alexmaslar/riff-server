@@ -36,3 +36,8 @@ rustls-pemfile = "2"
 socket2 = { version = "0.5", features = ["all"] }
 filetime = "0.2"
 unicode-normalization = "0.1"
+rmp-serde = "1"
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
+rand = "0.8"
+http = "1"
+http-body-util = "0.1"

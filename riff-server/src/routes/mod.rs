@@ -16,6 +16,7 @@ pub mod libraries;
 pub mod library;
 pub mod plugins;
 pub mod playlists;
+pub mod relay;
 pub mod podcasts;
 pub mod smart_playlist;
 pub mod streaming;
