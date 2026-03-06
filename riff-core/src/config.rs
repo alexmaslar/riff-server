@@ -27,8 +27,6 @@ pub struct Config {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RelayConfig {
-    #[serde(default = "default_true")]
-    pub enabled: bool,
     #[serde(default = "default_relay_url")]
     pub url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -44,7 +42,6 @@ fn default_relay_url() -> String {
 impl Default for RelayConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
             url: default_relay_url(),
             server_id: None,
             api_key: None,
@@ -578,7 +575,6 @@ plugins:
     #[test]
     fn test_default_relay_config() {
         let config = RelayConfig::default();
-        assert!(config.enabled);
         assert_eq!(config.url, "wss://relay.riff.audio/ws/tunnel");
         assert!(config.server_id.is_none());
         assert!(config.api_key.is_none());
@@ -588,11 +584,9 @@ plugins:
     fn test_relay_config_deserialize() {
         let yaml = r#"
 relay:
-  enabled: false
   url: "wss://custom.relay.example.com/ws/tunnel"
 "#;
         let config = Config::load_from_str(yaml).unwrap();
-        assert!(!config.relay.enabled);
         assert_eq!(config.relay.url, "wss://custom.relay.example.com/ws/tunnel");
     }
 

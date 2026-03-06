@@ -19,7 +19,6 @@ pub async fn relay_info(
     });
 
     Ok(Json(json!({
-        "enabled": relay.enabled,
         "relay_url": relay_url,
         "server_id": relay.server_id,
         "connected": state.relay_connected.load(Ordering::Relaxed),

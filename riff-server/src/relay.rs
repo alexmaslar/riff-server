@@ -66,11 +66,6 @@ async fn register_with_relay(state: &Arc<AppState>, base_url: &str) -> anyhow::R
 
 pub async fn run_relay_tunnel(state: Arc<AppState>, router: Router) {
     let config = state.config.read().await;
-    if !config.relay.enabled {
-        tracing::info!("relay tunnel disabled");
-        return;
-    }
-
     let url = config.relay.url.clone();
     let has_identity = config.has_relay_identity();
     let existing_server_id = config.relay.server_id.clone();
@@ -107,14 +102,6 @@ pub async fn run_relay_tunnel(state: Arc<AppState>, router: Router) {
         }
 
         state.relay_connected.store(false, Ordering::Relaxed);
-
-        // Check if still enabled before reconnecting
-        let config = state.config.read().await;
-        if !config.relay.enabled {
-            tracing::info!("relay disabled, stopping reconnect loop");
-            return;
-        }
-        drop(config);
 
         // Exponential backoff with ±50% jitter
         let jitter_factor = 0.5 + rand::random::<f64>(); // 0.5..1.5
