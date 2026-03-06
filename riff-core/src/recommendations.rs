@@ -18,7 +18,6 @@ struct AlbumFeatures {
     credits: HashSet<String>,
     label: Option<String>,
     year: Option<i32>,
-    bliss_centroid: Option<Vec<f64>>,
 }
 
 /// Generate album recommendations using metadata similarity (no AI needed).
@@ -109,7 +108,7 @@ async fn load_album_features(
         sqlx::query_as(&query_str).fetch_all(pool).await?
     };
 
-    // Collect album IDs for filtering credits and bliss features
+    // Collect album IDs for filtering credits
     let album_id_set: HashSet<&str> = rows.iter().map(|(id, ..)| id.as_str()).collect();
     let album_ids_json = serde_json::to_string(
         &album_id_set.iter().collect::<Vec<_>>()
@@ -128,28 +127,6 @@ async fn load_album_features(
         credits_map.entry(album_id).or_default().insert(name);
     }
 
-    // Fetch bliss centroids only for tracks in qualifying albums
-    let bliss_rows: Vec<(String, String)> = sqlx::query_as(
-        "SELECT album_id, bliss_features FROM tracks \
-         WHERE bliss_features IS NOT NULL \
-         AND album_id IN (SELECT value FROM json_each(?))",
-    )
-    .bind(&album_ids_json)
-    .fetch_all(pool)
-    .await?;
-
-    let mut bliss_map: HashMap<String, Vec<Vec<f64>>> = HashMap::new();
-    for (album_id, features_json) in &bliss_rows {
-        if let Ok(features) = serde_json::from_str::<Vec<f64>>(features_json) {
-            if !features.is_empty() {
-                bliss_map
-                    .entry(album_id.clone())
-                    .or_default()
-                    .push(features);
-            }
-        }
-    }
-
     let mut albums = Vec::with_capacity(rows.len());
     for (id, artist_id, year, genre_json, style_json, label, moods_json, descriptors_json, keywords_json) in rows
     {
@@ -166,23 +143,6 @@ async fn load_album_features(
 
         let credits = credits_map.remove(&id).unwrap_or_default();
 
-        let bliss_centroid = bliss_map.remove(&id).map(|vecs| {
-            let n = vecs.len() as f64;
-            let dim = vecs[0].len();
-            let mut centroid = vec![0.0_f64; dim];
-            for v in &vecs {
-                for (i, val) in v.iter().enumerate() {
-                    if i < dim {
-                        centroid[i] += val;
-                    }
-                }
-            }
-            for c in &mut centroid {
-                *c /= n;
-            }
-            centroid
-        });
-
         albums.push(AlbumFeatures {
             id,
             artist_id,
@@ -192,7 +152,6 @@ async fn load_album_features(
             credits,
             label: label.filter(|l| !l.is_empty()),
             year,
-            bliss_centroid,
         });
     }
 
@@ -379,20 +338,13 @@ fn compute_similarity(a: &AlbumFeatures, b: &AlbumFeatures) -> (f64, String) {
         _ => 0.0,
     };
 
-    // Bliss audio similarity (cosine)
-    let bliss_sim = match (&a.bliss_centroid, &b.bliss_centroid) {
-        (Some(ca), Some(cb)) if ca.len() == cb.len() => cosine_similarity(ca, cb).max(0.0),
-        _ => 0.0,
-    };
-
     // Weighted score
-    let score = (style_sim * 0.30
+    let score = (style_sim * 0.35
         + genre_sim * 0.20
         + tag_sim * 0.15
         + credits_sim * 0.15
         + year_sim * 0.10
-        + label_sim * 0.05
-        + bliss_sim * 0.05)
+        + label_sim * 0.05)
         .clamp(0.0, 1.0);
 
     // Build reason from top contributing signals
@@ -402,7 +354,7 @@ fn compute_similarity(a: &AlbumFeatures, b: &AlbumFeatures) -> (f64, String) {
         let shared: Vec<&String> = a.styles.intersection(&b.styles).collect();
         let names: Vec<&str> = shared.iter().map(|s| s.as_str()).take(3).collect();
         contributions.push((
-            style_sim * 0.30,
+            style_sim * 0.35,
             format!("Shares {} styles", names.join(", ")),
         ));
     }
@@ -433,9 +385,6 @@ fn compute_similarity(a: &AlbumFeatures, b: &AlbumFeatures) -> (f64, String) {
     }
     if tag_sim > 0.0 {
         contributions.push((tag_sim * 0.15, "Similar mood and sonic character".into()));
-    }
-    if bliss_sim > 0.3 {
-        contributions.push((bliss_sim * 0.05, "Similar sonic profile".into()));
     }
 
     contributions.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
@@ -468,17 +417,6 @@ fn jaccard(a: &HashSet<String>, b: &HashSet<String>) -> f64 {
     }
 }
 
-fn cosine_similarity(a: &[f64], b: &[f64]) -> f64 {
-    let dot: f64 = a.iter().zip(b).map(|(x, y)| x * y).sum();
-    let mag_a: f64 = a.iter().map(|x| x * x).sum::<f64>().sqrt();
-    let mag_b: f64 = b.iter().map(|x| x * x).sum::<f64>().sqrt();
-    if mag_a == 0.0 || mag_b == 0.0 {
-        0.0
-    } else {
-        dot / (mag_a * mag_b)
-    }
-}
-
 // --- Artist Recommendations -------------------------------------------------
 
 struct ArtistFeatures {
@@ -489,7 +427,6 @@ struct ArtistFeatures {
     credits: HashSet<String>,
     labels: HashSet<String>,
     year_range: Option<(i32, i32)>,
-    bliss_centroid: Option<Vec<f64>>,
 }
 
 /// Generate artist recommendations using metadata similarity (no AI needed).
@@ -649,30 +586,6 @@ async fn load_artist_features(
             .insert(credit_name);
     }
 
-    // Fetch bliss centroids only for qualifying artists
-    let bliss_rows: Vec<(String, String)> = sqlx::query_as(
-        "SELECT a.artist_id, t.bliss_features \
-         FROM tracks t \
-         JOIN albums a ON t.album_id = a.id \
-         WHERE t.bliss_features IS NOT NULL \
-         AND a.artist_id IN (SELECT value FROM json_each(?))",
-    )
-    .bind(&artist_ids_json)
-    .fetch_all(pool)
-    .await?;
-
-    let mut bliss_vecs: HashMap<String, Vec<Vec<f64>>> = HashMap::new();
-    for (artist_id, features_json) in &bliss_rows {
-        if let Ok(features) = serde_json::from_str::<Vec<f64>>(features_json) {
-            if !features.is_empty() {
-                bliss_vecs
-                    .entry(artist_id.clone())
-                    .or_default()
-                    .push(features);
-            }
-        }
-    }
-
     let target_ids: HashSet<&str> = artist_ids.iter().map(|(id,)| id.as_str()).collect();
 
     let mut artists = Vec::with_capacity(artist_ids.len());
@@ -693,23 +606,6 @@ async fn load_artist_features(
             Some((min, max))
         });
 
-        let bliss_centroid = bliss_vecs.remove(artist_id).map(|vecs| {
-            let n = vecs.len() as f64;
-            let dim = vecs[0].len();
-            let mut centroid = vec![0.0_f64; dim];
-            for v in &vecs {
-                for (i, val) in v.iter().enumerate() {
-                    if i < dim {
-                        centroid[i] += val;
-                    }
-                }
-            }
-            for c in &mut centroid {
-                *c /= n;
-            }
-            centroid
-        });
-
         artists.push(ArtistFeatures {
             id: artist_id.clone(),
             genres,
@@ -718,7 +614,6 @@ async fn load_artist_features(
             credits,
             labels,
             year_range,
-            bliss_centroid,
         });
     }
 
@@ -890,19 +785,12 @@ fn compute_artist_similarity(a: &ArtistFeatures, b: &ArtistFeatures) -> (f64, St
     // Label overlap
     let label_sim = jaccard(&a.labels, &b.labels);
 
-    // Bliss audio similarity
-    let bliss_sim = match (&a.bliss_centroid, &b.bliss_centroid) {
-        (Some(ca), Some(cb)) if ca.len() == cb.len() => cosine_similarity(ca, cb).max(0.0),
-        _ => 0.0,
-    };
-
-    let score = (style_sim * 0.30
+    let score = (style_sim * 0.35
         + genre_sim * 0.20
         + tag_sim * 0.15
         + credits_sim * 0.15
         + era_sim * 0.10
-        + label_sim * 0.05
-        + bliss_sim * 0.05)
+        + label_sim * 0.05)
         .clamp(0.0, 1.0);
 
     // Build reason
@@ -912,7 +800,7 @@ fn compute_artist_similarity(a: &ArtistFeatures, b: &ArtistFeatures) -> (f64, St
         let shared: Vec<&String> = a.styles.intersection(&b.styles).collect();
         let names: Vec<&str> = shared.iter().map(|s| s.as_str()).take(3).collect();
         contributions.push((
-            style_sim * 0.30,
+            style_sim * 0.35,
             format!("Shares {} styles", names.join(", ")),
         ));
     }
@@ -941,9 +829,6 @@ fn compute_artist_similarity(a: &ArtistFeatures, b: &ArtistFeatures) -> (f64, St
     }
     if tag_sim > 0.0 {
         contributions.push((tag_sim * 0.15, "Similar mood and sonic character".into()));
-    }
-    if bliss_sim > 0.3 {
-        contributions.push((bliss_sim * 0.05, "Similar sonic profile".into()));
     }
 
     contributions.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
