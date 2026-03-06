@@ -25,11 +25,6 @@ pub fn get_cache_dir() -> Result<PathBuf> {
 
 // ─── Color Helpers ──────────────────────────────────────────────────────────
 
-fn lerp(a: u8, b: u8, t: f32) -> u8 {
-    let t = t.clamp(0.0, 1.0);
-    (a as f32 + (b as f32 - a as f32) * t) as u8
-}
-
 fn darken(color: Rgba<u8>, factor: f32) -> Rgba<u8> {
     Rgba([
         (color.0[0] as f32 * factor) as u8,
@@ -129,79 +124,6 @@ fn apply_circular_mask(img: &mut RgbaImage) {
             }
         }
     }
-}
-
-/// Apply a color tint over the image.
-fn apply_tint(img: &mut RgbaImage, tint: Rgba<u8>, strength: f32) {
-    for p in img.pixels_mut() {
-        p.0[0] = lerp(p.0[0], tint.0[0], strength);
-        p.0[1] = lerp(p.0[1], tint.0[1], strength);
-        p.0[2] = lerp(p.0[2], tint.0[2], strength);
-    }
-}
-
-/// Apply vignette effect — darken edges based on distance from center.
-fn apply_vignette(img: &mut RgbaImage, strength: f32) {
-    let (w, h) = img.dimensions();
-    let cx = w as f32 / 2.0;
-    let cy = h as f32 / 2.0;
-    let max_dist = (cx * cx + cy * cy).sqrt();
-
-    for y in 0..h {
-        for x in 0..w {
-            let dx = x as f32 - cx;
-            let dy = y as f32 - cy;
-            let dist = (dx * dx + dy * dy).sqrt() / max_dist;
-            let factor = 1.0 - (dist * strength).clamp(0.0, 1.0);
-            let p = img.get_pixel(x, y);
-            img.put_pixel(
-                x,
-                y,
-                Rgba([
-                    (p.0[0] as f32 * factor) as u8,
-                    (p.0[1] as f32 * factor) as u8,
-                    (p.0[2] as f32 * factor) as u8,
-                    p.0[3],
-                ]),
-            );
-        }
-    }
-}
-
-// ─── Background Generators ──────────────────────────────────────────────────
-
-fn generate_vertical_gradient(size: u32, top: Rgba<u8>, bottom: Rgba<u8>) -> RgbaImage {
-    let mut img = RgbaImage::new(size, size);
-    for y in 0..size {
-        let t = y as f32 / (size - 1) as f32;
-        let r = lerp(top.0[0], bottom.0[0], t);
-        let g = lerp(top.0[1], bottom.0[1], t);
-        let b = lerp(top.0[2], bottom.0[2], t);
-        for x in 0..size {
-            img.put_pixel(x, y, Rgba([r, g, b, 255]));
-        }
-    }
-    img
-}
-
-fn generate_radial_gradient(size: u32, center: Rgba<u8>, edge: Rgba<u8>) -> RgbaImage {
-    let mut img = RgbaImage::new(size, size);
-    let cx = size as f32 / 2.0;
-    let cy = size as f32 / 2.0;
-    let max_dist = (cx * cx + cy * cy).sqrt();
-
-    for y in 0..size {
-        for x in 0..size {
-            let dx = x as f32 - cx;
-            let dy = y as f32 - cy;
-            let t = (dx * dx + dy * dy).sqrt() / max_dist;
-            let r = lerp(center.0[0], edge.0[0], t);
-            let g = lerp(center.0[1], edge.0[1], t);
-            let b = lerp(center.0[2], edge.0[2], t);
-            img.put_pixel(x, y, Rgba([r, g, b, 255]));
-        }
-    }
-    img
 }
 
 // ─── Color Palettes ─────────────────────────────────────────────────────────
@@ -312,8 +234,8 @@ pub fn generate_mix_collage(cover_paths: &[&Path]) -> Result<DynamicImage> {
 
 // ─── Per-Type Cover Generators ──────────────────────────────────────────────
 
-/// Artist mix: hero image on radial gradient from dominant color.
-/// Fallback: 2×2 collage on gradient if no artist image.
+/// Artist mix: hero image on solid dominant-color background.
+/// Fallback: 2×2 collage if no artist image.
 pub fn generate_artist_mix_cover(
     artist_image: Option<&RgbaImage>,
     album_cover_paths: &[&Path],
@@ -323,8 +245,8 @@ pub fn generate_artist_mix_cover(
     match artist_image {
         Some(img) => {
             let dominant = extract_dominant_color(img);
-            let edge = darken(dominant, 0.3);
-            let mut canvas = generate_radial_gradient(size, dominant, edge);
+            let bg = darken(dominant, 0.7);
+            let mut canvas = RgbaImage::from_pixel(size, size, bg);
 
             // Resize artist image to 640×640, centered at (192, 192)
             let hero = image::imageops::resize(img, 640, 640, image::imageops::FilterType::Lanczos3);
@@ -333,18 +255,17 @@ pub fn generate_artist_mix_cover(
             Ok(DynamicImage::ImageRgba8(canvas))
         }
         None => {
-            // Fallback: collage on a dark gradient
             let collage = generate_mix_collage(album_cover_paths)?;
             Ok(collage)
         }
     }
 }
 
-/// Genre mix: 5 circular album art portraits scattered on vertical gradient.
+/// Genre mix: 5 circular album art portraits scattered on solid genre color.
 pub fn generate_genre_mix_cover(genre: &str, cover_images: &[RgbaImage]) -> Result<DynamicImage> {
     let size = COVER_SIZE;
-    let (top, bottom) = genre_gradient_colors(genre);
-    let mut canvas = generate_vertical_gradient(size, top, bottom);
+    let (bg_color, _) = genre_gradient_colors(genre);
+    let mut canvas = RgbaImage::from_pixel(size, size, bg_color);
 
     // Circle layout: (diameter, center_x, center_y)
     let circles: [(u32, i64, i64); 5] = [
@@ -366,7 +287,7 @@ pub fn generate_genre_mix_cover(genre: &str, cover_images: &[RgbaImage]) -> Resu
             image::imageops::overlay(&mut canvas, &circle, x, y);
         } else {
             // Solid-color circle fallback
-            let fill = darken(top, 0.5);
+            let fill = darken(bg_color, 0.5);
             let mut solid = RgbaImage::from_pixel(diam, diam, fill);
             apply_circular_mask(&mut solid);
             image::imageops::overlay(&mut canvas, &solid, x, y);
@@ -376,57 +297,44 @@ pub fn generate_genre_mix_cover(genre: &str, cover_images: &[RgbaImage]) -> Resu
     Ok(DynamicImage::ImageRgba8(canvas))
 }
 
-/// Deep cuts: moody full-bleed artist image with purple tint, vignette, darken.
-/// Fallback: first album cover with same treatment, or dark purple→black gradient.
+/// Deep cuts: circular artist image on solid dark background.
+/// Fallback: first album cover as circle, or solid dark purple.
 pub fn generate_deep_cuts_cover(
     artist_image: Option<&RgbaImage>,
     album_cover_paths: &[&Path],
 ) -> Result<DynamicImage> {
     let size = COVER_SIZE;
+    let bg = Rgba([25, 12, 35, 255]);
+    let mut canvas = RgbaImage::from_pixel(size, size, bg);
 
-    // Try artist image, then first album cover, then gradient fallback
-    let base_image = if let Some(img) = artist_image {
+    // Try artist image, then first album cover
+    let source = if let Some(img) = artist_image {
         Some(img.clone())
     } else {
-        // Try first album cover
         album_cover_paths
             .first()
             .and_then(|p| image::open(p).ok())
             .map(|img| img.to_rgba8())
     };
 
-    let mut canvas = match base_image {
-        Some(img) => {
-            image::imageops::resize(&img, size, size, image::imageops::FilterType::Lanczos3)
-        }
-        None => {
-            // Dark purple→black gradient fallback
-            generate_vertical_gradient(
-                size,
-                Rgba([60, 20, 80, 255]),
-                Rgba([10, 5, 15, 255]),
-            )
-        }
-    };
-
-    // Apply effects: purple tint, vignette, darken
-    apply_tint(&mut canvas, Rgba([120, 40, 160, 255]), 0.35);
-    apply_vignette(&mut canvas, 1.5);
-    // Overall darken ×0.6
-    for p in canvas.pixels_mut() {
-        p.0[0] = (p.0[0] as f32 * 0.6) as u8;
-        p.0[1] = (p.0[1] as f32 * 0.6) as u8;
-        p.0[2] = (p.0[2] as f32 * 0.6) as u8;
+    if let Some(img) = source {
+        let diam = 640u32;
+        let resized = image::imageops::resize(&img, diam, diam, image::imageops::FilterType::Lanczos3);
+        let mut circle = resized;
+        apply_circular_mask(&mut circle);
+        let x = (size - diam) as i64 / 2;
+        let y = (size - diam) as i64 / 2;
+        image::imageops::overlay(&mut canvas, &circle, x, y);
     }
 
     Ok(DynamicImage::ImageRgba8(canvas))
 }
 
-/// Decade mix: 4 circular album art portraits in 2×2 layout on warm gradient.
+/// Decade mix: 4 circular album art portraits in 2×2 layout on solid warm color.
 pub fn generate_decade_mix_cover(decade: i32, cover_images: &[RgbaImage]) -> Result<DynamicImage> {
     let size = COVER_SIZE;
-    let (top, bottom) = decade_gradient_colors(decade);
-    let mut canvas = generate_vertical_gradient(size, top, bottom);
+    let (bg_color, _) = decade_gradient_colors(decade);
+    let mut canvas = RgbaImage::from_pixel(size, size, bg_color);
 
     // 2×2 balanced layout: (diameter, center_x, center_y)
     let circles: [(u32, i64, i64); 4] = [
@@ -447,7 +355,7 @@ pub fn generate_decade_mix_cover(decade: i32, cover_images: &[RgbaImage]) -> Res
             image::imageops::overlay(&mut canvas, &circle, x, y);
         } else {
             // Solid warm-tone circle fallback
-            let fill = darken(top, 0.4);
+            let fill = darken(bg_color, 0.4);
             let mut solid = RgbaImage::from_pixel(diam, diam, fill);
             apply_circular_mask(&mut solid);
             image::imageops::overlay(&mut canvas, &solid, x, y);
