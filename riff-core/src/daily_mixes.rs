@@ -1861,10 +1861,14 @@ async fn insert_mix(
 
     info!("created {mix_type} mix '{title}' with {} tracks for user {user_id}", tracks.len());
 
-    // Generate mosaic cover art
-    if let Err(e) = generate_mix_cover(pool, &mix_id).await {
-        warn!("failed to generate cover for mix {mix_id}: {e}");
-    }
+    // Generate cover art in the background — don't block the response
+    let pool = pool.clone();
+    let mix_id_bg = mix_id.clone();
+    tokio::spawn(async move {
+        if let Err(e) = generate_mix_cover(&pool, &mix_id_bg).await {
+            warn!("failed to generate cover for mix {mix_id_bg}: {e}");
+        }
+    });
 
     Ok(())
 }
