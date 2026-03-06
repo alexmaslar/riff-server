@@ -471,6 +471,8 @@ async fn main() -> Result<()> {
         .route("/libraries", get(routes::libraries::list_libraries))
         // Relay info
         .route("/relay-info", get(routes::relay::relay_info))
+        // Debug
+        .route("/debug/playback-log", post(routes::debug::playback_log))
         .route_layer(axum_mw::from_fn_with_state(
             state.clone(),
             middleware::require_auth,
