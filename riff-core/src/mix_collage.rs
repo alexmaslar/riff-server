@@ -234,8 +234,8 @@ pub fn generate_mix_collage(cover_paths: &[&Path]) -> Result<DynamicImage> {
 
 // ─── Per-Type Cover Generators ──────────────────────────────────────────────
 
-/// Artist mix: hero image on solid dominant-color background.
-/// Fallback: 2×2 collage if no artist image.
+/// Artist mix: two-tone background (white top, dominant color bottom)
+/// with artist image centered. Fallback: 2×2 collage if no artist image.
 pub fn generate_artist_mix_cover(
     artist_image: Option<&RgbaImage>,
     album_cover_paths: &[&Path],
@@ -245,12 +245,24 @@ pub fn generate_artist_mix_cover(
     match artist_image {
         Some(img) => {
             let dominant = extract_dominant_color(img);
-            let bg = darken(dominant, 0.7);
-            let mut canvas = RgbaImage::from_pixel(size, size, bg);
+            let white = Rgba([255, 255, 255, 255]);
 
-            // Resize artist image to 640×640, centered at (192, 192)
-            let hero = image::imageops::resize(img, 640, 640, image::imageops::FilterType::Lanczos3);
-            image::imageops::overlay(&mut canvas, &hero, 192, 192);
+            // Two-tone: white top half, dominant color bottom half
+            let split_y = size / 2;
+            let mut canvas = RgbaImage::new(size, size);
+            for y in 0..size {
+                let color = if y < split_y { white } else { dominant };
+                for x in 0..size {
+                    canvas.put_pixel(x, y, color);
+                }
+            }
+
+            // Resize artist image to 640×640, centered horizontally and vertically
+            let img_size = 640u32;
+            let hero = image::imageops::resize(img, img_size, img_size, image::imageops::FilterType::Lanczos3);
+            let x = (size - img_size) as i64 / 2;
+            let y = (size - img_size) as i64 / 2;
+            image::imageops::overlay(&mut canvas, &hero, x, y);
 
             Ok(DynamicImage::ImageRgba8(canvas))
         }
