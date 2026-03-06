@@ -62,14 +62,14 @@ impl IntoResponse for AppError {
 
 impl From<sqlx::Error> for AppError {
     fn from(e: sqlx::Error) -> Self {
-        tracing::error!("database error: {}", e);
+        tracing::error!(error = %e, error_type = "database", "database error");
         AppError::Internal("database error".to_string())
     }
 }
 
 impl From<anyhow::Error> for AppError {
     fn from(e: anyhow::Error) -> Self {
-        tracing::error!("internal error: {}", e);
+        tracing::error!(error = %e, error_type = "internal", "internal error");
         AppError::Internal(e.to_string())
     }
 }

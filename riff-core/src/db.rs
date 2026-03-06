@@ -127,7 +127,7 @@ async fn normalize_genre_casing(pool: &SqlitePool) -> anyhow::Result<()> {
     }
 
     if updated > 0 {
-        info!("normalized genre/style casing for {} albums", updated);
+        info!(count = updated, "normalized genre/style casing");
     }
 
     // Mark normalization as done so it doesn't run again on next startup
@@ -158,7 +158,7 @@ pub async fn sync_libraries(pool: &SqlitePool, libraries: &[LibraryEntry]) -> an
     // Remove DB rows whose path is no longer in config
     for (db_id, _name, db_path, _isolated) in &existing {
         if !config_paths.contains(db_path.as_str()) {
-            info!("library path {:?} removed from config, wiping data", db_path);
+            info!(path = %db_path, "library path removed from config, wiping data");
             wipe_library_data(pool, db_id).await?;
             sqlx::query("DELETE FROM libraries WHERE id = ?")
                 .bind(db_id)
@@ -207,7 +207,7 @@ pub async fn sync_libraries(pool: &SqlitePool, libraries: &[LibraryEntry]) -> an
             .bind(entry.scan_interval.map(|v| v as i64))
             .execute(pool)
             .await?;
-            info!("registered new library {:?} at {:?} (id={})", entry.name, entry.path, id);
+            info!(name = %entry.name, path = %entry.path, id = %id, "registered new library");
         }
     }
 
@@ -226,12 +226,7 @@ pub async fn sync_libraries(pool: &SqlitePool, libraries: &[LibraryEntry]) -> an
                 .execute(pool)
                 .await?;
             if result.rows_affected() > 0 {
-                info!(
-                    "backfilled {} rows in {} with library_id={}",
-                    result.rows_affected(),
-                    table,
-                    first_id
-                );
+                info!(count = result.rows_affected(), table = %table, library_id = %first_id, "backfilled NULL library_id");
             }
         }
         // Daily mixes are ephemeral (regenerated regularly) — delete stale NULL ones
@@ -240,7 +235,7 @@ pub async fn sync_libraries(pool: &SqlitePool, libraries: &[LibraryEntry]) -> an
             .execute(pool)
             .await?;
         if deleted.rows_affected() > 0 {
-            info!("deleted {} stale daily_mixes with NULL library_id", deleted.rows_affected());
+            info!(count = deleted.rows_affected(), "deleted stale daily_mixes with NULL library_id");
         }
     }
 
@@ -375,7 +370,7 @@ pub async fn wipe_library_data(pool: &SqlitePool, library_id: &str) -> anyhow::R
 
     tx.commit().await?;
 
-    info!("library data wiped for library_id={}", library_id);
+    info!(library_id = %library_id, "library data wiped");
     Ok(())
 }
 
@@ -410,10 +405,7 @@ pub async fn relocate_library_paths(
     .await?
     .rows_affected();
 
-    info!(
-        "library paths relocated for library_id={}: {} tracks, {} covers updated",
-        library_id, tracks_updated, covers_updated
-    );
+    info!(library_id = %library_id, tracks = tracks_updated, covers = covers_updated, "library paths relocated");
     Ok(())
 }
 

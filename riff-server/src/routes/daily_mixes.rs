@@ -48,7 +48,7 @@ pub async fn list_daily_mixes(
 
     if count.0 == 0 {
         if let Err(e) = daily_mixes::generate_daily_mixes(&state.db, &claims.sub, today, &library_ids, library_id).await {
-            tracing::warn!("on-demand daily mix generation failed for {}: {e}", claims.sub);
+            tracing::warn!(user_id = %claims.sub, error = %e, "on-demand daily mix generation failed");
         }
     }
 

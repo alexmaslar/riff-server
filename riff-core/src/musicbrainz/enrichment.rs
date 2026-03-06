@@ -43,8 +43,10 @@ pub async fn enrich_library(
     enrich_albums(pool, &client, &config, &mut result).await;
 
     info!(
-        "enrichment complete: {} albums, {} covers, {} errors",
-        result.albums_enriched, result.covers_downloaded, result.errors.len()
+        albums = result.albums_enriched,
+        covers = result.covers_downloaded,
+        errors = result.errors.len(),
+        "enrichment complete",
     );
 
     Ok(result)
@@ -104,7 +106,7 @@ async fn enrich_albums(
         }
     };
 
-    info!("enriching {} albums from MusicBrainz", rows.len());
+    info!(count = rows.len(), "enriching albums from MusicBrainz");
 
     for (album_id, title, artist_name, year, cover_path) in &rows {
         match enrich_one_album(pool, client, config, album_id, title, artist_name, *year, cover_path.as_deref()).await {
@@ -114,7 +116,7 @@ async fn enrich_albums(
             }
             Ok(false) => {} // no match found, skip
             Err(e) => {
-                warn!("enrichment error for album '{}': {}", title, e);
+                warn!(album = %title, error = %e, "enrichment error");
                 result.errors.push(format!("{}: {}", title, e));
             }
         }
@@ -154,15 +156,9 @@ async fn enrich_one_album(
     let results = client.search_release(artist_name, clean_title, year).await?;
 
     if results.is_empty() {
-        debug!(
-            "no MusicBrainz search results for '{}' by '{}'",
-            title, artist_name
-        );
+        debug!(album = %title, artist = %artist_name, "no MusicBrainz search results");
     } else {
-        debug!(
-            "MusicBrainz search returned {} results for '{}' by '{}'",
-            results.len(), title, artist_name
-        );
+        debug!(album = %title, artist = %artist_name, count = results.len(), "MusicBrainz search results");
     }
 
     let track_count: Option<i64> = sqlx::query_scalar(
@@ -183,10 +179,7 @@ async fn enrich_one_album(
     let candidate = match candidate {
         Some(c) => c,
         None => {
-            debug!(
-                "no MusicBrainz match above threshold for '{}' by '{}'",
-                title, artist_name
-            );
+            debug!(album = %title, artist = %artist_name, "no MusicBrainz match above threshold");
             sqlx::query("UPDATE albums SET metadata_status = 'not_found' WHERE id = ?")
                 .bind(album_id)
                 .execute(pool)
@@ -196,10 +189,7 @@ async fn enrich_one_album(
     };
 
     let mbid = &candidate.result.id;
-    info!(
-        "matched '{}' -> MusicBrainz release {} (score: {:.2})",
-        title, mbid, candidate.score
-    );
+    info!(album = %title, mbid = %mbid, score = format_args!("{:.2}", candidate.score), "matched MusicBrainz release");
 
     let release = client.get_release(mbid).await?;
 
@@ -296,10 +286,10 @@ async fn enrich_one_album(
     if config.download_covers && cover_path.is_none() {
         match download_cover(client, mbid, pool, album_id).await {
             Ok(true) => {
-                info!("downloaded cover for '{}'", title);
+                info!(album = %title, "downloaded cover");
             }
             Ok(false) => {}
-            Err(e) => warn!("cover download failed for '{}': {}", title, e),
+            Err(e) => warn!(album = %title, error = %e, "cover download failed"),
         }
     }
 
@@ -374,14 +364,14 @@ pub async fn enrich_artist_images_spotify(
     .await?;
 
     if !rows.is_empty() {
-        info!("Spotify image enrichment: {} artists with MusicBrainz IDs", rows.len());
+        info!(count = rows.len(), "Spotify image enrichment: artists with MusicBrainz IDs");
     }
 
     for (artist_id, artist_name, mbid) in &rows {
         let spotify_id = match mb_client.get_artist(mbid).await {
             Ok(detail) => extract_spotify_artist_id(&detail.relations),
             Err(e) => {
-                warn!("MusicBrainz artist lookup failed for '{}': {}", artist_name, e);
+                warn!(artist = %artist_name, error = %e, "MusicBrainz artist lookup failed");
                 None
             }
         };
@@ -395,13 +385,13 @@ pub async fn enrich_artist_images_spotify(
                         .execute(pool)
                         .await?;
                     enriched_ids.push(artist_id.clone());
-                    debug!("Spotify image for '{}'", artist_name);
+                    debug!(artist = %artist_name, "Spotify image found");
                 }
-                Ok(None) => debug!("no Spotify image for '{}'", artist_name),
-                Err(e) => warn!("Spotify image error for '{}': {}", artist_name, e),
+                Ok(None) => debug!(artist = %artist_name, "no Spotify image"),
+                Err(e) => warn!(artist = %artist_name, error = %e, "Spotify image error"),
             }
         } else {
-            debug!("no Spotify link for '{}'", artist_name);
+            debug!(artist = %artist_name, "no Spotify link");
         }
 
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
@@ -416,7 +406,7 @@ pub async fn enrich_artist_images_spotify(
         .await?;
 
         if !remaining.is_empty() {
-            info!("streaming provider image fallback: {} artists remaining", remaining.len());
+            info!(count = remaining.len(), "streaming provider image fallback: artists remaining");
         }
 
         for (artist_id, artist_name) in &remaining {
@@ -434,19 +424,19 @@ pub async fn enrich_artist_images_spotify(
                                     .execute(pool)
                                     .await?;
                                 enriched_ids.push(artist_id.clone());
-                                debug!("streaming provider image for '{}' via {}", artist_name, provider.provider_name());
+                                debug!(artist = %artist_name, provider = %provider.provider_name(), "streaming provider image found");
                                 found = true;
                                 break;
                             }
                         }
                     }
                     Err(e) => {
-                        debug!("streaming provider {} search failed for '{}': {}", provider.provider_name(), artist_name, e);
+                        debug!(provider = %provider.provider_name(), artist = %artist_name, error = %e, "streaming provider search failed");
                     }
                 }
             }
             if !found {
-                debug!("no streaming provider image for '{}'", artist_name);
+                debug!(artist = %artist_name, "no streaming provider image");
             }
 
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
@@ -454,7 +444,7 @@ pub async fn enrich_artist_images_spotify(
     }
 
     if !enriched_ids.is_empty() {
-        info!("artist image enrichment complete: {} artists", enriched_ids.len());
+        info!(count = enriched_ids.len(), "artist image enrichment complete");
     }
     Ok(enriched_ids)
 }
@@ -495,11 +485,11 @@ pub async fn enrich_artist_top_tracks(
     .await?;
 
     if rows.is_empty() {
-        info!("no artists need top tracks enrichment");
+        info!("no artists need top-tracks enrichment");
         return Ok(Vec::new());
     }
 
-    info!("enriching {} artists with Deezer top tracks", rows.len());
+    info!(count = rows.len(), "enriching artists with Deezer top tracks");
     let mut enriched_ids: Vec<String> = Vec::new();
 
     for (artist_id, artist_name) in &rows {
@@ -525,7 +515,7 @@ pub async fn enrich_artist_top_tracks(
                 }
 
                 enriched_ids.push(artist_id.clone());
-                debug!("Deezer: {} top tracks for '{}'", tracks.len(), artist_name);
+                debug!(artist = %artist_name, count = tracks.len(), "Deezer top tracks found");
             }
             Ok(_) => {
                 // No tracks returned — insert a sentinel so we don't re-query immediately
@@ -538,7 +528,7 @@ pub async fn enrich_artist_top_tracks(
                 .await?;
             }
             Err(e) => {
-                warn!("Deezer error for '{}': {}", artist_name, e);
+                warn!(artist = %artist_name, error = %e, "Deezer error");
             }
         }
 
@@ -546,7 +536,7 @@ pub async fn enrich_artist_top_tracks(
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
 
-    info!("Deezer top tracks enrichment complete: {} artists", enriched_ids.len());
+    info!(count = enriched_ids.len(), "Deezer top-tracks enrichment complete");
     Ok(enriched_ids)
 }
 
@@ -568,7 +558,7 @@ pub async fn enrich_artist_bios_wikipedia(
         return Ok(Vec::new());
     }
 
-    info!("enriching {} artists with Wikipedia bios", rows.len());
+    info!(count = rows.len(), "enriching artists with Wikipedia bios");
 
     let mb_client = MusicBrainzClient::new()?;
 
@@ -579,13 +569,13 @@ pub async fn enrich_artist_bios_wikipedia(
         let wikidata_id = match mb_client.get_artist(mbid).await {
             Ok(detail) => extract_wikidata_id(&detail.relations),
             Err(e) => {
-                warn!("MusicBrainz lookup failed for '{}': {}", artist_name, e);
+                warn!(artist = %artist_name, error = %e, "MusicBrainz lookup failed");
                 continue;
             }
         };
 
         let Some(qid) = wikidata_id else {
-            debug!("no Wikidata link for '{}'", artist_name);
+            debug!(artist = %artist_name, "no Wikidata link");
             continue;
         };
 
@@ -593,11 +583,11 @@ pub async fn enrich_artist_bios_wikipedia(
         let wiki_title = match resolve_wikidata_to_wikipedia(&http_client, &qid).await {
             Ok(Some(title)) => title,
             Ok(None) => {
-                debug!("no English Wikipedia article for '{}' ({})", artist_name, qid);
+                debug!(artist = %artist_name, wikidata_id = %qid, "no English Wikipedia article");
                 continue;
             }
             Err(e) => {
-                warn!("Wikidata lookup failed for '{}' ({}): {}", artist_name, qid, e);
+                warn!(artist = %artist_name, wikidata_id = %qid, error = %e, "Wikidata lookup failed");
                 continue;
             }
         };
@@ -627,17 +617,17 @@ pub async fn enrich_artist_bios_wikipedia(
                             .execute(pool)
                             .await?;
                             enriched_ids.push(artist_id.clone());
-                            debug!("Wikipedia bio for '{}' ({} chars)", artist_name, extract.len());
+                            debug!(artist = %artist_name, chars = extract.len(), "Wikipedia bio found");
                         }
                     }
-                    Err(e) => warn!("Wikipedia JSON parse error for '{}': {}", artist_name, e),
+                    Err(e) => warn!(artist = %artist_name, error = %e, "Wikipedia JSON parse error"),
                 }
             }
             Ok(resp) => {
-                debug!("Wikipedia returned {} for '{}'", resp.status(), artist_name);
+                debug!(artist = %artist_name, status = %resp.status(), "Wikipedia non-success response");
             }
             Err(e) => {
-                warn!("Wikipedia fetch error for '{}': {}", artist_name, e);
+                warn!(artist = %artist_name, error = %e, "Wikipedia fetch error");
             }
         }
 
@@ -645,7 +635,7 @@ pub async fn enrich_artist_bios_wikipedia(
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
 
-    info!("Wikipedia bio enrichment complete: {} artists", enriched_ids.len());
+    info!(count = enriched_ids.len(), "Wikipedia bio enrichment complete");
     Ok(enriched_ids)
 }
 
@@ -733,14 +723,14 @@ async fn enrich_track_isrcs(
                 Ok(r) if r.rows_affected() > 0 => updated += 1,
                 Ok(_) => {}
                 Err(e) => {
-                    warn!("failed to update ISRC for disc {} track {}: {}", medium.position, track.position, e);
+                    warn!(disc = medium.position, track = track.position, error = %e, "failed to update ISRC");
                 }
             }
         }
     }
 
     if updated > 0 {
-        debug!("enriched {} tracks with ISRCs for album {}", updated, album_id);
+        debug!(count = updated, album_id = %album_id, "enriched tracks with ISRCs");
     }
 }
 

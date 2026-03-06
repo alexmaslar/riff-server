@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use riff_core::{analysis, daily_mixes, db, musicbrainz, plugin, scanner};
+use tracing::Instrument;
 
 use crate::routes;
 use crate::transcode;
@@ -17,7 +18,14 @@ pub async fn run_background_pipeline(state: Arc<AppState>) {
         }
         first_run = false;
 
-        tracing::info!("background pipeline starting");
+        run_pipeline_iteration(&state)
+            .instrument(tracing::info_span!("pipeline"))
+            .await;
+    }
+}
+
+async fn run_pipeline_iteration(state: &Arc<AppState>) {
+        tracing::info!("starting");
 
         let mut album_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut artist_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -29,13 +37,13 @@ pub async fn run_background_pipeline(state: Arc<AppState>) {
                 let db = state.db.clone();
                 drop(config);
                 if state.stage_manager.try_start("enrichment") {
-                    match musicbrainz::enrich_library(&db).await {
+                        match musicbrainz::enrich_library(&db).await {
                         Ok(r) => {
-                            tracing::info!("enrichment complete");
+                            tracing::info!(stage = "enrichment", "complete");
                             album_ids.extend(r.enriched_album_ids);
                             artist_ids.extend(r.enriched_artist_ids);
                         }
-                        Err(e) => tracing::warn!("enrichment failed: {e}"),
+                        Err(e) => tracing::warn!(stage = "enrichment", error = %e, "failed"),
                     }
                     state.stage_manager.finish("enrichment");
                 }
@@ -52,14 +60,14 @@ pub async fn run_background_pipeline(state: Arc<AppState>) {
                 .editorial_providers()
                 .to_vec();
             if state.stage_manager.try_start("editorial") {
-                match riff_core::editorial::enrich_library_editorial(&db, &editorial_providers)
+                    match riff_core::editorial::enrich_library_editorial(&db, &editorial_providers)
                     .await
                 {
                     Ok(r) => {
-                        tracing::info!("editorial enrichment complete");
+                        tracing::info!(stage = "editorial", "complete");
                         album_ids.extend(r.enriched_album_ids);
                     }
-                    Err(e) => tracing::warn!("editorial enrichment failed: {e}"),
+                    Err(e) => tracing::warn!(stage = "editorial", error = %e, "failed"),
                 }
                 state.stage_manager.finish("editorial");
             }
@@ -92,11 +100,11 @@ pub async fn run_background_pipeline(state: Arc<AppState>) {
                 .to_vec();
             match musicbrainz::enrich_artist_images_spotify(&db, &providers).await {
                 Ok(ids) if !ids.is_empty() => {
-                    tracing::info!("artist images: {} artists updated", ids.len());
+                    tracing::info!(artists_updated = ids.len(), "artist images enriched");
                     artist_ids.extend(ids);
                 }
                 Ok(_) => {}
-                Err(e) => tracing::warn!("artist image enrichment failed: {e}"),
+                Err(e) => tracing::warn!(error = %e, "artist image enrichment failed"),
             }
         }
 
@@ -105,10 +113,10 @@ pub async fn run_background_pipeline(state: Arc<AppState>) {
             let result = musicbrainz::enrich_artist_top_tracks(&state.db, &state.http_client).await;
             match result {
                 Ok(ids) => {
-                    tracing::info!("top tracks complete");
+                    tracing::info!(stage = "top_tracks", "complete");
                     artist_ids.extend(ids);
                 }
-                Err(e) => tracing::warn!("top tracks failed: {e}"),
+                Err(e) => tracing::warn!(stage = "top_tracks", error = %e, "failed"),
             }
             state.stage_manager.finish("top_tracks");
         }
@@ -119,7 +127,7 @@ pub async fn run_background_pipeline(state: Arc<AppState>) {
                 musicbrainz::enrich_artist_bios_wikipedia(&state.db, &state.http_client)
                     .await
                     .unwrap_or_else(|e| {
-                        tracing::warn!("Wikipedia bio enrichment failed: {e}");
+                        tracing::warn!(error = %e, "Wikipedia bio enrichment failed");
                         vec![]
                     });
             artist_ids.extend(wiki_ids);
@@ -130,10 +138,10 @@ pub async fn run_background_pipeline(state: Arc<AppState>) {
             let result = analysis::analyze_library(&state.db).await;
             match result {
                 Ok(r) => {
-                    tracing::info!("analysis complete");
+                    tracing::info!(stage = "analysis", "complete");
                     album_ids.extend(r.enriched_album_ids);
                 }
-                Err(e) => tracing::warn!("analysis failed: {e}"),
+                Err(e) => tracing::warn!(stage = "analysis", error = %e, "failed"),
             }
             state.stage_manager.finish("analysis");
         }
@@ -159,7 +167,7 @@ pub async fn run_background_pipeline(state: Arc<AppState>) {
             .execute(&state.db)
             .await
         {
-            tracing::warn!("WAL checkpoint failed: {e}");
+            tracing::warn!(error = %e, "WAL checkpoint failed");
         }
 
         // Step 6: Update query planner statistics for long-running server
@@ -170,11 +178,10 @@ pub async fn run_background_pipeline(state: Arc<AppState>) {
             .execute(&state.db)
             .await
         {
-            tracing::warn!("PRAGMA optimize failed: {e}");
+            tracing::warn!(error = %e, "PRAGMA optimize failed");
         }
 
-        tracing::info!("background pipeline complete, waiting for next trigger");
-    }
+        tracing::info!("complete, waiting for next trigger");
 }
 
 async fn run_stage<F, R>(state: &AppState, stage: &str, f: F)
@@ -183,8 +190,8 @@ where
 {
     if state.stage_manager.try_start(stage) {
         match f.await {
-            Ok(_) => tracing::info!("{stage} complete"),
-            Err(e) => tracing::warn!("{stage} failed: {e}"),
+            Ok(_) => tracing::info!(stage, "complete"),
+            Err(e) => tracing::warn!(stage, error = %e, "failed"),
         }
         state.stage_manager.finish(stage);
     }
@@ -235,7 +242,7 @@ pub async fn run_periodic_scanner(state: Arc<AppState>) {
                 _ => continue,
             };
 
-            tracing::info!("periodic scan: {:?} ({})", lib_entry.name, lib_entry.path);
+            tracing::info!(library = %lib_entry.name, path = %lib_entry.path, "periodic scan");
             match scanner::scan_library(&state.db, &lib_entry.path, &library_id).await {
                 Ok(result) => {
                     if result.tracks_added > 0
@@ -247,18 +254,18 @@ pub async fn run_periodic_scanner(state: Arc<AppState>) {
                     {
                         new_content_found = true;
                         tracing::info!(
-                            "periodic scan complete for {:?}: +{} artists, +{} albums, +{} tracks, -{} tracks, -{} albums, -{} artists",
-                            lib_entry.name,
-                            result.artists_added,
-                            result.albums_added,
-                            result.tracks_added,
-                            result.tracks_removed,
-                            result.albums_removed,
-                            result.artists_removed,
+                            library = %lib_entry.name,
+                            artists_added = result.artists_added,
+                            albums_added = result.albums_added,
+                            tracks_added = result.tracks_added,
+                            tracks_removed = result.tracks_removed,
+                            albums_removed = result.albums_removed,
+                            artists_removed = result.artists_removed,
+                            "periodic scan complete",
                         );
                     }
                 }
-                Err(e) => tracing::warn!("periodic scan failed for {:?}: {}", lib_entry.name, e),
+                Err(e) => tracing::warn!(library = %lib_entry.name, error = %e, "periodic scan failed"),
             }
         }
 
@@ -288,7 +295,7 @@ pub async fn run_daily_refresh(state: Arc<AppState>) {
         // Generate daily mixes for all users
         match daily_mixes::generate_all_daily_mixes(&state.db).await {
             Ok(_) => tracing::info!("daily mix refresh complete"),
-            Err(e) => tracing::warn!("daily mix refresh failed: {e}"),
+            Err(e) => tracing::warn!(error = %e, "daily mix refresh failed"),
         }
     }
 }

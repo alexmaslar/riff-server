@@ -143,6 +143,7 @@ fn parse_ip(s: &str) -> IpAddr {
     s.parse().unwrap_or(IpAddr::from([127, 0, 0, 1]))
 }
 
+#[tracing::instrument(skip(state, req))]
 pub async fn login(
     State(state): State<Arc<AppState>>,
     Extension(client_ip): Extension<ClientIp>,
@@ -155,12 +156,7 @@ pub async fn login(
     {
         let mut guard = state.login_guard.lock().await;
         if let Err((msg, retry_after)) = guard.check(ip, &req.username) {
-            tracing::warn!(
-                "login rate-limited: ip={}, username={}, reason={}",
-                ip_str,
-                req.username,
-                msg
-            );
+            tracing::warn!(ip = %ip_str, username = %req.username, reason = %msg, "login rate-limited");
             return Err(AppError::TooManyRequests(msg, retry_after));
         }
     }
@@ -179,7 +175,7 @@ pub async fn login(
                 let mut guard = state.login_guard.lock().await;
                 guard.record(ip, &req.username, false);
             }
-            tracing::warn!("login failed: ip={}, username={} (user not found)", ip_str, req.username);
+            tracing::warn!(ip = %ip_str, username = %req.username, reason = "user not found", "login failed");
             super::audit::log(&state.db, "", &req.username, "login_failed", Some("user not found"), Some(ip_str)).await;
             return Err(AppError::Unauthorized("invalid credentials".into()));
         }
@@ -196,7 +192,7 @@ pub async fn login(
             let mut guard = state.login_guard.lock().await;
             guard.record(ip, &req.username, false);
         }
-        tracing::warn!("login failed: ip={}, username={} (wrong password)", ip_str, req.username);
+        tracing::warn!(ip = %ip_str, username = %req.username, reason = "wrong password", "login failed");
         super::audit::log(&state.db, &id_str, &username, "login_failed", Some("wrong password"), Some(ip_str)).await;
         return Err(AppError::Unauthorized("invalid credentials".into()));
     }
@@ -229,6 +225,7 @@ pub async fn login(
     }
 }
 
+#[tracing::instrument(skip(state, headers))]
 pub async fn refresh(
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,

@@ -72,7 +72,7 @@ pub async fn scan_library(pool: &SqlitePool, library_path: &str, library_id: &st
         }
     }
 
-    info!("found {} audio files to scan", audio_files.len());
+    info!(count = audio_files.len(), "found audio files to scan");
 
     // Pre-load all existing file paths for this library to avoid N+1 queries
     let existing_rows: Vec<(String,)> = sqlx::query_as(
@@ -115,7 +115,7 @@ pub async fn scan_library(pool: &SqlitePool, library_path: &str, library_id: &st
                 // Fallback to directory structure
                 match metadata::metadata_from_path(file_path, path) {
                     Some(m) => {
-                        warn!("tag extraction failed for {}, using path fallback: {}", file_str, e);
+                        warn!(path = %file_str, error = %e, "tag extraction failed, using path fallback");
                         m
                     }
                     None => {
@@ -177,10 +177,16 @@ pub async fn scan_library(pool: &SqlitePool, library_path: &str, library_id: &st
     let (artists_deduped, albums_deduped) = deduplicate_library(pool, library_id).await?;
 
     info!(
-        "scan complete: +{} artists, +{} albums, +{} tracks, -{} tracks, -{} albums, -{} artists, {} errors, deduped {} artists + {} albums",
-        result.artists_added, result.albums_added, result.tracks_added,
-        result.tracks_removed, result.albums_removed, result.artists_removed,
-        result.errors.len(), artists_deduped, albums_deduped
+        artists_added = result.artists_added,
+        albums_added = result.albums_added,
+        tracks_added = result.tracks_added,
+        tracks_removed = result.tracks_removed,
+        albums_removed = result.albums_removed,
+        artists_removed = result.artists_removed,
+        errors = result.errors.len(),
+        artists_deduped,
+        albums_deduped,
+        "scan complete",
     );
 
     Ok(result)
@@ -373,7 +379,7 @@ async fn remove_stale_entries(
 
     let tracks_removed = stale_track_ids.len() as u32;
     if tracks_removed > 0 {
-        info!("removed {} stale tracks", tracks_removed);
+        info!(count = tracks_removed, "removed stale tracks");
     }
 
     // Find empty albums (no remaining tracks)
@@ -420,7 +426,7 @@ async fn remove_stale_entries(
 
     let albums_removed = empty_albums.len() as u32;
     if albums_removed > 0 {
-        info!("removed {} empty albums", albums_removed);
+        info!(count = albums_removed, "removed empty albums");
     }
 
     // Find orphaned artists (no remaining albums)
@@ -460,7 +466,7 @@ async fn remove_stale_entries(
 
     let artists_removed = orphaned_artists.len() as u32;
     if artists_removed > 0 {
-        info!("removed {} orphaned artists", artists_removed);
+        info!(count = artists_removed, "removed orphaned artists");
     }
 
     Ok((tracks_removed, albums_removed, artists_removed))
@@ -519,7 +525,7 @@ async fn deduplicate_artists(pool: &SqlitePool, library_id: &str) -> anyhow::Res
     }
 
     if merged > 0 {
-        info!("deduplicated {} duplicate artist entries", merged);
+        info!(count = merged, "deduplicated artist entries");
     }
     Ok(merged)
 }
@@ -584,7 +590,7 @@ async fn deduplicate_albums(pool: &SqlitePool, library_id: &str) -> anyhow::Resu
     }
 
     if merged > 0 {
-        info!("deduplicated {} duplicate album entries", merged);
+        info!(count = merged, "deduplicated album entries");
     }
     Ok(merged)
 }

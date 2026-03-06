@@ -35,7 +35,7 @@ pub async fn analyze_library(pool: &SqlitePool) -> anyhow::Result<AnalysisResult
     .execute(pool)
     .await?;
     if reset.rows_affected() > 0 {
-        info!("reset {} tracks from 'analyzing' back to 'pending'", reset.rows_affected());
+        info!(count = reset.rows_affected(), "reset tracks from 'analyzing' back to 'pending'");
     }
 
     let rows: Vec<(String, String, i32, i64)> = sqlx::query_as(
@@ -45,7 +45,7 @@ pub async fn analyze_library(pool: &SqlitePool) -> anyhow::Result<AnalysisResult
     .await?;
 
     let total = rows.len();
-    info!("analyzing {} tracks", total);
+    info!(count = total, "analyzing tracks");
 
     // Phase 1: Filter skips and mark analyzable tracks
     let mut tracks_to_analyze = Vec::new();
@@ -70,7 +70,7 @@ pub async fn analyze_library(pool: &SqlitePool) -> anyhow::Result<AnalysisResult
     let concurrency = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
-    info!("using {} parallel workers", concurrency);
+    info!(workers = concurrency, "parallel analysis workers");
     let semaphore = Arc::new(Semaphore::new(concurrency));
     let mut join_set = JoinSet::new();
 
@@ -106,7 +106,7 @@ pub async fn analyze_library(pool: &SqlitePool) -> anyhow::Result<AnalysisResult
                         result.tracks_analyzed += 1;
                     }
                     Ok(Err(e)) => {
-                        warn!("analysis failed for {}: {}", file_path, e);
+                        warn!(path = %file_path, error = %e, "analysis failed");
                         sqlx::query("UPDATE tracks SET analysis_status = 'failed' WHERE id = ?")
                             .bind(&track_id)
                             .execute(pool)
@@ -115,7 +115,7 @@ pub async fn analyze_library(pool: &SqlitePool) -> anyhow::Result<AnalysisResult
                         result.tracks_failed += 1;
                     }
                     Err(e) => {
-                        warn!("analysis task panicked for {}: {}", file_path, e);
+                        warn!(path = %file_path, error = %e, "analysis task panicked");
                         sqlx::query("UPDATE tracks SET analysis_status = 'failed' WHERE id = ?")
                             .bind(&track_id)
                             .execute(pool)
@@ -126,19 +126,21 @@ pub async fn analyze_library(pool: &SqlitePool) -> anyhow::Result<AnalysisResult
                 }
             }
             Err(e) => {
-                warn!("analysis join error: {}", e);
+                warn!(error = %e, "analysis join error");
             }
         }
 
         let done = result.tracks_analyzed + result.tracks_failed + result.tracks_skipped;
         if done % 50 == 0 || done as usize == total {
-            info!("analysis progress: {}/{} tracks", done, total);
+            info!(done, total, "analysis progress");
         }
     }
 
     info!(
-        "analysis complete: {} analyzed, {} failed, {} skipped",
-        result.tracks_analyzed, result.tracks_failed, result.tracks_skipped
+        analyzed = result.tracks_analyzed,
+        failed = result.tracks_failed,
+        skipped = result.tracks_skipped,
+        "analysis complete",
     );
 
     // Collect unique album IDs from analyzed tracks

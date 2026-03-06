@@ -24,6 +24,7 @@ pub struct SearchParams {
 }
 
 /// GET /streaming/search?q=&limit=
+#[tracing::instrument(skip(state, claims))]
 pub async fn search(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<Claims>,
@@ -144,6 +145,7 @@ pub async fn get_artist_albums(
 
 /// GET /streaming/tracks/{provider}/{id}/stream?quality=
 /// Proxies audio from the streaming provider's CDN.
+#[tracing::instrument(skip(state, claims, params, request))]
 pub async fn stream_track(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<Claims>,

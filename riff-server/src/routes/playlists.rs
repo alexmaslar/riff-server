@@ -251,7 +251,7 @@ pub async fn add_track(
         .execute(&state.db)
         .await
     {
-        tracing::warn!("playlist timestamp update failed: {e}");
+        tracing::warn!(error = %e, "playlist timestamp update failed");
     }
 
     Ok(Json(json!({ "ok": true })))
@@ -287,7 +287,7 @@ pub async fn remove_track(
         .execute(&state.db)
         .await
     {
-        tracing::warn!("playlist timestamp update failed: {e}");
+        tracing::warn!(error = %e, "playlist timestamp update failed");
     }
 
     Ok(Json(json!({ "ok": true })))

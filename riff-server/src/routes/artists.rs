@@ -78,6 +78,7 @@ pub struct AlbumSummary {
     pub track_count: i64,
 }
 
+#[tracing::instrument(skip(state))]
 pub async fn list_artists(
     State(state): State<Arc<AppState>>,
     Query(params): Query<ListParams>,
@@ -129,6 +130,7 @@ pub async fn list_artists(
     Ok(Json(json!({ "artists": artists, "total": total })))
 }
 
+#[tracing::instrument(skip(state, claims))]
 pub async fn get_artist(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<Claims>,

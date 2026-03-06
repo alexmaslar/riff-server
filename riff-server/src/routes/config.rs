@@ -335,10 +335,7 @@ pub async fn update_config(
     }
 
     if https_port_changed {
-        tracing::info!(
-            "HTTPS port changed to {} — restarting server",
-            config_snapshot.server.https_port
-        );
+        tracing::info!(port = config_snapshot.server.https_port, "HTTPS port changed, restarting server");
         // Signal restart after a short delay so the response flushes first
         let restart_state = state.clone();
         tokio::spawn(async move {

@@ -99,8 +99,16 @@ pub async fn add_library(
     let lib_id_for_scan = library_id.clone();
     tokio::spawn(async move {
         match scanner::scan_library(&db, &path, &lib_id_for_scan).await {
-            Ok(r) => tracing::info!("scan complete for new library: +{} artists, +{} albums, +{} tracks, -{} tracks, -{} albums, -{} artists", r.artists_added, r.albums_added, r.tracks_added, r.tracks_removed, r.albums_removed, r.artists_removed),
-            Err(e) => tracing::warn!("scan failed for new library: {e}"),
+            Ok(r) => tracing::info!(
+                artists_added = r.artists_added,
+                albums_added = r.albums_added,
+                tracks_added = r.tracks_added,
+                tracks_removed = r.tracks_removed,
+                albums_removed = r.albums_removed,
+                artists_removed = r.artists_removed,
+                "scan complete for new library",
+            ),
+            Err(e) => tracing::warn!(error = %e, "scan failed for new library"),
         }
     });
 
@@ -214,8 +222,17 @@ pub async fn update_library(
         let lib_id = id.clone();
         tokio::spawn(async move {
             match scanner::scan_library(&db, &new_path, &lib_id).await {
-                Ok(r) => tracing::info!("re-scan complete for library {}: +{} artists, +{} albums, +{} tracks, -{} tracks, -{} albums, -{} artists", lib_id, r.artists_added, r.albums_added, r.tracks_added, r.tracks_removed, r.albums_removed, r.artists_removed),
-                Err(e) => tracing::warn!("re-scan failed for library {}: {e}", lib_id),
+                Ok(r) => tracing::info!(
+                    library_id = %lib_id,
+                    artists_added = r.artists_added,
+                    albums_added = r.albums_added,
+                    tracks_added = r.tracks_added,
+                    tracks_removed = r.tracks_removed,
+                    albums_removed = r.albums_removed,
+                    artists_removed = r.artists_removed,
+                    "re-scan complete",
+                ),
+                Err(e) => tracing::warn!(library_id = %lib_id, error = %e, "re-scan failed"),
             }
         });
     }

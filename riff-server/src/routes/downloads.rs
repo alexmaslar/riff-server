@@ -34,8 +34,11 @@ pub async fn add_download(
     }
 
     tracing::info!(
-        "add_download: provider={}, album_id={}, quality={:?}, library_id={:?}",
-        body.provider, body.provider_album_id, body.quality, body.library_id
+        provider = %body.provider,
+        album_id = %body.provider_album_id,
+        quality = ?body.quality,
+        library_id = ?body.library_id,
+        "add download",
     );
     let registry = state.plugin_registry.read().await;
     let streaming = registry

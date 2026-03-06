@@ -20,6 +20,6 @@ pub async fn log(
     .await;
 
     if let Err(e) = result {
-        tracing::warn!("failed to write audit log: {e}");
+        tracing::warn!(error = %e, "failed to write audit log");
     }
 }

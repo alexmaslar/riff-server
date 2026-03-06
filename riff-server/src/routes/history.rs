@@ -35,6 +35,7 @@ pub struct DownloadRecommendationsParams {
 }
 
 /// POST /history — Record a play event
+#[tracing::instrument(skip(state, claims))]
 pub async fn record_play(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<Claims>,

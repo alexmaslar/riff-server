@@ -46,13 +46,13 @@ fn is_lossless_format(format: &str) -> bool {
     matches!(format, "FLAC" | "ALAC" | "WAV" | "AIFF")
 }
 
+#[tracing::instrument(skip(state, params, request))]
 pub async fn stream_track(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Query(params): Query<StreamParams>,
     request: axum::extract::Request,
 ) -> Result<Response, AppError> {
-    tracing::info!("[Stream] progressive stream request: {id}");
     let is_remote = request
         .extensions()
         .get::<IsRemote>()
@@ -175,7 +175,7 @@ pub async fn stream_track(
                     return Ok(builder.body(body).expect("response builder with valid headers"));
                 }
                 Err(e) => {
-                    tracing::warn!("transcode failed, falling back to raw: {e}");
+                    tracing::warn!(error = %e, "transcode failed, falling back to raw");
                     // fall through to serve raw file
                 }
             }
@@ -267,6 +267,7 @@ pub async fn stream_track(
     }
 }
 
+#[tracing::instrument(skip(state))]
 pub async fn download_track(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -336,12 +337,12 @@ pub async fn report_decode_error(
         return Ok(axum::Json(serde_json::json!({"status": "ignored", "reason": "not a FLAC file"})));
     }
 
-    tracing::info!("decode error reported for track {id}, re-encoding FLAC");
+    tracing::info!(track_id = %id, "decode error reported, re-encoding FLAC");
 
     let path = std::path::PathBuf::from(file_path);
     crate::transcode::fix_flac_metadata(&path).await?;
 
-    tracing::info!("FLAC re-encode complete for track {id}");
+    tracing::info!(track_id = %id, "FLAC re-encode complete");
     Ok(axum::Json(serde_json::json!({"status": "fixed"})))
 }
 

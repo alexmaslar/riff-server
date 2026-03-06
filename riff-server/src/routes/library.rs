@@ -7,6 +7,7 @@ use std::sync::Arc;
 use crate::error::AppError;
 use crate::AppState;
 
+#[tracing::instrument(skip(state))]
 pub async fn trigger_scan(State(state): State<Arc<AppState>>) -> Result<Json<Value>, AppError> {
     // Guard: prevent overlap with periodic scanner
     if !state.stage_manager.try_start("scan") {
@@ -90,12 +91,12 @@ pub async fn trigger_editorial(State(state): State<Arc<AppState>>) -> Result<Jso
         match riff_core::editorial::enrich_library_editorial(&ed_state.db, &editorial_providers).await {
             Ok(result) => {
                 tracing::info!(
-                    "editorial enrichment complete: {} reviews added, {} errors",
-                    result.reviews_added,
-                    result.errors.len(),
+                    reviews_added = result.reviews_added,
+                    errors = result.errors.len(),
+                    "editorial enrichment complete",
                 );
             }
-            Err(e) => tracing::warn!("editorial enrichment failed: {}", e),
+            Err(e) => tracing::warn!(error = %e, "editorial enrichment failed"),
         }
         ed_state.stage_manager.finish("editorial");
     });
@@ -132,6 +133,7 @@ pub async fn library_stats(State(state): State<Arc<AppState>>) -> Result<Json<Va
     })))
 }
 
+#[tracing::instrument(skip(state))]
 pub async fn trigger_analysis(State(state): State<Arc<AppState>>) -> Result<Json<Value>, AppError> {
     if maybe_spawn_analysis(&state) {
         Ok(Json(json!({ "status": "started" })))
@@ -152,13 +154,13 @@ fn maybe_spawn_analysis(state: &Arc<AppState>) -> bool {
         match analysis::analyze_library(&analysis_state.db).await {
             Ok(result) => {
                 tracing::info!(
-                    "analysis complete: {} analyzed, {} failed, {} skipped",
-                    result.tracks_analyzed,
-                    result.tracks_failed,
-                    result.tracks_skipped,
+                    analyzed = result.tracks_analyzed,
+                    failed = result.tracks_failed,
+                    skipped = result.tracks_skipped,
+                    "analysis complete",
                 );
             }
-            Err(e) => tracing::warn!("analysis failed: {}", e),
+            Err(e) => tracing::warn!(error = %e, "analysis failed"),
         }
         analysis_state.stage_manager.finish("analysis");
     });
@@ -189,12 +191,12 @@ pub async fn trigger_recommendations(State(state): State<Arc<AppState>>) -> Resu
         match riff_core::recommendations::generate_recommendations_force(&rec_state.db).await {
             Ok(result) => {
                 tracing::info!(
-                    "recommendations complete: {} albums, {} recommendations",
-                    result.albums_processed,
-                    result.recommendations_generated,
+                    albums_processed = result.albums_processed,
+                    recommendations = result.recommendations_generated,
+                    "recommendations complete",
                 );
             }
-            Err(e) => tracing::warn!("recommendations failed: {}", e),
+            Err(e) => tracing::warn!(error = %e, "recommendations failed"),
         }
         rec_state.stage_manager.finish("recommendation");
     });
@@ -212,12 +214,12 @@ pub async fn trigger_artist_recommendations(State(state): State<Arc<AppState>>) 
         match riff_core::recommendations::generate_artist_recommendations_force(&rec_state.db).await {
             Ok(result) => {
                 tracing::info!(
-                    "artist recommendations complete: {} artists, {} recommendations",
-                    result.albums_processed,
-                    result.recommendations_generated,
+                    artists_processed = result.albums_processed,
+                    recommendations = result.recommendations_generated,
+                    "artist recommendations complete",
                 );
             }
-            Err(e) => tracing::warn!("artist recommendations failed: {}", e),
+            Err(e) => tracing::warn!(error = %e, "artist recommendations failed"),
         }
         rec_state.stage_manager.finish("artist_recommendation");
     });
@@ -237,14 +239,14 @@ pub async fn clear_data(
     State(state): State<Arc<AppState>>,
     Json(body): Json<ClearDataRequest>,
 ) -> Result<Json<Value>, AppError> {
-    tracing::info!("Clear data requested");
+    tracing::info!("clear data requested");
     let mut cleared = serde_json::Map::new();
 
     if body.album_recommendations == Some(true) {
         let result = sqlx::query("DELETE FROM album_recommendations")
             .execute(&state.db)
             .await?;
-        tracing::info!("Cleared {} album recommendations", result.rows_affected());
+        tracing::info!(count = result.rows_affected(), "cleared album recommendations");
         cleared.insert("album_recommendations".into(), json!(result.rows_affected()));
     }
 
@@ -252,7 +254,7 @@ pub async fn clear_data(
         let result = sqlx::query("DELETE FROM artist_recommendations")
             .execute(&state.db)
             .await?;
-        tracing::info!("Cleared {} artist recommendations", result.rows_affected());
+        tracing::info!(count = result.rows_affected(), "cleared artist recommendations");
         cleared.insert("artist_recommendations".into(), json!(result.rows_affected()));
     }
 
@@ -269,8 +271,7 @@ pub async fn clear_data(
             .execute(&state.db)
             .await?;
         let total = summaries.rows_affected() + reviews.rows_affected();
-        tracing::info!("Cleared editorial data: {} albums, {} reviews",
-            summaries.rows_affected(), reviews.rows_affected());
+        tracing::info!(albums = summaries.rows_affected(), reviews = reviews.rows_affected(), "cleared editorial data");
         cleared.insert("editorial_data".into(), json!(total));
     }
 

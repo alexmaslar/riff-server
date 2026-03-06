@@ -80,7 +80,7 @@ pub async fn master_playlist(
         return Err(AppError::Internal("ffmpeg not available".into()));
     }
 
-    tracing::info!("[HLS] master playlist request: {id}");
+    tracing::info!(track_id = %id, "master playlist request");
 
     // Verify track exists
     sqlx::query_scalar::<_, String>("SELECT id FROM tracks WHERE id = ?")
@@ -192,7 +192,7 @@ pub async fn variant_playlist(
             if is_complete {
                 Action::Cached
             } else {
-                tracing::warn!("[HLS] stale playlist missing #EXT-X-ENDLIST, regenerating: {gen_key}");
+                tracing::warn!(key = %gen_key, "stale playlist missing #EXT-X-ENDLIST, regenerating");
                 let _ = std::fs::remove_dir_all(&variant_dir);
                 generating.insert(gen_key.clone());
                 Action::Generate
@@ -207,10 +207,10 @@ pub async fn variant_playlist(
 
     match action {
         Action::Cached => {
-            tracing::info!("[HLS] variant playlist cache hit: {gen_key}");
+            tracing::info!(key = %gen_key, "variant playlist cache hit");
         }
         Action::Generate => {
-            tracing::info!("[HLS] generating segments for {gen_key}");
+            tracing::info!(key = %gen_key, "generating segments");
             let codec = if state.ffmpeg_has_fdk_aac {
                 "libfdk_aac"
             } else {
@@ -225,10 +225,10 @@ pub async fn variant_playlist(
             let result = generate_segments(&file_path, &variant_dir, bitrate, codec).await;
             state.hls_generating.lock().await.remove(&gen_key);
             result?;
-            tracing::info!("[HLS] segments ready for {gen_key}");
+            tracing::info!(key = %gen_key, "segments ready");
         }
         Action::Wait => {
-            tracing::info!("[HLS] waiting for in-progress generation: {gen_key}");
+            tracing::info!(key = %gen_key, "waiting for in-progress generation");
             let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
             let mut poll = tokio::time::interval(Duration::from_millis(200));
             loop {
@@ -240,7 +240,7 @@ pub async fn variant_playlist(
                     return Err(AppError::Internal("HLS generation timed out".into()));
                 }
             }
-            tracing::info!("[HLS] wait complete for {gen_key}");
+            tracing::info!(key = %gen_key, "wait complete");
         }
     }
 
@@ -277,11 +277,11 @@ pub async fn serve_segment(
     let segment_path = match find_segment(&base, &variant, &segment) {
         Ok(path) => path,
         Err(e) => {
-            tracing::warn!("[HLS] segment not found: {id}/{variant}/{segment}");
+            tracing::warn!(track_id = %id, variant = %variant, segment = %segment, "segment not found");
             return Err(e);
         }
     };
-    tracing::info!("[HLS] serving segment: {id}/{variant}/{segment}");
+    tracing::debug!(track_id = %id, variant = %variant, segment = %segment, "serving segment");
 
     // Touch track dir mtime so cleanup_hls_cache knows it's still in use.
     // Without this, only variant_playlist touches mtime — during long playback

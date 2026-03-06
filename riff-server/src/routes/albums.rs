@@ -116,6 +116,7 @@ pub struct TrackSummary {
     pub album_play_count: Option<i64>,
 }
 
+#[tracing::instrument(skip(state, claims))]
 pub async fn list_albums(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<Claims>,
@@ -479,6 +480,7 @@ pub async fn build_album_detail(
     })
 }
 
+#[tracing::instrument(skip(state, claims))]
 pub async fn get_album(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<Claims>,

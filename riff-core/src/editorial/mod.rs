@@ -57,10 +57,7 @@ pub async fn enrich_library_editorial(
         }
 
         let batch_count = albums.len();
-        info!(
-            "editorial: enriching batch of {} albums (offset {})",
-            batch_count, offset
-        );
+        info!(batch = batch_count, offset, "editorial: enriching album batch");
 
         for (album_id, title, artist_name, release_date) in &albums {
             match enrich_album(
@@ -81,7 +78,7 @@ pub async fn enrich_library_editorial(
                 }
                 Err(e) => {
                     let msg = format!("{} - {}: {}", artist_name, title, e);
-                    warn!("editorial album error: {}", msg);
+                    warn!(details = %msg, "editorial album error");
                     result.errors.push(msg);
                 }
             }
@@ -94,9 +91,9 @@ pub async fn enrich_library_editorial(
     }
 
     info!(
-        "editorial enrichment complete: {} reviews added, {} errors",
-        result.reviews_added,
-        result.errors.len()
+        reviews_added = result.reviews_added,
+        errors = result.errors.len(),
+        "editorial enrichment complete",
     );
 
     Ok(result)
@@ -170,10 +167,7 @@ pub async fn enrich_album(
             }
         }
 
-        info!(
-            "editorial: querying '{}' for '{}' by '{}'",
-            source, clean_title, artist_name
-        );
+        info!(source = %source, album = %clean_title, artist = %artist_name, "editorial: querying");
 
         let reviews = match tokio::time::timeout(
             std::time::Duration::from_secs(30),
@@ -182,34 +176,19 @@ pub async fn enrich_album(
         .await
         {
             Ok(Ok(Some(result))) if !result.reviews.is_empty() => {
-                info!(
-                    "editorial: '{}' found {} review(s) for '{}' by '{}'",
-                    source,
-                    result.reviews.len(),
-                    clean_title,
-                    artist_name
-                );
+                info!(source = %source, album = %clean_title, artist = %artist_name, count = result.reviews.len(), "editorial: reviews found");
                 result.reviews
             }
             Ok(Ok(_)) => {
-                info!(
-                    "editorial: '{}' no review found for '{}' by '{}'",
-                    source, clean_title, artist_name
-                );
+                info!(source = %source, album = %clean_title, artist = %artist_name, "editorial: no review found");
                 Vec::new()
             }
             Ok(Err(e)) => {
-                warn!(
-                    "editorial: '{}' error for '{}' by '{}': {}",
-                    source, clean_title, artist_name, e
-                );
+                warn!(source = %source, album = %clean_title, artist = %artist_name, error = %e, "editorial: provider error");
                 Vec::new()
             }
             Err(_) => {
-                warn!(
-                    "editorial: '{}' timed out for '{}' by '{}'",
-                    source, clean_title, artist_name
-                );
+                warn!(source = %source, album = %clean_title, artist = %artist_name, "editorial: provider timed out");
                 Vec::new()
             }
         };
