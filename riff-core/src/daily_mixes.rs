@@ -11,6 +11,9 @@ const MAX_TRACKS_PER_MIX: usize = 25;
 const MAX_TRACKS_PER_ALBUM: usize = 2;
 const MAX_TRACKS_PER_ARTIST: usize = 3;
 const MIN_DISTINCT_ARTISTS: usize = 3;
+const MIN_TRACKS_PER_MIX: usize = 20;
+const MAX_SEED_RETRIES: usize = 3;
+const SEED_ARTIST_TRACK_CAP: usize = 10;
 
 // Scoring weights
 const SCORE_FAV_TRACK: f64 = 3.0;
@@ -324,7 +327,7 @@ async fn generate_artist_mix(
     .fetch_all(pool)
     .await?;
 
-    if top_artists.is_empty() {
+    let artist_list = if top_artists.is_empty() {
         // Fallback: pick from artists with highest-rated albums
         let fallback_artists = sqlx::query(
             "SELECT ar.id, ar.name
@@ -343,31 +346,86 @@ async fn generate_artist_mix(
             info!("artist mix: no top-played or rated artists found for {user_id}, skipping");
             return Ok(());
         }
+        fallback_artists
+    } else {
+        top_artists
+    };
 
-        let idx = seed_index(user_id, date_str, fallback_artists.len());
-        let artist_id: String = fallback_artists[idx].get("id");
-        let artist_name: String = fallback_artists[idx].get("name");
+    let base_idx = seed_index(user_id, date_str, artist_list.len());
+    let retries = MAX_SEED_RETRIES.min(artist_list.len());
+    let mut best_result: Option<(String, String, String, Vec<MixTrack>)> = None;
 
-        return build_artist_mix(pool, user_id, date_str, &artist_id, &artist_name, used_track_ids, library_ids_json, library_id).await;
+    for attempt in 0..retries {
+        let idx = (base_idx + attempt) % artist_list.len();
+        let artist_id: String = artist_list[idx].get("id");
+        let artist_name: String = artist_list[idx].get("name");
+
+        let result = build_artist_mix_tracks(
+            pool, user_id, date_str, &artist_id, used_track_ids, library_ids_json,
+        ).await?;
+
+        let seed_tag = format!("artist:{artist_id}");
+        if result.len() >= MIN_TRACKS_PER_MIX {
+            best_result = Some((artist_name, seed_tag, artist_id, result));
+            break;
+        }
+
+        match &best_result {
+            Some((_, _, _, prev)) if prev.len() >= result.len() => {}
+            _ => { best_result = Some((artist_name, seed_tag, artist_id, result)); }
+        }
     }
 
-    let idx = seed_index(user_id, date_str, top_artists.len());
-    let artist_id: String = top_artists[idx].get("id");
-    let artist_name: String = top_artists[idx].get("name");
+    let Some((artist_name, seed_tag, seed_artist_id, selected)) = best_result else {
+        info!("artist mix: all seed retries produced no tracks for {user_id}, skipping");
+        return Ok(());
+    };
 
-    build_artist_mix(pool, user_id, date_str, &artist_id, &artist_name, used_track_ids, library_ids_json, library_id).await
+    if selected.is_empty() {
+        info!("artist mix: scoring produced no tracks for {user_id}, skipping");
+        return Ok(());
+    }
+
+    let genres: Vec<String> = sqlx::query(
+        "SELECT DISTINCT j.value as genre
+         FROM albums a, json_each(a.genre) j
+         WHERE a.artist_id = ? AND a.library_id IN (SELECT value FROM json_each(?))
+         LIMIT 3",
+    )
+    .bind(&seed_artist_id)
+    .bind(library_ids_json)
+    .fetch_all(pool)
+    .await?
+    .iter()
+    .map(|r| r.get("genre"))
+    .collect();
+
+    let title = format!("{} Mix", artist_name);
+    let description = if genres.is_empty() {
+        format!("Tracks inspired by {}", artist_name)
+    } else {
+        genres.join(", ")
+    };
+
+    insert_mix(
+        pool, user_id, date_str, "artist", &title, &description,
+        &seed_tag, &selected, library_id,
+    )
+    .await?;
+
+    used_track_ids.extend(selected.iter().map(|t| t.id.clone()));
+    Ok(())
 }
 
-async fn build_artist_mix(
+/// Build artist mix tracks without inserting — returns selected tracks for retry evaluation.
+async fn build_artist_mix_tracks(
     pool: &SqlitePool,
     user_id: &str,
     date_str: &str,
     seed_artist_id: &str,
-    seed_artist_name: &str,
-    used_track_ids: &mut Vec<String>,
+    used_track_ids: &[String],
     library_ids_json: &str,
-    library_id: Option<&str>,
-) -> Result<()> {
+) -> Result<Vec<MixTrack>> {
     // Get the seed artist's genres/styles (scoped by library)
     let artist_genres = sqlx::query(
         "SELECT DISTINCT j.value as genre
@@ -445,13 +503,6 @@ async fn build_artist_mix(
         q.fetch_all(pool).await?
     };
 
-    let title = format!("{} Mix", seed_artist_name);
-    let description = if genres.is_empty() {
-        format!("Tracks inspired by {}", seed_artist_name)
-    } else {
-        genres.iter().take(3).cloned().collect::<Vec<_>>().join(", ")
-    };
-
     let artist_centroid = compute_artist_bliss_centroid(pool, seed_artist_id).await?;
     let ctx = ScoringContext {
         pool,
@@ -460,29 +511,10 @@ async fn build_artist_mix(
         used_track_ids,
         compilation_penalty: SCORE_COMPILATION_PENALTY,
         bliss_centroid: artist_centroid.as_deref(),
+        max_tracks_per_artist: MAX_TRACKS_PER_ARTIST,
+        seed_artist_id: Some(seed_artist_id),
     };
-    let selected = score_and_select(&candidate_tracks, &ctx).await?;
-
-    if selected.is_empty() {
-        info!("artist mix: scoring produced no tracks for {user_id} (seed artist {seed_artist_id}), skipping");
-        return Ok(());
-    }
-
-    insert_mix(
-        pool,
-        user_id,
-        date_str,
-        "artist",
-        &title,
-        &description,
-        &format!("artist:{seed_artist_id}"),
-        &selected,
-        library_id,
-    )
-    .await?;
-
-    used_track_ids.extend(selected.iter().map(|t| t.id.clone()));
-    Ok(())
+    score_and_select(&candidate_tracks, &ctx).await
 }
 
 // ─── Genre Mix ───────────────────────────────────────────────────────────────
@@ -536,49 +568,72 @@ async fn generate_genre_mix(
         return Ok(());
     }
 
-    let idx = seed_index(user_id, date_str, genres.len());
-    let seed_genre = &genres[idx];
+    let base_idx = seed_index(user_id, date_str, genres.len());
+    let retries = MAX_SEED_RETRIES.min(genres.len());
+    let mut best_result: Option<(String, Vec<MixTrack>)> = None;
 
-    // Get tracks from this genre, diverse artists (scoped by library)
-    let candidate_tracks = sqlx::query(
-        "SELECT t.id, t.title, t.album_id, a.artist_id, ar.name as artist_name,
-                t.duration_seconds, t.bpm_analyzed, t.bpm_tag,
-                t.key_analyzed, t.loudness_lufs,
-                t.bliss_features, t.mood,
-                COALESCE(a.rating, 5.0) as rating,
-                a.play_count, a.is_compilation, a.moods
-         FROM tracks t
-         JOIN albums a ON t.album_id = a.id
-         JOIN artists ar ON a.artist_id = ar.id
-         WHERE t.library_id IN (SELECT value FROM json_each(?))
-           AND a.id IN (
-             SELECT DISTINCT a2.id FROM albums a2, json_each(a2.genre) jg
-             WHERE jg.value = ?
-             UNION
-             SELECT DISTINCT a3.id FROM albums a3, json_each(a3.style) js
-             WHERE js.value = ?
-         )
-         ORDER BY rating DESC
-         LIMIT 200",
-    )
-    .bind(library_ids_json)
-    .bind(seed_genre)
-    .bind(seed_genre)
-    .fetch_all(pool)
-    .await?;
+    for attempt in 0..retries {
+        let idx = (base_idx + attempt) % genres.len();
+        let seed_genre = &genres[idx];
 
-    let ctx = ScoringContext {
-        pool,
-        user_id,
-        date_str,
-        used_track_ids,
-        compilation_penalty: 0.0,
-        bliss_centroid: None,
+        // Get tracks from this genre, diverse artists (scoped by library)
+        let candidate_tracks = sqlx::query(
+            "SELECT t.id, t.title, t.album_id, a.artist_id, ar.name as artist_name,
+                    t.duration_seconds, t.bpm_analyzed, t.bpm_tag,
+                    t.key_analyzed, t.loudness_lufs,
+                    t.bliss_features, t.mood,
+                    COALESCE(a.rating, 5.0) as rating,
+                    a.play_count, a.is_compilation, a.moods
+             FROM tracks t
+             JOIN albums a ON t.album_id = a.id
+             JOIN artists ar ON a.artist_id = ar.id
+             WHERE t.library_id IN (SELECT value FROM json_each(?))
+               AND a.id IN (
+                 SELECT DISTINCT a2.id FROM albums a2, json_each(a2.genre) jg
+                 WHERE jg.value = ?
+                 UNION
+                 SELECT DISTINCT a3.id FROM albums a3, json_each(a3.style) js
+                 WHERE js.value = ?
+             )
+             ORDER BY rating DESC
+             LIMIT 200",
+        )
+        .bind(library_ids_json)
+        .bind(seed_genre)
+        .bind(seed_genre)
+        .fetch_all(pool)
+        .await?;
+
+        let ctx = ScoringContext {
+            pool,
+            user_id,
+            date_str,
+            used_track_ids,
+            compilation_penalty: 0.0,
+            bliss_centroid: None,
+            max_tracks_per_artist: MAX_TRACKS_PER_ARTIST,
+            seed_artist_id: None,
+        };
+        let result = score_and_select(&candidate_tracks, &ctx).await?;
+
+        if result.len() >= MIN_TRACKS_PER_MIX {
+            best_result = Some((seed_genre.clone(), result));
+            break;
+        }
+
+        match &best_result {
+            Some((_, prev)) if prev.len() >= result.len() => {}
+            _ => { best_result = Some((seed_genre.clone(), result)); }
+        }
+    }
+
+    let Some((seed_genre, selected)) = best_result else {
+        info!("genre mix: all seed retries produced no tracks for {user_id}, skipping");
+        return Ok(());
     };
-    let selected = score_and_select(&candidate_tracks, &ctx).await?;
 
     if selected.is_empty() {
-        info!("genre mix: scoring produced no tracks for {user_id} (seed genre '{seed_genre}'), skipping");
+        info!("genre mix: scoring produced no tracks for {user_id}, skipping");
         return Ok(());
     }
 
@@ -660,6 +715,8 @@ async fn generate_deep_cuts_mix(
             used_track_ids,
             compilation_penalty: 0.0,
             bliss_centroid: user_centroid.as_deref(),
+            max_tracks_per_artist: MAX_TRACKS_PER_ARTIST,
+            seed_artist_id: None,
         };
         let selected = score_and_select(&fallback, &ctx).await?;
         if selected.is_empty() {
@@ -684,8 +741,54 @@ async fn generate_deep_cuts_mix(
         used_track_ids,
         compilation_penalty: 0.0,
         bliss_centroid: user_centroid.as_deref(),
+        max_tracks_per_artist: MAX_TRACKS_PER_ARTIST,
+        seed_artist_id: None,
     };
-    let selected = score_and_select(&candidate_tracks, &ctx).await?;
+    let mut selected = score_and_select(&candidate_tracks, &ctx).await?;
+
+    // If primary query yields too few tracks, merge with rarely-played fallback
+    if selected.len() < MIN_TRACKS_PER_MIX {
+        let fallback = sqlx::query(
+            "SELECT t.id, t.title, t.album_id, a.artist_id, ar.name as artist_name,
+                    t.duration_seconds, t.bpm_analyzed, t.bpm_tag,
+                    t.key_analyzed, t.loudness_lufs,
+                    t.bliss_features, t.mood,
+                    COALESCE(a.rating, 5.0) as rating,
+                    a.play_count, a.is_compilation, a.moods
+             FROM tracks t
+             JOIN albums a ON t.album_id = a.id
+             JOIN artists ar ON a.artist_id = ar.id
+             WHERE a.play_count <= 1
+               AND t.library_id IN (SELECT value FROM json_each(?))
+             ORDER BY COALESCE(a.rating, 5.0) DESC, RANDOM()
+             LIMIT 200",
+        )
+        .bind(library_ids_json)
+        .fetch_all(pool)
+        .await?;
+
+        if !fallback.is_empty() {
+            // Dedup: exclude tracks already selected
+            let already: HashSet<String> = selected.iter().map(|t| t.id.clone()).collect();
+            let mut extended_used: Vec<String> = used_track_ids.to_vec();
+            extended_used.extend(already.iter().cloned());
+
+            let ctx2 = ScoringContext {
+                pool,
+                user_id,
+                date_str,
+                used_track_ids: &extended_used,
+                compilation_penalty: 0.0,
+                bliss_centroid: user_centroid.as_deref(),
+                max_tracks_per_artist: MAX_TRACKS_PER_ARTIST,
+                seed_artist_id: None,
+            };
+            let mut extra = score_and_select(&fallback, &ctx2).await?;
+            extra.truncate(MAX_TRACKS_PER_MIX.saturating_sub(selected.len()));
+            selected.extend(extra);
+        }
+    }
+
     if selected.is_empty() {
         info!("deep cuts: scoring produced no tracks for {user_id}, skipping");
         return Ok(());
@@ -752,43 +855,67 @@ async fn generate_decade_mix(
         return Ok(());
     }
 
-    let idx = seed_index(user_id, date_str, decades.len());
-    let seed_decade = decades[idx];
-    let decade_end = seed_decade + 9;
+    let base_idx = seed_index(user_id, date_str, decades.len());
+    let retries = MAX_SEED_RETRIES.min(decades.len());
+    let mut best_result: Option<(i32, Vec<MixTrack>)> = None;
 
-    // Get tracks from this decade (scoped by library)
-    let candidate_tracks = sqlx::query(
-        "SELECT t.id, t.title, t.album_id, a.artist_id, ar.name as artist_name,
-                t.duration_seconds, t.bpm_analyzed, t.bpm_tag,
-                t.key_analyzed, t.loudness_lufs,
-                t.bliss_features, t.mood,
-                COALESCE(a.rating, 5.0) as rating,
-                a.play_count, a.is_compilation, a.moods
-         FROM tracks t
-         JOIN albums a ON t.album_id = a.id
-         JOIN artists ar ON a.artist_id = ar.id
-         WHERE a.year >= ? AND a.year <= ?
-           AND t.library_id IN (SELECT value FROM json_each(?))
-         ORDER BY rating DESC
-         LIMIT 200",
-    )
-    .bind(seed_decade)
-    .bind(decade_end)
-    .bind(library_ids_json)
-    .fetch_all(pool)
-    .await?;
+    for attempt in 0..retries {
+        let idx = (base_idx + attempt) % decades.len();
+        let seed_decade = decades[idx];
+        let decade_end = seed_decade + 9;
 
-    let ctx = ScoringContext {
-        pool,
-        user_id,
-        date_str,
-        used_track_ids,
-        compilation_penalty: 0.0,
-        bliss_centroid: None,
+        // Get tracks from this decade (scoped by library)
+        let candidate_tracks = sqlx::query(
+            "SELECT t.id, t.title, t.album_id, a.artist_id, ar.name as artist_name,
+                    t.duration_seconds, t.bpm_analyzed, t.bpm_tag,
+                    t.key_analyzed, t.loudness_lufs,
+                    t.bliss_features, t.mood,
+                    COALESCE(a.rating, 5.0) as rating,
+                    a.play_count, a.is_compilation, a.moods
+             FROM tracks t
+             JOIN albums a ON t.album_id = a.id
+             JOIN artists ar ON a.artist_id = ar.id
+             WHERE a.year >= ? AND a.year <= ?
+               AND t.library_id IN (SELECT value FROM json_each(?))
+             ORDER BY rating DESC
+             LIMIT 200",
+        )
+        .bind(seed_decade)
+        .bind(decade_end)
+        .bind(library_ids_json)
+        .fetch_all(pool)
+        .await?;
+
+        let ctx = ScoringContext {
+            pool,
+            user_id,
+            date_str,
+            used_track_ids,
+            compilation_penalty: 0.0,
+            bliss_centroid: None,
+            max_tracks_per_artist: MAX_TRACKS_PER_ARTIST,
+            seed_artist_id: None,
+        };
+        let result = score_and_select(&candidate_tracks, &ctx).await?;
+
+        if result.len() >= MIN_TRACKS_PER_MIX {
+            best_result = Some((seed_decade, result));
+            break;
+        }
+
+        match &best_result {
+            Some((_, prev)) if prev.len() >= result.len() => {}
+            _ => { best_result = Some((seed_decade, result)); }
+        }
+    }
+
+    let Some((seed_decade, selected)) = best_result else {
+        info!("decade mix: all seed retries produced no tracks for {user_id}, skipping");
+        return Ok(());
     };
-    let selected = score_and_select(&candidate_tracks, &ctx).await?;
+
     if selected.is_empty() {
-        info!("decade mix: scoring produced no tracks for {user_id} (seed decade {seed_decade}s), skipping");
+        info!("decade mix: scoring produced no tracks for {user_id}, skipping");
         return Ok(());
     }
 
@@ -829,6 +956,8 @@ pub struct ScoringContext<'a> {
     pub used_track_ids: &'a [String],
     pub compilation_penalty: f64,
     pub bliss_centroid: Option<&'a [f64]>,
+    pub max_tracks_per_artist: usize,
+    pub seed_artist_id: Option<&'a str>,
 }
 
 /// Per-track play statistics from play_history.
@@ -1056,7 +1185,12 @@ pub async fn score_and_select(
         }
 
         let arc = artist_count.get(&track.artist_id).copied().unwrap_or(0);
-        if arc >= MAX_TRACKS_PER_ARTIST {
+        let artist_limit = if ctx.seed_artist_id == Some(track.artist_id.as_str()) {
+            SEED_ARTIST_TRACK_CAP
+        } else {
+            ctx.max_tracks_per_artist
+        };
+        if arc >= artist_limit {
             continue;
         }
 
@@ -1076,6 +1210,51 @@ pub async fn score_and_select(
             mood: track.mood.clone(),
             album_moods: track.album_moods.clone(),
         });
+    }
+
+    // Backfill pass: if we didn't reach MAX_TRACKS_PER_MIX, retry with doubled artist limits
+    if selected.len() < MAX_TRACKS_PER_MIX {
+        let selected_ids: HashSet<String> = selected.iter().map(|t| t.id.clone()).collect();
+        for track in &scored {
+            if selected.len() >= MAX_TRACKS_PER_MIX {
+                break;
+            }
+            if selected_ids.contains(&track.id) {
+                continue;
+            }
+
+            let ac = album_count.get(&track.album_id).copied().unwrap_or(0);
+            if ac >= MAX_TRACKS_PER_ALBUM {
+                continue;
+            }
+
+            let arc = artist_count.get(&track.artist_id).copied().unwrap_or(0);
+            let base_limit = if ctx.seed_artist_id == Some(track.artist_id.as_str()) {
+                SEED_ARTIST_TRACK_CAP
+            } else {
+                ctx.max_tracks_per_artist
+            };
+            if arc >= base_limit * 2 {
+                continue;
+            }
+
+            *album_count.entry(track.album_id.clone()).or_insert(0) += 1;
+            *artist_count.entry(track.artist_id.clone()).or_insert(0) += 1;
+            artist_set.insert(track.artist_id.clone());
+
+            selected.push(MixTrack {
+                id: track.id.clone(),
+                artist_id: track.artist_id.clone(),
+                album_id: track.album_id.clone(),
+                bpm: track.bpm,
+                key: track.key.clone(),
+                loudness: track.loudness,
+                bliss: track.bliss.clone(),
+                duration_seconds: track.duration_seconds,
+                mood: track.mood.clone(),
+                album_moods: track.album_moods.clone(),
+            });
+        }
     }
 
     // Enforce minimum distinct artists

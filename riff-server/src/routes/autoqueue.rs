@@ -157,6 +157,8 @@ pub async fn get_autoqueue(
         used_track_ids: &exclude_ids,
         compilation_penalty: 0.0,
         bliss_centroid: centroid.as_deref(),
+        max_tracks_per_artist: 3,
+        seed_artist_id: None,
     };
 
     let mut selected = score_and_select(&candidate_tracks, &ctx).await?;
