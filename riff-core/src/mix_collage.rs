@@ -330,7 +330,7 @@ pub fn generate_deep_cuts_cover(
     };
 
     if let Some(img) = source {
-        let diam = 640u32;
+        let diam = 800u32;
         let resized = image::imageops::resize(&img, diam, diam, image::imageops::FilterType::Lanczos3);
         let mut circle = resized;
         apply_circular_mask(&mut circle);
