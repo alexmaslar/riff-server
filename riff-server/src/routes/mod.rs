@@ -5,7 +5,6 @@ pub mod auth;
 pub mod autoqueue;
 pub mod config;
 pub mod daily_mixes;
-pub mod debug;
 pub mod downloads;
 pub mod events;
 pub mod favorites;
