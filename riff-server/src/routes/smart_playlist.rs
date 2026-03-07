@@ -100,6 +100,7 @@ pub async fn save(
 #[serde(rename_all = "camelCase")]
 pub struct GenerateBody {
     pub prompt: String,
+    pub title: Option<String>,
     pub track_count: Option<usize>,
     pub library: Option<String>,
 }
@@ -126,13 +127,35 @@ pub async fn generate(
     )
     .await?;
 
+    // Use client-provided title (original user prompt) or fall back to auto-generated name
+    let playlist_name = body
+        .title
+        .as_deref()
+        .map(|t| t.trim())
+        .filter(|t| !t.is_empty())
+        .map(|t| {
+            // Capitalize first letter
+            let mut chars = t.chars();
+            match chars.next() {
+                None => t.to_string(),
+                Some(c) => c.to_uppercase().to_string() + chars.as_str(),
+            }
+        })
+        .unwrap_or(result.name.clone());
+    let playlist_description = body
+        .title
+        .as_deref()
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .unwrap_or(result.description.clone());
+
     // Save as a playlist
     let playlist_id = Uuid::new_v4().to_string();
     sqlx::query("INSERT INTO playlists (id, user_id, name, description) VALUES (?, ?, ?, ?)")
         .bind(&playlist_id)
         .bind(&claims.sub)
-        .bind(&result.name)
-        .bind(&result.description)
+        .bind(&playlist_name)
+        .bind(&playlist_description)
         .execute(&state.db)
         .await?;
 
@@ -205,8 +228,8 @@ pub async fn generate(
 
     Ok(Json(json!({
         "id": playlist_id,
-        "name": result.name,
-        "description": result.description,
+        "name": playlist_name,
+        "description": playlist_description,
         "trackCount": track_list.len(),
         "totalDuration": total_duration,
         "tracks": track_list,
