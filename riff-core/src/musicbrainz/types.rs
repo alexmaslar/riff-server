@@ -91,6 +91,8 @@ pub struct MBArtistDetail {
     pub id: String,
     pub name: String,
     #[serde(default)]
+    pub genres: Vec<MBGenre>,
+    #[serde(default)]
     pub relations: Vec<MBRelation>,
 }
 
@@ -108,10 +110,13 @@ pub struct MBLabel {
 
 #[derive(Debug, Deserialize)]
 pub struct MBReleaseGroup {
+    pub id: String,
     #[serde(rename = "primary-type")]
     pub primary_type: Option<String>,
     #[serde(default, rename = "secondary-types")]
     pub secondary_types: Vec<String>,
+    #[serde(default)]
+    pub genres: Vec<MBGenre>,
 }
 
 // Media / Track / Recording types for ISRC enrichment

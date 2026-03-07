@@ -435,6 +435,7 @@ async fn main() -> Result<()> {
         // Smart Playlists (AI)
         .route("/playlists/ai/suggestions", get(routes::smart_playlist::get_suggestions))
         .route("/playlists/ai/save", post(routes::smart_playlist::save))
+        .route("/playlists/generate", post(routes::smart_playlist::generate))
         // History
         .route("/history", post(routes::history::record_play))
         .route("/history/albums", get(routes::history::recently_played_albums))

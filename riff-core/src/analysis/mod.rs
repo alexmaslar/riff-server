@@ -1,3 +1,5 @@
+pub mod dclap;
+
 use bliss_audio::decoder::symphonia::SymphoniaDecoder;
 use bliss_audio::decoder::Decoder;
 use bliss_audio::AnalysisIndex;
@@ -7,6 +9,8 @@ use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tracing::{info, warn};
+
+use self::dclap::DclapModel;
 
 pub struct AnalysisResult {
     pub tracks_analyzed: u32,
@@ -140,8 +144,92 @@ pub async fn analyze_library(pool: &SqlitePool) -> anyhow::Result<AnalysisResult
         analyzed = result.tracks_analyzed,
         failed = result.tracks_failed,
         skipped = result.tracks_skipped,
-        "analysis complete",
+        "bliss analysis complete",
     );
+
+    // Phase 4: DCLAP embedding pass — sequential through model for newly analyzed tracks
+    // plus backfill for existing tracks missing embeddings
+    let dclap_model = match DclapModel::load() {
+        Ok(m) => Some(Arc::new(m)),
+        Err(e) => {
+            warn!(error = %e, "DCLAP model not available, skipping neural embeddings");
+            None
+        }
+    };
+
+    if let Some(model) = &dclap_model {
+        // Newly analyzed tracks
+        let tracks_for_dclap: Vec<(String, String)> = if analyzed_track_ids.is_empty() {
+            Vec::new()
+        } else {
+            let placeholders: String = analyzed_track_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let query = format!(
+                "SELECT id, file_path FROM tracks WHERE id IN ({}) AND dclap_embedding IS NULL",
+                placeholders
+            );
+            let mut q = sqlx::query_as::<_, (String, String)>(&query);
+            for id in &analyzed_track_ids {
+                q = q.bind(id);
+            }
+            q.fetch_all(pool).await.unwrap_or_default()
+        };
+
+        // Backfill: existing analyzed tracks without DCLAP embeddings (rate-limited)
+        let backfill_tracks: Vec<(String, String)> = sqlx::query_as(
+            "SELECT id, file_path FROM tracks WHERE analysis_status = 'complete' AND dclap_embedding IS NULL LIMIT 100",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default();
+
+        let mut dclap_ids: Vec<(String, String)> = tracks_for_dclap;
+        // Add backfill tracks not already in the list
+        let existing_ids: std::collections::HashSet<String> = dclap_ids.iter().map(|(id, _)| id.clone()).collect();
+        for (id, path) in backfill_tracks {
+            if !existing_ids.contains(&id) {
+                dclap_ids.push((id, path));
+            }
+        }
+
+        if !dclap_ids.is_empty() {
+            info!(count = dclap_ids.len(), "computing DCLAP embeddings");
+            let mut dclap_ok = 0u32;
+            let mut dclap_fail = 0u32;
+
+            for (track_id, file_path) in &dclap_ids {
+                let model = Arc::clone(model);
+                let path = file_path.clone();
+                let embedding = tokio::task::spawn_blocking(move || model.embed_audio(&path)).await;
+
+                match embedding {
+                    Ok(Ok(emb)) => {
+                        let bytes = dclap::embedding_to_bytes(&emb);
+                        if let Err(e) = sqlx::query("UPDATE tracks SET dclap_embedding = ? WHERE id = ?")
+                            .bind(&bytes)
+                            .bind(track_id)
+                            .execute(pool)
+                            .await
+                        {
+                            warn!(track_id, error = %e, "failed to store DCLAP embedding");
+                            dclap_fail += 1;
+                        } else {
+                            dclap_ok += 1;
+                        }
+                    }
+                    Ok(Err(e)) => {
+                        warn!(path = %file_path, error = %e, "DCLAP embedding failed");
+                        dclap_fail += 1;
+                    }
+                    Err(e) => {
+                        warn!(path = %file_path, error = %e, "DCLAP task panicked");
+                        dclap_fail += 1;
+                    }
+                }
+            }
+
+            info!(ok = dclap_ok, failed = dclap_fail, "DCLAP embeddings complete");
+        }
+    }
 
     // Collect unique album IDs from analyzed tracks
     if !analyzed_track_ids.is_empty() {

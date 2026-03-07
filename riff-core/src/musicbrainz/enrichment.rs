@@ -188,7 +188,14 @@ async fn enrich_one_album(
     let mut genres: Vec<String> = release.genres.iter()
         .map(|g| crate::db::title_case_genre(&g.name))
         .collect();
+
+    // Fallback: release-group → artist genres
+    if genres.is_empty() {
+        genres = fetch_genre_fallbacks(client, &release).await;
+    }
+
     genres.sort();
+    genres.dedup();
     let genre_json = serde_json::to_string(&genres)?;
 
     // Tags sorted alphabetically, title-cased → style column
@@ -285,6 +292,41 @@ async fn enrich_one_album(
     enrich_track_isrcs(pool, album_id, &release).await;
 
     Ok(true)
+}
+
+async fn fetch_genre_fallbacks(
+    client: &MusicBrainzClient,
+    release: &super::types::MBReleaseDetail,
+) -> Vec<String> {
+    // 1. Try release-group genres
+    if let Some(rg) = &release.release_group {
+        if let Ok(rg_detail) = client.get_release_group(&rg.id).await {
+            if !rg_detail.genres.is_empty() {
+                let mut genres: Vec<String> = rg_detail.genres.iter()
+                    .map(|g| crate::db::title_case_genre(&g.name))
+                    .collect();
+                genres.sort();
+                genres.dedup();
+                return genres;
+            }
+        }
+    }
+
+    // 2. Try artist genres
+    if let Some(ac) = release.artist_credit.first() {
+        if let Ok(artist_detail) = client.get_artist(&ac.artist.id).await {
+            if !artist_detail.genres.is_empty() {
+                let mut genres: Vec<String> = artist_detail.genres.iter()
+                    .map(|g| crate::db::title_case_genre(&g.name))
+                    .collect();
+                genres.sort();
+                genres.dedup();
+                return genres;
+            }
+        }
+    }
+
+    Vec::new()
 }
 
 async fn download_cover(

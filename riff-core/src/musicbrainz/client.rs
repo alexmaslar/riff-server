@@ -88,7 +88,7 @@ impl MusicBrainzClient {
         self.limiter.until_ready().await;
 
         let url = format!(
-            "{}/artist/{}?inc=url-rels&fmt=json",
+            "{}/artist/{}?inc=url-rels+genres&fmt=json",
             BASE_URL, mbid
         );
 
@@ -97,6 +97,24 @@ impl MusicBrainzClient {
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
             anyhow::bail!("MusicBrainz artist detail error {}: {}", status, body);
+        }
+
+        Ok(resp.json().await?)
+    }
+
+    pub async fn get_release_group(&self, mbid: &str) -> anyhow::Result<MBReleaseGroup> {
+        self.limiter.until_ready().await;
+
+        let url = format!(
+            "{}/release-group/{}?inc=genres&fmt=json",
+            BASE_URL, mbid
+        );
+
+        let resp = self.http.get(&url).send().await?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("MusicBrainz release-group detail error {}: {}", status, body);
         }
 
         Ok(resp.json().await?)
