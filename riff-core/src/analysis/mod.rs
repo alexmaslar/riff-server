@@ -174,9 +174,9 @@ pub async fn analyze_library(pool: &SqlitePool) -> anyhow::Result<AnalysisResult
             q.fetch_all(pool).await.unwrap_or_default()
         };
 
-        // Backfill: existing analyzed tracks without DCLAP embeddings (rate-limited)
+        // Backfill: existing analyzed tracks without DCLAP embeddings
         let backfill_tracks: Vec<(String, String)> = sqlx::query_as(
-            "SELECT id, file_path FROM tracks WHERE analysis_status = 'complete' AND dclap_embedding IS NULL LIMIT 100",
+            "SELECT id, file_path FROM tracks WHERE analysis_status = 'complete' AND dclap_embedding IS NULL",
         )
         .fetch_all(pool)
         .await
@@ -192,41 +192,104 @@ pub async fn analyze_library(pool: &SqlitePool) -> anyhow::Result<AnalysisResult
         }
 
         if !dclap_ids.is_empty() {
-            info!(count = dclap_ids.len(), "computing DCLAP embeddings");
+            let dclap_total = dclap_ids.len();
+            info!(count = dclap_total, "computing DCLAP embeddings");
             let mut dclap_ok = 0u32;
             let mut dclap_fail = 0u32;
 
-            for (track_id, file_path) in &dclap_ids {
-                let model = Arc::clone(model);
-                let path = file_path.clone();
-                let embedding = tokio::task::spawn_blocking(move || model.embed_audio(&path)).await;
+            // Pipeline: decode audio ahead while ONNX inference runs
+            let (tx, mut rx) = tokio::sync::mpsc::channel::<(String, String, Result<(Vec<ndarray::Array2<f32>>, u128, u128), String>)>(3);
 
-                match embedding {
-                    Ok(Ok(emb)) => {
-                        let bytes = dclap::embedding_to_bytes(&emb);
-                        if let Err(e) = sqlx::query("UPDATE tracks SET dclap_embedding = ? WHERE id = ?")
-                            .bind(&bytes)
-                            .bind(track_id)
-                            .execute(pool)
-                            .await
-                        {
-                            warn!(track_id, error = %e, "failed to store DCLAP embedding");
-                            dclap_fail += 1;
-                        } else {
-                            dclap_ok += 1;
+            let producer = tokio::spawn(async move {
+                for (track_id, file_path) in dclap_ids {
+                    let path = file_path.clone();
+                    let mels_result = tokio::task::spawn_blocking(move || {
+                        let t0 = std::time::Instant::now();
+                        let samples = dclap::decode_audio_mono(&path)?;
+                        let decode_ms = t0.elapsed().as_millis();
+
+                        if samples.is_empty() {
+                            anyhow::bail!("no audio samples decoded from {}", path);
+                        }
+                        let segments = dclap::segment_audio(&samples, 44100);
+                        if segments.is_empty() {
+                            anyhow::bail!("no valid segments from {}", path);
+                        }
+
+                        let t1 = std::time::Instant::now();
+                        let mels: Vec<ndarray::Array2<f32>> = segments.iter().map(|s| dclap::compute_log_mel_spectrogram(s)).collect();
+                        let mel_ms = t1.elapsed().as_millis();
+
+                        Ok((mels, decode_ms, mel_ms))
+                    }).await;
+
+                    let result = match mels_result {
+                        Ok(Ok(data)) => Ok(data),
+                        Ok(Err(e)) => Err(format!("{e}")),
+                        Err(e) => Err(format!("task panicked: {e}")),
+                    };
+
+                    if tx.send((track_id, file_path, result)).await.is_err() {
+                        break;
+                    }
+                }
+            });
+
+            while let Some((track_id, file_path, mels_result)) = rx.recv().await {
+                match mels_result {
+                    Ok((mels, decode_ms, mel_ms)) => {
+                        let model = Arc::clone(model);
+                        let seg_count = mels.len();
+                        let t2 = std::time::Instant::now();
+                        let embedding = tokio::task::spawn_blocking(move || {
+                            model.embed_audio_from_mels(&mels)
+                        }).await;
+                        let onnx_ms = t2.elapsed().as_millis();
+
+                        let fname = Path::new(&file_path).file_name().unwrap_or_default().to_string_lossy().to_string();
+                        info!(
+                            "DCLAP timing: decode={}ms mel={}ms onnx={}ms segments={} | {}",
+                            decode_ms, mel_ms, onnx_ms, seg_count, fname
+                        );
+
+                        match embedding {
+                            Ok(Ok(emb)) => {
+                                let bytes = dclap::embedding_to_bytes(&emb);
+                                if let Err(e) = sqlx::query("UPDATE tracks SET dclap_embedding = ? WHERE id = ?")
+                                    .bind(&bytes)
+                                    .bind(&track_id)
+                                    .execute(pool)
+                                    .await
+                                {
+                                    warn!(track_id, error = %e, "failed to store DCLAP embedding");
+                                    dclap_fail += 1;
+                                } else {
+                                    dclap_ok += 1;
+                                }
+                            }
+                            Ok(Err(e)) => {
+                                warn!(path = %file_path, error = %e, "DCLAP embedding failed");
+                                dclap_fail += 1;
+                            }
+                            Err(e) => {
+                                warn!(path = %file_path, error = %e, "DCLAP task panicked");
+                                dclap_fail += 1;
+                            }
                         }
                     }
-                    Ok(Err(e)) => {
-                        warn!(path = %file_path, error = %e, "DCLAP embedding failed");
-                        dclap_fail += 1;
-                    }
                     Err(e) => {
-                        warn!(path = %file_path, error = %e, "DCLAP task panicked");
+                        warn!(path = %file_path, error = %e, "DCLAP mel computation failed");
                         dclap_fail += 1;
                     }
                 }
+
+                let done = dclap_ok + dclap_fail;
+                if done % 50 == 0 || done as usize == dclap_total {
+                    info!(done, total = dclap_total, "DCLAP progress");
+                }
             }
 
+            producer.await.ok();
             info!(ok = dclap_ok, failed = dclap_fail, "DCLAP embeddings complete");
         }
     }

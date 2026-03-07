@@ -33,7 +33,6 @@ image = { version = "0.25", features = ["png", "jpeg"] }
 sha2 = "0.10"
 ort = { version = "2.0.0-rc.12", default-features = false, features = ["ndarray", "std", "download-binaries", "copy-dylibs", "tls-native"] }
 ndarray = "0.16"
-mel_spec = "0.3"
 tokenizers = { version = "0.21", default-features = false, features = ["fancy-regex"] }
 
 [dev-dependencies]
