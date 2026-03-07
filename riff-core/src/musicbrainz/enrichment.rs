@@ -536,7 +536,7 @@ pub async fn enrich_artist_bios_wikipedia(
 ) -> anyhow::Result<Vec<String>> {
     let rows: Vec<(String, String, String)> = sqlx::query_as(
         "SELECT id, name, external_id FROM artists \
-         WHERE bio IS NULL AND external_id IS NOT NULL"
+         WHERE bio_status = 'pending' AND external_id IS NOT NULL"
     )
     .fetch_all(pool)
     .await?;
@@ -564,6 +564,10 @@ pub async fn enrich_artist_bios_wikipedia(
 
         let Some(qid) = wikidata_id else {
             debug!(artist = %artist_name, "no Wikidata link");
+            sqlx::query("UPDATE artists SET bio_status = 'not_found' WHERE id = ?")
+                .bind(artist_id)
+                .execute(pool)
+                .await?;
             continue;
         };
 
@@ -572,10 +576,18 @@ pub async fn enrich_artist_bios_wikipedia(
             Ok(Some(title)) => title,
             Ok(None) => {
                 debug!(artist = %artist_name, wikidata_id = %qid, "no English Wikipedia article");
+                sqlx::query("UPDATE artists SET bio_status = 'not_found' WHERE id = ?")
+                    .bind(artist_id)
+                    .execute(pool)
+                    .await?;
                 continue;
             }
             Err(e) => {
                 warn!(artist = %artist_name, wikidata_id = %qid, error = %e, "Wikidata lookup failed");
+                sqlx::query("UPDATE artists SET bio_status = 'not_found' WHERE id = ?")
+                    .bind(artist_id)
+                    .execute(pool)
+                    .await?;
                 continue;
             }
         };
@@ -598,7 +610,7 @@ pub async fn enrich_artist_bios_wikipedia(
                     Ok(summary) => {
                         if let Some(extract) = summary.extract.filter(|s| s.len() > 20) {
                             sqlx::query(
-                                "UPDATE artists SET bio = ? WHERE id = ? AND bio IS NULL"
+                                "UPDATE artists SET bio = ?, bio_status = 'found' WHERE id = ?"
                             )
                             .bind(&extract)
                             .bind(artist_id)
@@ -606,6 +618,11 @@ pub async fn enrich_artist_bios_wikipedia(
                             .await?;
                             enriched_ids.push(artist_id.clone());
                             debug!(artist = %artist_name, chars = extract.len(), "Wikipedia bio found");
+                        } else {
+                            sqlx::query("UPDATE artists SET bio_status = 'not_found' WHERE id = ?")
+                                .bind(artist_id)
+                                .execute(pool)
+                                .await?;
                         }
                     }
                     Err(e) => warn!(artist = %artist_name, error = %e, "Wikipedia JSON parse error"),
@@ -613,6 +630,10 @@ pub async fn enrich_artist_bios_wikipedia(
             }
             Ok(resp) => {
                 debug!(artist = %artist_name, status = %resp.status(), "Wikipedia non-success response");
+                sqlx::query("UPDATE artists SET bio_status = 'not_found' WHERE id = ?")
+                    .bind(artist_id)
+                    .execute(pool)
+                    .await?;
             }
             Err(e) => {
                 warn!(artist = %artist_name, error = %e, "Wikipedia fetch error");
