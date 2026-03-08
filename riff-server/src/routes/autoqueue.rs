@@ -4,8 +4,7 @@ use axum::{
 };
 use riff_core::auth::Claims;
 use riff_core::daily_mixes::{
-    compute_artist_bliss_centroid, compute_artist_dclap_centroid,
-    compute_user_bliss_centroid, compute_user_dclap_centroid,
+    compute_artist_bliss_centroid, compute_user_bliss_centroid,
     order_for_flow, score_and_select, ScoringContext,
 };
 use serde::Deserialize;
@@ -87,7 +86,7 @@ pub async fn get_autoqueue(
             "SELECT t.id, t.title, t.album_id, a.artist_id, ar.name as artist_name,
                     t.duration_seconds, t.bpm_analyzed, t.bpm_tag,
                     t.key_analyzed, t.loudness_lufs,
-                    t.bliss_features, t.dclap_embedding, t.mood,
+                    t.bliss_features, t.mood,
                     COALESCE(a.rating, 5.0) as rating,
                     a.play_count, a.is_compilation
              FROM tracks t
@@ -112,7 +111,7 @@ pub async fn get_autoqueue(
             "SELECT t.id, t.title, t.album_id, a.artist_id, ar.name as artist_name,
                     t.duration_seconds, t.bpm_analyzed, t.bpm_tag,
                     t.key_analyzed, t.loudness_lufs,
-                    t.bliss_features, t.dclap_embedding, t.mood,
+                    t.bliss_features, t.mood,
                     COALESCE(a.rating, 5.0) as rating,
                     a.play_count, a.is_compilation
              FROM tracks t
@@ -143,17 +142,11 @@ pub async fn get_autoqueue(
         return Ok(Json(json!({ "tracks": [] })));
     }
 
-    // Compute centroids based on context (DCLAP preferred, bliss fallback)
-    let (bliss_centroid, dclap_centroid) = if params.artist_id.is_some() {
-        (
-            compute_artist_bliss_centroid(&state.db, context_artist_id).await?,
-            compute_artist_dclap_centroid(&state.db, context_artist_id).await?,
-        )
+    // Compute bliss centroid for similarity scoring
+    let bliss_centroid = if params.artist_id.is_some() {
+        compute_artist_bliss_centroid(&state.db, context_artist_id).await?
     } else {
-        (
-            compute_user_bliss_centroid(&state.db, &claims.sub).await?,
-            compute_user_dclap_centroid(&state.db, &claims.sub).await?,
-        )
+        compute_user_bliss_centroid(&state.db, &claims.sub).await?
     };
 
     let today = chrono::Utc::now().date_naive().format("%Y-%m-%d").to_string();
@@ -164,7 +157,6 @@ pub async fn get_autoqueue(
         used_track_ids: &exclude_ids,
         compilation_penalty: 0.0,
         bliss_centroid: bliss_centroid.as_deref(),
-        dclap_centroid: dclap_centroid.as_deref(),
         max_tracks_per_artist: 3,
         seed_artist_id: None,
     };

@@ -3,7 +3,6 @@ use sqlx::{Row, SqlitePool};
 use std::hash::{Hash, Hasher};
 use tracing::info;
 
-use crate::analysis::dclap;
 use crate::daily_mixes::order_for_flow;
 
 // ─── Suggestion Generation (metadata-based, no AI) ──────────────────────────
@@ -178,7 +177,7 @@ pub async fn generate_playlist_from_prompt(
         "SELECT t.id, t.title, t.album_id, a.artist_id, ar.name as artist_name,
                 t.duration_seconds, t.bpm_analyzed, t.bpm_tag,
                 t.key_analyzed, t.loudness_lufs,
-                t.bliss_features, t.dclap_embedding, t.mood,
+                t.bliss_features, t.mood,
                 a.genre, a.style, a.year, a.moods
          FROM tracks t
          JOIN albums a ON t.album_id = a.id
@@ -208,11 +207,12 @@ pub async fn generate_playlist_from_prompt(
         _ => -9.0,  // intense
     };
 
-    // Score each track
-    let mut scored: Vec<(f32, &sqlx::sqlite::SqliteRow)> = rows
+    // Score each track — (total_score, genre_score, row)
+    let mut scored: Vec<(f32, f32, &sqlx::sqlite::SqliteRow)> = rows
         .iter()
         .map(|row| {
             let mut score: f32 = 0.0;
+            let mut genre_score_final: f32 = 0.0;
 
             // Genre matching (0-60 points) — heaviest weight
             let genre_json: String = row.try_get("genre").unwrap_or_default();
@@ -233,26 +233,36 @@ pub async fn generate_playlist_from_prompt(
                     if track_genres.iter().any(|tg| tg == qg) {
                         genre_score += 60.0;
                     }
-                    // Partial/substring match (e.g. "hip hop" matches "west coast hip hop")
-                    else if track_genres.iter().any(|tg| tg.contains(qg.as_str()) || qg.contains(tg.as_str())) {
+                    // Track genre contains query (e.g. "west coast hip hop" contains "hip hop")
+                    else if track_genres.iter().any(|tg| tg.contains(qg.as_str())) {
                         genre_score += 40.0;
                     }
-                    // Style match
-                    else if track_styles.iter().any(|ts| ts.contains(qg.as_str()) || qg.contains(ts.as_str())) {
+                    // Query contains track genre, but only for multi-word track genres
+                    // (prevents "pop" matching "indie pop", but allows "hip hop" matching "lo-fi hip hop")
+                    else if track_genres.iter().any(|tg| tg.contains(' ') && qg.contains(tg.as_str())) {
+                        genre_score += 35.0;
+                    }
+                    // Style contains query or query contains multi-word style
+                    else if track_styles.iter().any(|ts| ts.contains(qg.as_str()) || (ts.contains(' ') && qg.contains(ts.as_str()))) {
                         genre_score += 25.0;
                     }
-                    // Parent genre match (e.g. "rock" matches "indie rock")
+                    // Word overlap: only when ALL query words appear in a single track genre
+                    // (prevents "indie pop" matching "indie dance" on just the word "indie")
                     else {
                         let qg_words: Vec<&str> = qg.split_whitespace().collect();
-                        let has_word_match = qg_words.iter().any(|w|
-                            track_genres.iter().any(|tg| tg.split_whitespace().any(|tw| tw == *w))
-                        );
-                        if has_word_match {
-                            genre_score += 15.0;
+                        if qg_words.len() > 1 {
+                            let has_full_match = track_genres.iter().any(|tg| {
+                                let tg_words: Vec<&str> = tg.split_whitespace().collect();
+                                qg_words.iter().all(|w| tg_words.contains(w))
+                            });
+                            if has_full_match {
+                                genre_score += 15.0;
+                            }
                         }
                     }
                 }
-                score += genre_score / query_genres.len() as f32;
+                genre_score_final = genre_score / query_genres.len() as f32;
+                score += genre_score_final;
             }
 
             // Energy/loudness matching (0-20 points)
@@ -288,9 +298,14 @@ pub async fn generate_playlist_from_prompt(
                 }
             }
 
-            (score, row)
+            (score, genre_score_final, row)
         })
         .collect();
+
+    // Filter out tracks with no genre relevance when genres were specified
+    if !query_genres.is_empty() {
+        scored.retain(|&(_, gs, _)| gs > 0.0);
+    }
 
     // Sort by score descending
     scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
@@ -305,7 +320,7 @@ pub async fn generate_playlist_from_prompt(
     let mut artist_count: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut score_map: std::collections::HashMap<String, f32> = std::collections::HashMap::new();
 
-    for (score, row) in candidates {
+    for (score, _, row) in candidates {
         if selected.len() >= track_count {
             break;
         }
@@ -339,7 +354,6 @@ pub async fn generate_playlist_from_prompt(
             key: row.try_get("key_analyzed").ok().flatten(),
             loudness: row.try_get("loudness_lufs").ok().flatten(),
             bliss: crate::daily_mixes::parse_bliss(row),
-            dclap: dclap::parse_dclap_embedding(row),
             duration_seconds: row.try_get("duration_seconds").ok().flatten(),
             mood: row.try_get("mood").ok().flatten(),
             album_moods: {

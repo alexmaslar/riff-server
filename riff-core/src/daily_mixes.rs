@@ -8,7 +8,6 @@ use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
-use crate::analysis::dclap;
 
 const MAX_TRACKS_PER_MIX: usize = 25;
 const MAX_TRACKS_PER_ALBUM: usize = 2;
@@ -131,7 +130,6 @@ pub struct MixTrack {
     pub key: Option<String>,
     pub loudness: Option<f64>,
     pub bliss: Option<Vec<f64>>,
-    pub dclap: Option<Vec<f32>>,
     pub duration_seconds: Option<i32>,
     pub mood: Option<String>,
     pub album_moods: Vec<String>,
@@ -544,7 +542,7 @@ async fn build_artist_mix_tracks(
             "SELECT t.id, t.title, t.album_id, a.artist_id, ar.name as artist_name,
                     t.duration_seconds, t.bpm_analyzed, t.bpm_tag,
                     t.key_analyzed, t.loudness_lufs,
-                    t.bliss_features, t.dclap_embedding, t.mood,
+                    t.bliss_features, t.mood,
                     COALESCE(a.rating, 5.0) as rating,
                     a.play_count, a.is_compilation, a.moods
              FROM tracks t
@@ -567,7 +565,7 @@ async fn build_artist_mix_tracks(
             "SELECT t.id, t.title, t.album_id, a.artist_id, ar.name as artist_name,
                     t.duration_seconds, t.bpm_analyzed, t.bpm_tag,
                     t.key_analyzed, t.loudness_lufs,
-                    t.bliss_features, t.dclap_embedding, t.mood,
+                    t.bliss_features, t.mood,
                     COALESCE(a.rating, 5.0) as rating,
                     a.play_count, a.is_compilation, a.moods
              FROM tracks t
@@ -596,7 +594,6 @@ async fn build_artist_mix_tracks(
     };
 
     let artist_centroid = compute_artist_bliss_centroid(pool, seed_artist_id).await?;
-    let artist_dclap_centroid = compute_artist_dclap_centroid(pool, seed_artist_id).await?;
     let ctx = ScoringContext {
         pool,
         user_id,
@@ -604,7 +601,6 @@ async fn build_artist_mix_tracks(
         used_track_ids,
         compilation_penalty: SCORE_COMPILATION_PENALTY,
         bliss_centroid: artist_centroid.as_deref(),
-        dclap_centroid: artist_dclap_centroid.as_deref(),
         max_tracks_per_artist: MAX_TRACKS_PER_ARTIST,
         seed_artist_id: Some(seed_artist_id),
     };
@@ -686,7 +682,7 @@ async fn generate_genre_mix(
             "SELECT t.id, t.title, t.album_id, a.artist_id, ar.name as artist_name,
                     t.duration_seconds, t.bpm_analyzed, t.bpm_tag,
                     t.key_analyzed, t.loudness_lufs,
-                    t.bliss_features, t.dclap_embedding, t.mood,
+                    t.bliss_features, t.mood,
                     COALESCE(a.rating, 5.0) as rating,
                     a.play_count, a.is_compilation, a.moods
              FROM tracks t
@@ -716,7 +712,6 @@ async fn generate_genre_mix(
             used_track_ids,
             compilation_penalty: 0.0,
             bliss_centroid: None,
-            dclap_centroid: None,
             max_tracks_per_artist: MAX_TRACKS_PER_ARTIST,
             seed_artist_id: None,
         };
@@ -771,7 +766,7 @@ async fn generate_deep_cuts_mix(
         "SELECT t.id, t.title, t.album_id, a.artist_id, ar.name as artist_name,
                 t.duration_seconds, t.bpm_analyzed, t.bpm_tag,
                 t.key_analyzed, t.loudness_lufs,
-                t.bliss_features, t.dclap_embedding, t.mood,
+                t.bliss_features, t.mood,
                 COALESCE(a.rating, 5.0) as rating,
                 a.play_count, a.is_compilation, a.moods
          FROM tracks t
@@ -792,7 +787,6 @@ async fn generate_deep_cuts_mix(
     .await?;
 
     let user_centroid = compute_user_bliss_centroid(pool, user_id).await?;
-    let user_dclap_centroid = compute_user_dclap_centroid(pool, user_id).await?;
 
     if candidate_tracks.is_empty() {
         // Fallback: rarely played tracks (scoped by library)
@@ -800,7 +794,7 @@ async fn generate_deep_cuts_mix(
             "SELECT t.id, t.title, t.album_id, a.artist_id, ar.name as artist_name,
                     t.duration_seconds, t.bpm_analyzed, t.bpm_tag,
                     t.key_analyzed, t.loudness_lufs,
-                    t.bliss_features, t.dclap_embedding, t.mood,
+                    t.bliss_features, t.mood,
                     COALESCE(a.rating, 5.0) as rating,
                     a.play_count, a.is_compilation, a.moods
              FROM tracks t
@@ -822,7 +816,6 @@ async fn generate_deep_cuts_mix(
             used_track_ids,
             compilation_penalty: 0.0,
             bliss_centroid: user_centroid.as_deref(),
-            dclap_centroid: user_dclap_centroid.as_deref(),
             max_tracks_per_artist: MAX_TRACKS_PER_ARTIST,
             seed_artist_id: None,
         };
@@ -849,7 +842,6 @@ async fn generate_deep_cuts_mix(
         used_track_ids,
         compilation_penalty: 0.0,
         bliss_centroid: user_centroid.as_deref(),
-        dclap_centroid: user_dclap_centroid.as_deref(),
         max_tracks_per_artist: MAX_TRACKS_PER_ARTIST,
         seed_artist_id: None,
     };
@@ -861,7 +853,7 @@ async fn generate_deep_cuts_mix(
             "SELECT t.id, t.title, t.album_id, a.artist_id, ar.name as artist_name,
                     t.duration_seconds, t.bpm_analyzed, t.bpm_tag,
                     t.key_analyzed, t.loudness_lufs,
-                    t.bliss_features, t.dclap_embedding, t.mood,
+                    t.bliss_features, t.mood,
                     COALESCE(a.rating, 5.0) as rating,
                     a.play_count, a.is_compilation, a.moods
              FROM tracks t
@@ -889,7 +881,6 @@ async fn generate_deep_cuts_mix(
                 used_track_ids: &extended_used,
                 compilation_penalty: 0.0,
                 bliss_centroid: user_centroid.as_deref(),
-                dclap_centroid: user_dclap_centroid.as_deref(),
                 max_tracks_per_artist: MAX_TRACKS_PER_ARTIST,
                 seed_artist_id: None,
             };
@@ -979,7 +970,7 @@ async fn generate_decade_mix(
             "SELECT t.id, t.title, t.album_id, a.artist_id, ar.name as artist_name,
                     t.duration_seconds, t.bpm_analyzed, t.bpm_tag,
                     t.key_analyzed, t.loudness_lufs,
-                    t.bliss_features, t.dclap_embedding, t.mood,
+                    t.bliss_features, t.mood,
                     COALESCE(a.rating, 5.0) as rating,
                     a.play_count, a.is_compilation, a.moods
              FROM tracks t
@@ -1003,7 +994,6 @@ async fn generate_decade_mix(
             used_track_ids,
             compilation_penalty: 0.0,
             bliss_centroid: None,
-            dclap_centroid: None,
             max_tracks_per_artist: MAX_TRACKS_PER_ARTIST,
             seed_artist_id: None,
         };
@@ -1054,7 +1044,6 @@ struct ScoredTrack {
     key: Option<String>,
     loudness: Option<f64>,
     bliss: Option<Vec<f64>>,
-    dclap: Option<Vec<f32>>,
     duration_seconds: Option<i32>,
     mood: Option<String>,
     album_moods: Vec<String>,
@@ -1068,7 +1057,6 @@ pub struct ScoringContext<'a> {
     pub used_track_ids: &'a [String],
     pub compilation_penalty: f64,
     pub bliss_centroid: Option<&'a [f64]>,
-    pub dclap_centroid: Option<&'a [f32]>,
     pub max_tracks_per_artist: usize,
     pub seed_artist_id: Option<&'a str>,
 }
@@ -1191,7 +1179,6 @@ pub async fn score_and_select(
             let key: Option<String> = row.try_get("key_analyzed").ok().flatten();
             let loudness: Option<f64> = row.try_get("loudness_lufs").ok().flatten();
             let bliss = parse_bliss(row);
-            let dclap_emb = dclap::parse_dclap_embedding(row);
             let duration_seconds: Option<i32> = row.try_get("duration_seconds").ok().flatten();
             let mood: Option<String> = row.try_get("mood").ok().flatten();
             let album_moods_json: String = row.try_get("moods").unwrap_or_default();
@@ -1255,12 +1242,8 @@ pub async fn score_and_select(
                 score -= ctx.compilation_penalty;
             }
 
-            // Similarity bonus: prefer DCLAP cosine, fall back to bliss euclidean
-            if let (Some(centroid), Some(ref track_dclap)) = (ctx.dclap_centroid, &dclap_emb) {
-                let sim = dclap::cosine_similarity(centroid, track_dclap);
-                // sim is -1..1 (cosine), typically 0.3..0.95 for same-genre tracks
-                score += (sim as f64 * SCORE_BLISS_MAX).clamp(0.0, SCORE_BLISS_MAX);
-            } else if let (Some(centroid), Some(ref track_bliss)) = (ctx.bliss_centroid, &bliss) {
+            // Similarity bonus: bliss euclidean distance to centroid
+            if let (Some(centroid), Some(ref track_bliss)) = (ctx.bliss_centroid, &bliss) {
                 let dist = bliss_euclidean_distance(centroid, track_bliss);
                 let similarity = (SCORE_BLISS_MAX - dist / SCORE_BLISS_SCALE).clamp(0.0, SCORE_BLISS_MAX);
                 score += similarity;
@@ -1268,7 +1251,7 @@ pub async fn score_and_select(
 
             ScoredTrack {
                 id, album_id, artist_id, score, bpm, key, loudness,
-                bliss, dclap: dclap_emb, duration_seconds, mood, album_moods, is_compilation,
+                bliss, duration_seconds, mood, album_moods, is_compilation,
             }
         })
         .collect();
@@ -1322,7 +1305,6 @@ pub async fn score_and_select(
             key: track.key.clone(),
             loudness: track.loudness,
             bliss: track.bliss.clone(),
-            dclap: track.dclap.clone(),
             duration_seconds: track.duration_seconds,
             mood: track.mood.clone(),
             album_moods: track.album_moods.clone(),
@@ -1367,7 +1349,6 @@ pub async fn score_and_select(
                 key: track.key.clone(),
                 loudness: track.loudness,
                 bliss: track.bliss.clone(),
-                dclap: track.dclap.clone(),
                 duration_seconds: track.duration_seconds,
                 mood: track.mood.clone(),
                 album_moods: track.album_moods.clone(),
@@ -1441,82 +1422,6 @@ pub async fn compute_user_bliss_centroid(
 
     let refs: Vec<&[f64]> = vectors.iter().map(|v| v.as_slice()).collect();
     Ok(compute_centroid(&refs))
-}
-
-// ─── DCLAP Centroid Functions ─────────────────────────────────────────────────
-
-/// Mean DCLAP embedding for all analyzed tracks by a given artist.
-pub async fn compute_artist_dclap_centroid(
-    pool: &SqlitePool,
-    artist_id: &str,
-) -> Result<Option<Vec<f32>>> {
-    let rows: Vec<(Vec<u8>,)> = sqlx::query_as(
-        "SELECT t.dclap_embedding
-         FROM tracks t
-         JOIN albums a ON t.album_id = a.id
-         WHERE a.artist_id = ? AND t.dclap_embedding IS NOT NULL
-         LIMIT 200",
-    )
-    .bind(artist_id)
-    .fetch_all(pool)
-    .await?;
-
-    let vectors: Vec<Vec<f32>> = rows
-        .iter()
-        .filter_map(|(blob,)| {
-            if blob.len() != 512 * 4 {
-                return None;
-            }
-            Some(
-                blob.chunks_exact(4)
-                    .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-                    .collect(),
-            )
-        })
-        .collect();
-
-    let refs: Vec<&[f32]> = vectors.iter().map(|v| v.as_slice()).collect();
-    Ok(dclap::compute_dclap_centroid(&refs))
-}
-
-/// Mean DCLAP embedding of a user's top 50 most-completed tracks.
-pub async fn compute_user_dclap_centroid(
-    pool: &SqlitePool,
-    user_id: &str,
-) -> Result<Option<Vec<f32>>> {
-    let rows: Vec<(Vec<u8>,)> = sqlx::query_as(
-        "SELECT t.dclap_embedding
-         FROM tracks t
-         JOIN (
-             SELECT track_id, SUM(completed) as plays
-             FROM play_history
-             WHERE user_id = ?
-             GROUP BY track_id
-             ORDER BY plays DESC
-             LIMIT 50
-         ) ph ON t.id = ph.track_id
-         WHERE t.dclap_embedding IS NOT NULL",
-    )
-    .bind(user_id)
-    .fetch_all(pool)
-    .await?;
-
-    let vectors: Vec<Vec<f32>> = rows
-        .iter()
-        .filter_map(|(blob,)| {
-            if blob.len() != 512 * 4 {
-                return None;
-            }
-            Some(
-                blob.chunks_exact(4)
-                    .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-                    .collect(),
-            )
-        })
-        .collect();
-
-    let refs: Vec<&[f32]> = vectors.iter().map(|v| v.as_slice()).collect();
-    Ok(dclap::compute_dclap_centroid(&refs))
 }
 
 // ─── Flow Ordering (greedy nearest-neighbor) ─────────────────────────────────
@@ -1638,12 +1543,8 @@ pub fn order_for_flow(tracks: &mut Vec<MixTrack>) {
                 cost += 0.3 * (prev_lufs - cand_lufs).abs() / 10.0;
             }
 
-            // Timbral distance: prefer DCLAP cosine, fall back to bliss euclidean
-            if let (Some(ref prev_dclap), Some(ref cand_dclap)) = (&prev.dclap, &candidate.dclap) {
-                // Convert cosine similarity to distance: 0 = identical, 2 = opposite
-                let dist = 1.0 - dclap::cosine_similarity(prev_dclap, cand_dclap) as f64;
-                cost += FLOW_BLISS_WEIGHT * dist;
-            } else if let (Some(ref prev_bliss), Some(ref cand_bliss)) = (&prev.bliss, &candidate.bliss) {
+            // Timbral distance via bliss euclidean
+            if let (Some(ref prev_bliss), Some(ref cand_bliss)) = (&prev.bliss, &candidate.bliss) {
                 let dist = bliss_euclidean_distance(prev_bliss, cand_bliss);
                 if dist < f64::MAX {
                     cost += FLOW_BLISS_WEIGHT * (dist / max_bliss_dist);
