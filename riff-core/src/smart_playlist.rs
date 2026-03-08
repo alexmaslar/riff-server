@@ -3,7 +3,7 @@ use sqlx::{Row, SqlitePool};
 use std::hash::{Hash, Hasher};
 use tracing::info;
 
-use crate::daily_mixes::order_for_flow;
+use crate::daily_mixes::{order_for_flow, related_genres};
 
 // ─── Suggestion Generation (metadata-based, no AI) ──────────────────────────
 
@@ -162,8 +162,13 @@ pub struct GeneratedPlaylist {
 }
 
 /// Generate a playlist from structured metadata criteria.
-/// Scores tracks by genre match, energy/loudness, and decade.
-/// Falls back to prompt keyword matching when no structured genres are provided.
+///
+/// Uses a Spotify-inspired two-phase approach:
+/// Phase 1 (hard filter): Restrict candidate pool to tracks in the same genre family
+/// Phase 2 (soft scoring): Rank filtered candidates by genre precision, energy, decade, mood
+///
+/// Falls back to all-library scoring (with minimum genre threshold) when the genre
+/// family filter yields too few candidates.
 pub async fn generate_playlist_from_prompt(
     pool: &SqlitePool,
     criteria: &PlaylistCriteria,
@@ -171,50 +176,62 @@ pub async fn generate_playlist_from_prompt(
     library_ids_json: &str,
 ) -> Result<GeneratedPlaylist> {
     let track_count = track_count.clamp(5, 50);
+    let min_candidates = 5;
 
-    // Fetch all tracks with album metadata
-    let rows = sqlx::query(
-        "SELECT t.id, t.title, t.album_id, a.artist_id, ar.name as artist_name,
-                t.duration_seconds, t.bpm_analyzed, t.bpm_tag,
-                t.key_analyzed, t.loudness_lufs,
-                t.bliss_features, t.mood,
-                a.genre, a.style, a.year, a.moods
-         FROM tracks t
-         JOIN albums a ON t.album_id = a.id
-         JOIN artists ar ON a.artist_id = ar.id
-         WHERE t.library_id IN (SELECT value FROM json_each(?))",
-    )
-    .bind(library_ids_json)
-    .fetch_all(pool)
-    .await?;
+    let query_genres: Vec<String> = criteria.genres.iter().map(|g| g.to_lowercase()).collect();
+    let query_moods: Vec<String> = criteria.moods.iter().map(|m| m.to_lowercase()).collect();
+    let query_decade = criteria.era.as_ref().and_then(|e| parse_decade(e));
+
+    let target_loudness: f64 = match criteria.energy {
+        1 => -25.0,
+        2 => -20.0,
+        3 => -16.0,
+        4 => -12.0,
+        _ => -9.0,
+    };
+
+    // Phase 1: Build genre family filter for SQL-level candidate restriction
+    let family_genres = expand_to_family(&query_genres);
+
+    let mut in_fallback_mode = false;
+
+    let rows = if !family_genres.is_empty() {
+        // Try genre-family-filtered query first
+        let filtered = fetch_tracks_in_genres(pool, library_ids_json, &family_genres).await?;
+        if filtered.len() >= min_candidates {
+            info!(
+                family_size = family_genres.len(),
+                candidates = filtered.len(),
+                "genre family filter applied"
+            );
+            filtered
+        } else {
+            // Fallback: fetch all tracks (will apply minimum genre threshold in scoring)
+            info!(
+                family_candidates = filtered.len(),
+                "genre family too small, falling back to full library with genre threshold"
+            );
+            in_fallback_mode = true;
+            fetch_all_tracks(pool, library_ids_json).await?
+        }
+    } else {
+        // No genres specified — fetch everything
+        fetch_all_tracks(pool, library_ids_json).await?
+    };
 
     if rows.is_empty() {
         anyhow::bail!("no tracks available in library");
     }
 
-    // Lowercase genres for matching
-    let query_genres: Vec<String> = criteria.genres.iter().map(|g| g.to_lowercase()).collect();
-    let query_moods: Vec<String> = criteria.moods.iter().map(|m| m.to_lowercase()).collect();
-    let query_decade = criteria.era.as_ref().and_then(|e| parse_decade(e));
+    // Phase 2: Score each track
+    let family_lower: Vec<String> = family_genres.iter().map(|g| g.to_lowercase()).collect();
 
-    // Compute target loudness range from energy level
-    // Energy 1-5 maps to loudness ranges (LUFS): quieter is more negative
-    let target_loudness: f64 = match criteria.energy {
-        1 => -25.0, // very calm
-        2 => -20.0, // relaxed
-        3 => -16.0, // moderate
-        4 => -12.0, // energetic
-        _ => -9.0,  // intense
-    };
-
-    // Score each track — (total_score, genre_score, row)
     let mut scored: Vec<(f32, f32, &sqlx::sqlite::SqliteRow)> = rows
         .iter()
         .map(|row| {
             let mut score: f32 = 0.0;
             let mut genre_score_final: f32 = 0.0;
 
-            // Genre matching (0-60 points) — heaviest weight
             let genre_json: String = row.try_get("genre").unwrap_or_default();
             let style_json: String = row.try_get("style").unwrap_or_default();
             let track_genres: Vec<String> = crate::db::decode_json_array(&genre_json)
@@ -226,38 +243,32 @@ pub async fn generate_playlist_from_prompt(
                 .map(|s| s.to_lowercase())
                 .collect();
 
+            // Genre precision scoring (0-60 points)
             if !query_genres.is_empty() {
                 let mut genre_score: f32 = 0.0;
                 for qg in &query_genres {
-                    // Exact match
+                    // Exact match (60 pts)
                     if track_genres.iter().any(|tg| tg == qg) {
                         genre_score += 60.0;
                     }
-                    // Track genre contains query (e.g. "west coast hip hop" contains "hip hop")
+                    // Track genre contains query e.g. "west coast hip hop" contains "hip hop" (40 pts)
                     else if track_genres.iter().any(|tg| tg.contains(qg.as_str())) {
                         genre_score += 40.0;
                     }
-                    // Query contains track genre, but only for multi-word track genres
-                    // (prevents "pop" matching "indie pop", but allows "hip hop" matching "lo-fi hip hop")
+                    // Query contains multi-word track genre (35 pts)
                     else if track_genres.iter().any(|tg| tg.contains(' ') && qg.contains(tg.as_str())) {
                         genre_score += 35.0;
                     }
-                    // Style contains query or query contains multi-word style
+                    // Style match (25 pts)
                     else if track_styles.iter().any(|ts| ts.contains(qg.as_str()) || (ts.contains(' ') && qg.contains(ts.as_str()))) {
                         genre_score += 25.0;
                     }
-                    // Word overlap: only when ALL query words appear in a single track genre
-                    // (prevents "indie pop" matching "indie dance" on just the word "indie")
-                    else {
-                        let qg_words: Vec<&str> = qg.split_whitespace().collect();
-                        if qg_words.len() > 1 {
-                            let has_full_match = track_genres.iter().any(|tg| {
-                                let tg_words: Vec<&str> = tg.split_whitespace().collect();
-                                qg_words.iter().all(|w| tg_words.contains(w))
-                            });
-                            if has_full_match {
-                                genre_score += 15.0;
-                            }
+                    // Family membership only (20 pts) — track is in the same genre family
+                    else if !family_lower.is_empty() {
+                        let in_family = track_genres.iter().any(|tg| family_lower.contains(tg))
+                            || track_styles.iter().any(|ts| family_lower.contains(ts));
+                        if in_family {
+                            genre_score += 20.0;
                         }
                     }
                 }
@@ -265,26 +276,25 @@ pub async fn generate_playlist_from_prompt(
                 score += genre_score_final;
             }
 
-            // Energy/loudness matching (0-20 points)
+            // Energy/loudness matching (0-15 points)
             if let Ok(Some(loudness)) = row.try_get::<Option<f64>, _>("loudness_lufs") {
                 let diff = (loudness - target_loudness).abs();
-                // 0 diff = 20 pts, 10+ diff = 0 pts
-                score += (20.0 - (diff as f32 * 2.0)).max(0.0);
+                score += (15.0 - (diff as f32 * 1.5)).max(0.0);
             }
 
-            // Decade matching (0-15 points)
+            // Decade matching (0-10 points)
             if let Some(target_decade) = query_decade {
                 if let Ok(Some(year)) = row.try_get::<Option<i32>, _>("year") {
                     let track_decade = (year / 10) * 10;
                     if track_decade == target_decade {
-                        score += 15.0;
+                        score += 10.0;
                     } else if (track_decade - target_decade).abs() <= 10 {
-                        score += 7.0; // adjacent decade
+                        score += 5.0;
                     }
                 }
             }
 
-            // Mood matching (0-5 points bonus)
+            // Mood matching (0-5 points)
             if !query_moods.is_empty() {
                 let moods_json: String = row.try_get("moods").unwrap_or_default();
                 let track_moods: Vec<String> = crate::db::decode_json_array(&moods_json)
@@ -302,25 +312,24 @@ pub async fn generate_playlist_from_prompt(
         })
         .collect();
 
-    // Filter out tracks with no genre relevance when genres were specified
+    // Filter: in fallback mode require genre_score >= 15; otherwise filter out 0s
     if !query_genres.is_empty() {
-        scored.retain(|&(_, gs, _)| gs > 0.0);
+        let min_genre_score = if in_fallback_mode { 15.0 } else { 0.0 };
+        scored.retain(|&(_, gs, _)| gs > min_genre_score);
     }
 
-    // Sort by score descending
     scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
-    // Take top candidates (3x requested count for diversity filtering)
+    // Diversity filtering: max 2 tracks per album, max 3 per artist
     let candidate_count = (track_count * 3).min(scored.len());
     let candidates = &scored[..candidate_count];
 
-    // Apply diversity: max 2 tracks per album, max 3 per artist
     let mut selected = Vec::new();
     let mut album_count: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut artist_count: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut score_map: std::collections::HashMap<String, f32> = std::collections::HashMap::new();
 
-    for (score, _, row) in candidates {
+    for (total_score, _, row) in candidates {
         if selected.len() >= track_count {
             break;
         }
@@ -328,12 +337,10 @@ pub async fn generate_playlist_from_prompt(
         let album_id: String = row.get("album_id");
         let artist_id: String = row.get("artist_id");
 
-        let ac = album_count.get(&album_id).copied().unwrap_or(0);
-        if ac >= 2 {
+        if album_count.get(&album_id).copied().unwrap_or(0) >= 2 {
             continue;
         }
-        let arc = artist_count.get(&artist_id).copied().unwrap_or(0);
-        if arc >= 3 {
+        if artist_count.get(&artist_id).copied().unwrap_or(0) >= 3 {
             continue;
         }
 
@@ -341,7 +348,7 @@ pub async fn generate_playlist_from_prompt(
         *artist_count.entry(artist_id.clone()).or_insert(0) += 1;
 
         let track_id: String = row.get("id");
-        score_map.insert(track_id.clone(), *score);
+        score_map.insert(track_id.clone(), *total_score);
 
         let bpm_analyzed: Option<f64> = row.try_get("bpm_analyzed").ok().flatten();
         let bpm_tag: Option<f64> = row.try_get("bpm_tag").ok().flatten();
@@ -367,7 +374,6 @@ pub async fn generate_playlist_from_prompt(
         anyhow::bail!("no matching tracks found for prompt");
     }
 
-    // Apply flow ordering for smooth BPM/key/loudness sequencing
     order_for_flow(&mut selected);
 
     let track_ids: Vec<String> = selected.iter().map(|t| t.id.clone()).collect();
@@ -376,7 +382,6 @@ pub async fn generate_playlist_from_prompt(
         .map(|id| score_map.get(id).copied().unwrap_or(0.0))
         .collect();
 
-    // Auto-generate a name from the prompt
     let name = auto_name_from_prompt(&criteria.prompt);
 
     let (min_score, max_score) = scores.iter().copied().fold((f32::MAX, f32::MIN), |(mn, mx), s| (mn.min(s), mx.max(s)));
@@ -385,9 +390,11 @@ pub async fn generate_playlist_from_prompt(
         genres = ?criteria.genres,
         energy = criteria.energy,
         tracks = track_ids.len(),
-        candidates = scored.len(),
-        min_score = format!("{:.4}", min_score),
-        max_score = format!("{:.4}", max_score),
+        total_candidates = rows.len(),
+        scored_candidates = scored.len(),
+        fallback = in_fallback_mode,
+        min_score = format!("{:.1}", min_score),
+        max_score = format!("{:.1}", max_score),
         "generated playlist from metadata"
     );
 
@@ -397,6 +404,89 @@ pub async fn generate_playlist_from_prompt(
         track_ids,
         scores,
     })
+}
+
+/// Expand query genres to their full genre families using GENRE_FAMILIES.
+/// Returns all genres in the matching families (deduplicated).
+fn expand_to_family(query_genres: &[String]) -> Vec<String> {
+    let mut family_set = std::collections::HashSet::new();
+    for qg in query_genres {
+        let related = related_genres(qg);
+        if related.is_empty() {
+            // Genre not in any family — include it as-is so it can still match
+            family_set.insert(qg.clone());
+        } else {
+            for g in related {
+                family_set.insert(g.to_string());
+            }
+        }
+    }
+    family_set.into_iter().collect()
+}
+
+/// Fetch only tracks whose album genre or style overlaps with the given genre set.
+async fn fetch_tracks_in_genres(
+    pool: &SqlitePool,
+    library_ids_json: &str,
+    genres: &[String],
+) -> Result<Vec<sqlx::sqlite::SqliteRow>> {
+    if genres.is_empty() {
+        return Ok(vec![]);
+    }
+
+    // Build a JSON array of the genre family for use with json_each
+    let genres_json = serde_json::to_string(genres)?;
+
+    let rows = sqlx::query(
+        "SELECT t.id, t.title, t.album_id, a.artist_id, ar.name as artist_name,
+                t.duration_seconds, t.bpm_analyzed, t.bpm_tag,
+                t.key_analyzed, t.loudness_lufs,
+                t.bliss_features, t.mood,
+                a.genre, a.style, a.year, a.moods
+         FROM tracks t
+         JOIN albums a ON t.album_id = a.id
+         JOIN artists ar ON a.artist_id = ar.id
+         WHERE t.library_id IN (SELECT value FROM json_each(?1))
+           AND (
+               EXISTS (
+                   SELECT 1 FROM json_each(a.genre) ag, json_each(?2) fg
+                   WHERE LOWER(ag.value) = LOWER(fg.value)
+               )
+               OR EXISTS (
+                   SELECT 1 FROM json_each(a.style) as2, json_each(?2) fg2
+                   WHERE LOWER(as2.value) = LOWER(fg2.value)
+               )
+           )",
+    )
+    .bind(library_ids_json)
+    .bind(&genres_json)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows)
+}
+
+/// Fetch all tracks in the library (fallback path).
+async fn fetch_all_tracks(
+    pool: &SqlitePool,
+    library_ids_json: &str,
+) -> Result<Vec<sqlx::sqlite::SqliteRow>> {
+    let rows = sqlx::query(
+        "SELECT t.id, t.title, t.album_id, a.artist_id, ar.name as artist_name,
+                t.duration_seconds, t.bpm_analyzed, t.bpm_tag,
+                t.key_analyzed, t.loudness_lufs,
+                t.bliss_features, t.mood,
+                a.genre, a.style, a.year, a.moods
+         FROM tracks t
+         JOIN albums a ON t.album_id = a.id
+         JOIN artists ar ON a.artist_id = ar.id
+         WHERE t.library_id IN (SELECT value FROM json_each(?))",
+    )
+    .bind(library_ids_json)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows)
 }
 
 /// Parse a decade from era strings like "1990s", "90s", "2010s"

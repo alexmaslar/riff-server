@@ -35,7 +35,7 @@ const FLOW_MOOD_PENALTY: f64 = 0.3;
 const FLOW_LOUDNESS_ARC_WEIGHT: f64 = 0.15;
 
 // Genre families — groups of related genres for expanding candidate pools
-const GENRE_FAMILIES: &[&[&str]] = &[
+pub const GENRE_FAMILIES: &[&[&str]] = &[
     &[
         "Rock", "Alternative Rock", "Indie Rock", "Post-Punk", "Punk", "Punk Rock",
         "New Wave", "Shoegaze", "Grunge", "Garage Rock", "Noise Rock", "Post-Rock",
@@ -113,7 +113,7 @@ const GENRE_FAMILIES: &[&[&str]] = &[
 ];
 
 /// Returns all genres in the same family as `genre`, or empty if not found.
-fn related_genres(genre: &str) -> Vec<&'static str> {
+pub fn related_genres(genre: &str) -> Vec<&'static str> {
     for family in GENRE_FAMILIES {
         if family.iter().any(|g| g.eq_ignore_ascii_case(genre)) {
             return family.to_vec();
