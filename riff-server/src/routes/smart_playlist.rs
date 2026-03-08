@@ -107,6 +107,10 @@ pub async fn save(
 pub struct GenerateBody {
     pub prompt: String,
     pub title: Option<String>,
+    pub genres: Option<Vec<String>>,
+    pub energy: Option<i32>,
+    pub era: Option<String>,
+    pub moods: Option<Vec<String>>,
     pub track_count: Option<usize>,
     pub library: Option<String>,
 }
@@ -122,16 +126,35 @@ pub async fn generate(
         return Err(AppError::BadRequest("prompt is required".to_string()));
     }
 
-    tracing::info!(prompt = prompt, title = body.title.as_deref(), "smart playlist request");
+    let genres = body.genres.unwrap_or_default();
+    let energy = body.energy.unwrap_or(3);
+    let moods = body.moods.unwrap_or_default();
+    tracing::info!(
+        prompt = prompt,
+        title = body.title.as_deref(),
+        genres = ?genres,
+        energy = energy,
+        era = body.era.as_deref(),
+        moods = ?moods,
+        "smart playlist request"
+    );
 
     let track_count = body.track_count.unwrap_or(25);
     let library_ids = riff_core::db::resolve_library_ids(&state.db, body.library.as_deref()).await?;
     let lib_ids: Vec<String> = super::helpers::decode_json_array(&library_ids);
     let playlist_library_id = lib_ids.first().cloned();
 
+    let criteria = riff_core::smart_playlist::PlaylistCriteria {
+        prompt: prompt.to_string(),
+        genres,
+        energy,
+        era: body.era.clone(),
+        moods,
+    };
+
     let result = riff_core::smart_playlist::generate_playlist_from_prompt(
         &state.db,
-        prompt,
+        &criteria,
         track_count,
         &library_ids,
     )

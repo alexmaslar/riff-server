@@ -3,7 +3,7 @@ use sqlx::{Row, SqlitePool};
 use std::hash::{Hash, Hasher};
 use tracing::info;
 
-use crate::analysis::dclap::{self, DclapModel};
+use crate::analysis::dclap;
 use crate::daily_mixes::order_for_flow;
 
 // ─── Suggestion Generation (metadata-based, no AI) ──────────────────────────
@@ -145,7 +145,15 @@ fn seed_index(user_id: &str, date_str: &str, len: usize) -> usize {
     (h as usize) % len
 }
 
-// ─── DCLAP-powered Playlist Generation ──────────────────────────────────────
+// ─── Metadata-scored Playlist Generation ─────────────────────────────────────
+
+pub struct PlaylistCriteria {
+    pub prompt: String,
+    pub genres: Vec<String>,
+    pub energy: i32,
+    pub era: Option<String>,
+    pub moods: Vec<String>,
+}
 
 pub struct GeneratedPlaylist {
     pub name: String,
@@ -154,66 +162,147 @@ pub struct GeneratedPlaylist {
     pub scores: Vec<f32>,
 }
 
-/// Generate a playlist from a natural language prompt using DCLAP text-to-audio similarity.
+/// Generate a playlist from structured metadata criteria.
+/// Scores tracks by genre match, energy/loudness, and decade.
+/// Falls back to prompt keyword matching when no structured genres are provided.
 pub async fn generate_playlist_from_prompt(
     pool: &SqlitePool,
-    prompt: &str,
+    criteria: &PlaylistCriteria,
     track_count: usize,
     library_ids_json: &str,
 ) -> Result<GeneratedPlaylist> {
     let track_count = track_count.clamp(5, 50);
 
-    // Load DCLAP model and compute text embedding
-    let model = DclapModel::load()?;
-    let text_embedding = tokio::task::spawn_blocking({
-        let prompt = prompt.to_string();
-        move || model.embed_text(&prompt)
-    })
-    .await??;
-
-    // Fetch all tracks with DCLAP embeddings
+    // Fetch all tracks with album metadata
     let rows = sqlx::query(
         "SELECT t.id, t.title, t.album_id, a.artist_id, ar.name as artist_name,
                 t.duration_seconds, t.bpm_analyzed, t.bpm_tag,
                 t.key_analyzed, t.loudness_lufs,
                 t.bliss_features, t.dclap_embedding, t.mood,
-                a.moods
+                a.genre, a.style, a.year, a.moods
          FROM tracks t
          JOIN albums a ON t.album_id = a.id
          JOIN artists ar ON a.artist_id = ar.id
-         WHERE t.dclap_embedding IS NOT NULL
-           AND t.library_id IN (SELECT value FROM json_each(?))",
+         WHERE t.library_id IN (SELECT value FROM json_each(?))",
     )
     .bind(library_ids_json)
     .fetch_all(pool)
     .await?;
 
     if rows.is_empty() {
-        anyhow::bail!("no tracks with DCLAP embeddings available");
+        anyhow::bail!("no tracks available in library");
     }
 
-    // Score each track by cosine similarity to the text embedding
+    // Lowercase genres for matching
+    let query_genres: Vec<String> = criteria.genres.iter().map(|g| g.to_lowercase()).collect();
+    let query_moods: Vec<String> = criteria.moods.iter().map(|m| m.to_lowercase()).collect();
+    let query_decade = criteria.era.as_ref().and_then(|e| parse_decade(e));
+
+    // Compute target loudness range from energy level
+    // Energy 1-5 maps to loudness ranges (LUFS): quieter is more negative
+    let target_loudness: f64 = match criteria.energy {
+        1 => -25.0, // very calm
+        2 => -20.0, // relaxed
+        3 => -16.0, // moderate
+        4 => -12.0, // energetic
+        _ => -9.0,  // intense
+    };
+
+    // Score each track
     let mut scored: Vec<(f32, &sqlx::sqlite::SqliteRow)> = rows
         .iter()
-        .filter_map(|row| {
-            let emb = dclap::parse_dclap_embedding(row)?;
-            let sim = dclap::cosine_similarity(&text_embedding, &emb);
-            Some((sim, row))
+        .map(|row| {
+            let mut score: f32 = 0.0;
+
+            // Genre matching (0-60 points) — heaviest weight
+            let genre_json: String = row.try_get("genre").unwrap_or_default();
+            let style_json: String = row.try_get("style").unwrap_or_default();
+            let track_genres: Vec<String> = crate::db::decode_json_array(&genre_json)
+                .into_iter()
+                .map(|g| g.to_lowercase())
+                .collect();
+            let track_styles: Vec<String> = crate::db::decode_json_array(&style_json)
+                .into_iter()
+                .map(|s| s.to_lowercase())
+                .collect();
+
+            if !query_genres.is_empty() {
+                let mut genre_score: f32 = 0.0;
+                for qg in &query_genres {
+                    // Exact match
+                    if track_genres.iter().any(|tg| tg == qg) {
+                        genre_score += 60.0;
+                    }
+                    // Partial/substring match (e.g. "hip hop" matches "west coast hip hop")
+                    else if track_genres.iter().any(|tg| tg.contains(qg.as_str()) || qg.contains(tg.as_str())) {
+                        genre_score += 40.0;
+                    }
+                    // Style match
+                    else if track_styles.iter().any(|ts| ts.contains(qg.as_str()) || qg.contains(ts.as_str())) {
+                        genre_score += 25.0;
+                    }
+                    // Parent genre match (e.g. "rock" matches "indie rock")
+                    else {
+                        let qg_words: Vec<&str> = qg.split_whitespace().collect();
+                        let has_word_match = qg_words.iter().any(|w|
+                            track_genres.iter().any(|tg| tg.split_whitespace().any(|tw| tw == *w))
+                        );
+                        if has_word_match {
+                            genre_score += 15.0;
+                        }
+                    }
+                }
+                score += genre_score / query_genres.len() as f32;
+            }
+
+            // Energy/loudness matching (0-20 points)
+            if let Ok(Some(loudness)) = row.try_get::<Option<f64>, _>("loudness_lufs") {
+                let diff = (loudness - target_loudness).abs();
+                // 0 diff = 20 pts, 10+ diff = 0 pts
+                score += (20.0 - (diff as f32 * 2.0)).max(0.0);
+            }
+
+            // Decade matching (0-15 points)
+            if let Some(target_decade) = query_decade {
+                if let Ok(Some(year)) = row.try_get::<Option<i32>, _>("year") {
+                    let track_decade = (year / 10) * 10;
+                    if track_decade == target_decade {
+                        score += 15.0;
+                    } else if (track_decade - target_decade).abs() <= 10 {
+                        score += 7.0; // adjacent decade
+                    }
+                }
+            }
+
+            // Mood matching (0-5 points bonus)
+            if !query_moods.is_empty() {
+                let moods_json: String = row.try_get("moods").unwrap_or_default();
+                let track_moods: Vec<String> = crate::db::decode_json_array(&moods_json)
+                    .into_iter()
+                    .map(|m| m.to_lowercase())
+                    .collect();
+                for qm in &query_moods {
+                    if track_moods.iter().any(|tm| tm.contains(qm.as_str())) {
+                        score += 5.0;
+                    }
+                }
+            }
+
+            (score, row)
         })
         .collect();
 
-    // Sort by similarity descending
+    // Sort by score descending
     scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
-    // Take top candidates (2x requested count for diversity filtering)
-    let candidate_count = (track_count * 2).min(scored.len());
+    // Take top candidates (3x requested count for diversity filtering)
+    let candidate_count = (track_count * 3).min(scored.len());
     let candidates = &scored[..candidate_count];
 
     // Apply diversity: max 2 tracks per album, max 3 per artist
     let mut selected = Vec::new();
     let mut album_count: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut artist_count: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-
     let mut score_map: std::collections::HashMap<String, f32> = std::collections::HashMap::new();
 
     for (score, row) in candidates {
@@ -274,24 +363,39 @@ pub async fn generate_playlist_from_prompt(
         .collect();
 
     // Auto-generate a name from the prompt
-    let name = auto_name_from_prompt(prompt);
+    let name = auto_name_from_prompt(&criteria.prompt);
 
     let (min_score, max_score) = scores.iter().copied().fold((f32::MAX, f32::MIN), |(mn, mx), s| (mn.min(s), mx.max(s)));
     info!(
-        prompt = prompt,
+        prompt = criteria.prompt,
+        genres = ?criteria.genres,
+        energy = criteria.energy,
         tracks = track_ids.len(),
         candidates = scored.len(),
         min_score = format!("{:.4}", min_score),
         max_score = format!("{:.4}", max_score),
-        "generated playlist from prompt"
+        "generated playlist from metadata"
     );
 
     Ok(GeneratedPlaylist {
         name,
-        description: prompt.to_string(),
+        description: criteria.prompt.clone(),
         track_ids,
         scores,
     })
+}
+
+/// Parse a decade from era strings like "1990s", "90s", "2010s"
+fn parse_decade(era: &str) -> Option<i32> {
+    let digits: String = era.chars().filter(|c| c.is_ascii_digit()).collect();
+    match digits.len() {
+        4 => digits.parse::<i32>().ok().map(|y| (y / 10) * 10),
+        2 => {
+            let short: i32 = digits.parse().ok()?;
+            if short >= 50 { Some(1900 + short) } else { Some(2000 + short) }
+        }
+        _ => None,
+    }
 }
 
 /// Generate a concise playlist name from a prompt.
