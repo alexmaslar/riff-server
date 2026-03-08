@@ -37,6 +37,7 @@ pub struct SaveBody {
     pub title: String,
     pub description: Option<String>,
     pub track_ids: Vec<String>,
+    pub library: Option<String>,
 }
 
 /// POST /playlists/ai/save
@@ -53,12 +54,17 @@ pub async fn save(
         return Err(AppError::BadRequest("track_ids cannot be empty".to_string()));
     }
 
+    let library_ids = riff_core::db::resolve_library_ids(&state.db, body.library.as_deref()).await?;
+    let lib_ids: Vec<String> = super::helpers::decode_json_array(&library_ids);
+    let playlist_library_id = lib_ids.first().cloned();
+
     let playlist_id = Uuid::new_v4().to_string();
-    sqlx::query("INSERT INTO playlists (id, user_id, name, description) VALUES (?, ?, ?, ?)")
+    sqlx::query("INSERT INTO playlists (id, user_id, name, description, library_id) VALUES (?, ?, ?, ?, ?)")
         .bind(&playlist_id)
         .bind(&claims.sub)
         .bind(title)
         .bind(&body.description)
+        .bind(&playlist_library_id)
         .execute(&state.db)
         .await?;
 
@@ -116,8 +122,12 @@ pub async fn generate(
         return Err(AppError::BadRequest("prompt is required".to_string()));
     }
 
+    tracing::info!(prompt = prompt, title = body.title.as_deref(), "smart playlist request");
+
     let track_count = body.track_count.unwrap_or(25);
     let library_ids = riff_core::db::resolve_library_ids(&state.db, body.library.as_deref()).await?;
+    let lib_ids: Vec<String> = super::helpers::decode_json_array(&library_ids);
+    let playlist_library_id = lib_ids.first().cloned();
 
     let result = riff_core::smart_playlist::generate_playlist_from_prompt(
         &state.db,
@@ -151,11 +161,12 @@ pub async fn generate(
 
     // Save as a playlist
     let playlist_id = Uuid::new_v4().to_string();
-    sqlx::query("INSERT INTO playlists (id, user_id, name, description) VALUES (?, ?, ?, ?)")
+    sqlx::query("INSERT INTO playlists (id, user_id, name, description, library_id) VALUES (?, ?, ?, ?, ?)")
         .bind(&playlist_id)
         .bind(&claims.sub)
         .bind(&playlist_name)
         .bind(&playlist_description)
+        .bind(&playlist_library_id)
         .execute(&state.db)
         .await?;
 
@@ -196,6 +207,13 @@ pub async fn generate(
         .collect();
 
     use sqlx::Row;
+    let score_map: std::collections::HashMap<&str, f32> = result
+        .track_ids
+        .iter()
+        .zip(result.scores.iter())
+        .map(|(id, s)| (id.as_str(), *s))
+        .collect();
+
     let track_list: Vec<Value> = result
         .track_ids
         .iter()
@@ -216,6 +234,7 @@ pub async fn generate(
                     "musicalKey": row.get::<Option<String>, _>("musical_key"),
                     "loudnessLufs": row.get::<Option<f64>, _>("loudness_lufs"),
                     "mood": row.get::<Option<String>, _>("mood"),
+                    "similarityScore": score_map.get(id.as_str()).copied(),
                 })
             })
         })
@@ -226,6 +245,11 @@ pub async fn generate(
         .filter_map(|t| t["durationSeconds"].as_i64())
         .sum::<i64>() as i32;
 
+    let (min_score, max_score) = result.scores.iter().copied().fold(
+        (f32::MAX, f32::MIN),
+        |(mn, mx), s| (mn.min(s), mx.max(s)),
+    );
+
     Ok(Json(json!({
         "id": playlist_id,
         "name": playlist_name,
@@ -233,5 +257,9 @@ pub async fn generate(
         "trackCount": track_list.len(),
         "totalDuration": total_duration,
         "tracks": track_list,
+        "scoreRange": {
+            "min": min_score,
+            "max": max_score,
+        },
     })))
 }

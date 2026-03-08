@@ -151,6 +151,7 @@ pub struct GeneratedPlaylist {
     pub name: String,
     pub description: String,
     pub track_ids: Vec<String>,
+    pub scores: Vec<f32>,
 }
 
 /// Generate a playlist from a natural language prompt using DCLAP text-to-audio similarity.
@@ -213,7 +214,9 @@ pub async fn generate_playlist_from_prompt(
     let mut album_count: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut artist_count: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
 
-    for (_, row) in candidates {
+    let mut score_map: std::collections::HashMap<String, f32> = std::collections::HashMap::new();
+
+    for (score, row) in candidates {
         if selected.len() >= track_count {
             break;
         }
@@ -233,11 +236,14 @@ pub async fn generate_playlist_from_prompt(
         *album_count.entry(album_id.clone()).or_insert(0) += 1;
         *artist_count.entry(artist_id.clone()).or_insert(0) += 1;
 
+        let track_id: String = row.get("id");
+        score_map.insert(track_id.clone(), *score);
+
         let bpm_analyzed: Option<f64> = row.try_get("bpm_analyzed").ok().flatten();
         let bpm_tag: Option<f64> = row.try_get("bpm_tag").ok().flatten();
 
         selected.push(crate::daily_mixes::MixTrack {
-            id: row.get("id"),
+            id: track_id,
             artist_id,
             album_id,
             bpm: bpm_analyzed.or(bpm_tag),
@@ -262,13 +268,21 @@ pub async fn generate_playlist_from_prompt(
     order_for_flow(&mut selected);
 
     let track_ids: Vec<String> = selected.iter().map(|t| t.id.clone()).collect();
+    let scores: Vec<f32> = track_ids
+        .iter()
+        .map(|id| score_map.get(id).copied().unwrap_or(0.0))
+        .collect();
 
     // Auto-generate a name from the prompt
     let name = auto_name_from_prompt(prompt);
 
+    let (min_score, max_score) = scores.iter().copied().fold((f32::MAX, f32::MIN), |(mn, mx), s| (mn.min(s), mx.max(s)));
     info!(
         prompt = prompt,
         tracks = track_ids.len(),
+        candidates = scored.len(),
+        min_score = format!("{:.4}", min_score),
+        max_score = format!("{:.4}", max_score),
         "generated playlist from prompt"
     );
 
@@ -276,6 +290,7 @@ pub async fn generate_playlist_from_prompt(
         name,
         description: prompt.to_string(),
         track_ids,
+        scores,
     })
 }
 
