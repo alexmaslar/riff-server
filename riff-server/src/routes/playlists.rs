@@ -46,6 +46,7 @@ pub async fn list_playlists(
     Query(params): Query<ListPlaylistsParams>,
 ) -> Result<([(axum::http::header::HeaderName, &'static str); 1], Json<Value>), AppError> {
     let library_ids = riff_core::db::resolve_library_ids(&state.db, params.library.as_deref()).await?;
+    let include_null_library = params.library.is_none();
 
     let rows = sqlx::query(
         "SELECT p.id, p.name, p.description,
@@ -57,12 +58,14 @@ pub async fn list_playlists(
          LEFT JOIN playlist_tracks pt ON p.id = pt.playlist_id
          LEFT JOIN tracks t ON pt.track_id = t.id
          WHERE p.user_id = ?
-         AND p.library_id IN (SELECT value FROM json_each(?))
+         AND (p.library_id IN (SELECT value FROM json_each(?))
+              OR (p.library_id IS NULL AND ?))
          GROUP BY p.id
          ORDER BY p.updated_at DESC",
     )
     .bind(&claims.sub)
     .bind(&library_ids)
+    .bind(include_null_library)
     .fetch_all(&state.db)
     .await?;
 
