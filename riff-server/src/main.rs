@@ -45,6 +45,7 @@ pub struct StageManager {
     recommendation: AtomicBool,
     artist_recommendation: AtomicBool,
     top_tracks: AtomicBool,
+    listenbrainz: AtomicBool,
     scan: AtomicBool,
 }
 
@@ -63,6 +64,7 @@ impl StageManager {
             recommendation: AtomicBool::new(false),
             artist_recommendation: AtomicBool::new(false),
             top_tracks: AtomicBool::new(false),
+            listenbrainz: AtomicBool::new(false),
             scan: AtomicBool::new(false),
         }
     }
@@ -75,6 +77,7 @@ impl StageManager {
             "recommendation" => &self.recommendation,
             "artist_recommendation" => &self.artist_recommendation,
             "top_tracks" => &self.top_tracks,
+            "listenbrainz" => &self.listenbrainz,
             "scan" => &self.scan,
             _ => return false,
         };
@@ -90,6 +93,7 @@ impl StageManager {
             "recommendation" => &self.recommendation,
             "artist_recommendation" => &self.artist_recommendation,
             "top_tracks" => &self.top_tracks,
+            "listenbrainz" => &self.listenbrainz,
             "scan" => &self.scan,
             _ => return,
         };

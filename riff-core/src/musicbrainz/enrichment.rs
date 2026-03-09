@@ -625,11 +625,7 @@ pub async fn enrich_artist_bios_wikipedia(
                 continue;
             }
             Err(e) => {
-                warn!(artist = %artist_name, wikidata_id = %qid, error = %e, "Wikidata lookup failed");
-                sqlx::query("UPDATE artists SET bio_status = 'not_found' WHERE id = ?")
-                    .bind(artist_id)
-                    .execute(pool)
-                    .await?;
+                warn!(artist = %artist_name, wikidata_id = %qid, error = %e, "Wikidata lookup failed, will retry");
                 continue;
             }
         };
@@ -671,14 +667,22 @@ pub async fn enrich_artist_bios_wikipedia(
                 }
             }
             Ok(resp) => {
-                debug!(artist = %artist_name, status = %resp.status(), "Wikipedia non-success response");
-                sqlx::query("UPDATE artists SET bio_status = 'not_found' WHERE id = ?")
-                    .bind(artist_id)
-                    .execute(pool)
-                    .await?;
+                let status = resp.status();
+                if status == reqwest::StatusCode::NOT_FOUND {
+                    // Definitive: article doesn't exist
+                    debug!(artist = %artist_name, "Wikipedia article not found (404)");
+                    sqlx::query("UPDATE artists SET bio_status = 'not_found' WHERE id = ?")
+                        .bind(artist_id)
+                        .execute(pool)
+                        .await?;
+                } else {
+                    // Transient (429, 500, etc.) — leave as pending to retry
+                    warn!(artist = %artist_name, status = %status, "Wikipedia transient error, will retry");
+                }
             }
             Err(e) => {
-                warn!(artist = %artist_name, error = %e, "Wikipedia fetch error");
+                // Network error — leave as pending to retry
+                warn!(artist = %artist_name, error = %e, "Wikipedia fetch error, will retry");
             }
         }
 
@@ -755,15 +759,25 @@ async fn enrich_track_isrcs(
 
     for medium in &release.media {
         for track in &medium.tracks {
-            let isrc = match &track.recording {
-                Some(rec) if !rec.isrcs.is_empty() => &rec.isrcs[0],
-                _ => continue,
+            let recording = match &track.recording {
+                Some(rec) => rec,
+                None => continue,
             };
 
+            let isrc = recording.isrcs.first().map(|s| s.as_str());
+            let recording_id = &recording.id;
+
+            // Skip if no useful data to store
+            if isrc.is_none() && recording_id.is_empty() {
+                continue;
+            }
+
             let result = sqlx::query(
-                "UPDATE tracks SET isrc = ? WHERE album_id = ? AND disc_number = ? AND track_number = ? AND isrc IS NULL"
+                "UPDATE tracks SET isrc = COALESCE(isrc, ?), musicbrainz_recording_id = COALESCE(musicbrainz_recording_id, ?) \
+                 WHERE album_id = ? AND disc_number = ? AND track_number = ?"
             )
             .bind(isrc)
+            .bind(recording_id)
             .bind(album_id)
             .bind(medium.position as i32)
             .bind(track.position as i32)

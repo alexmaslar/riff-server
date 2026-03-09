@@ -95,6 +95,8 @@ pub async fn run_relay_tunnel(state: Arc<AppState>, router: Router) {
         match connect_and_run(&state, &router, &url, &server_id, &api_key).await {
             Ok(()) => {
                 tracing::info!("relay tunnel closed gracefully");
+                // Reset backoff after a successful session
+                backoff = Duration::from_secs(1);
             }
             Err(e) => {
                 tracing::warn!(error = %e, "relay tunnel error");
@@ -120,7 +122,12 @@ async fn connect_and_run(
     server_id: &str,
     api_key: &str,
 ) -> anyhow::Result<()> {
-    let (ws_stream, _response) = tokio_tungstenite::connect_async(url).await?;
+    let (ws_stream, _response) = tokio::time::timeout(
+        Duration::from_secs(15),
+        tokio_tungstenite::connect_async(url),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("relay connection timed out after 15s"))??;
     let (mut ws_tx, mut ws_rx) = ws_stream.split();
 
     // Send Register message

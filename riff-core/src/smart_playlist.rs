@@ -174,6 +174,7 @@ pub async fn generate_playlist_from_prompt(
     criteria: &PlaylistCriteria,
     track_count: usize,
     library_ids_json: &str,
+    user_id: &str,
 ) -> Result<GeneratedPlaylist> {
     let track_count = track_count.clamp(5, 50);
     let min_candidates = 5;
@@ -223,7 +224,10 @@ pub async fn generate_playlist_from_prompt(
         anyhow::bail!("no tracks available in library");
     }
 
-    // Phase 2: Score each track
+    // Load LB similar artist scores for the user's top artists
+    let lb_scores = load_lb_scores_for_user(pool, user_id).await.unwrap_or_default();
+
+    // Phase 2: Score each track (simplified — genre + LB + energy + decade + mood)
     let family_lower: Vec<String> = family_genres.iter().map(|g| g.to_lowercase()).collect();
 
     let mut scored: Vec<(f32, f32, &sqlx::sqlite::SqliteRow)> = rows
@@ -243,32 +247,23 @@ pub async fn generate_playlist_from_prompt(
                 .map(|s| s.to_lowercase())
                 .collect();
 
-            // Genre precision scoring (0-60 points)
+            // Genre precision scoring (0-30 points, reduced from 60)
             if !query_genres.is_empty() {
                 let mut genre_score: f32 = 0.0;
                 for qg in &query_genres {
-                    // Exact match (60 pts)
                     if track_genres.iter().any(|tg| tg == qg) {
-                        genre_score += 60.0;
-                    }
-                    // Track genre contains query e.g. "west coast hip hop" contains "hip hop" (40 pts)
-                    else if track_genres.iter().any(|tg| tg.contains(qg.as_str())) {
-                        genre_score += 40.0;
-                    }
-                    // Query contains multi-word track genre (35 pts)
-                    else if track_genres.iter().any(|tg| tg.contains(' ') && qg.contains(tg.as_str())) {
-                        genre_score += 35.0;
-                    }
-                    // Style match (25 pts)
-                    else if track_styles.iter().any(|ts| ts.contains(qg.as_str()) || (ts.contains(' ') && qg.contains(ts.as_str()))) {
-                        genre_score += 25.0;
-                    }
-                    // Family membership only (20 pts) — track is in the same genre family
-                    else if !family_lower.is_empty() {
+                        genre_score += 30.0;
+                    } else if track_genres.iter().any(|tg| tg.contains(qg.as_str())) {
+                        genre_score += 20.0;
+                    } else if track_genres.iter().any(|tg| tg.contains(' ') && qg.contains(tg.as_str())) {
+                        genre_score += 17.0;
+                    } else if track_styles.iter().any(|ts| ts.contains(qg.as_str()) || (ts.contains(' ') && qg.contains(ts.as_str()))) {
+                        genre_score += 12.0;
+                    } else if !family_lower.is_empty() {
                         let in_family = track_genres.iter().any(|tg| family_lower.contains(tg))
                             || track_styles.iter().any(|ts| family_lower.contains(ts));
                         if in_family {
-                            genre_score += 20.0;
+                            genre_score += 10.0;
                         }
                     }
                 }
@@ -276,20 +271,28 @@ pub async fn generate_playlist_from_prompt(
                 score += genre_score_final;
             }
 
-            // Energy/loudness matching (0-15 points)
-            if let Ok(Some(loudness)) = row.try_get::<Option<f64>, _>("loudness_lufs") {
-                let diff = (loudness - target_loudness).abs();
-                score += (15.0 - (diff as f32 * 1.5)).max(0.0);
+            // LB artist similarity (0-25 points) — primary collaborative signal
+            let artist_ext_id: Option<String> = row.try_get("artist_external_id").ok().flatten();
+            if let Some(ref ext_id) = artist_ext_id {
+                if let Some(&lb_score) = lb_scores.get(ext_id) {
+                    score += (lb_score * 25.0) as f32;
+                }
             }
 
-            // Decade matching (0-10 points)
+            // Energy/loudness matching (0-10 points)
+            if let Ok(Some(loudness)) = row.try_get::<Option<f64>, _>("loudness_lufs") {
+                let diff = (loudness - target_loudness).abs();
+                score += (10.0 - (diff as f32 * 1.0)).max(0.0);
+            }
+
+            // Decade matching (0-5 points)
             if let Some(target_decade) = query_decade {
                 if let Ok(Some(year)) = row.try_get::<Option<i32>, _>("year") {
                     let track_decade = (year / 10) * 10;
                     if track_decade == target_decade {
-                        score += 10.0;
-                    } else if (track_decade - target_decade).abs() <= 10 {
                         score += 5.0;
+                    } else if (track_decade - target_decade).abs() <= 10 {
+                        score += 2.5;
                     }
                 }
             }
@@ -312,17 +315,51 @@ pub async fn generate_playlist_from_prompt(
         })
         .collect();
 
-    // Filter: in fallback mode require genre_score >= 15; otherwise filter out 0s
+    // Filter: in fallback mode require genre_score >= 8; otherwise filter out 0s
     if !query_genres.is_empty() {
-        let min_genre_score = if in_fallback_mode { 15.0 } else { 0.0 };
+        let min_genre_score = if in_fallback_mode { 8.0 } else { 0.0 };
         scored.retain(|&(_, gs, _)| gs > min_genre_score);
     }
 
     scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
-    // Diversity filtering: max 2 tracks per album, max 3 per artist
+    // Adaptive diversity caps based on candidate pool diversity
     let candidate_count = (track_count * 3).min(scored.len());
     let candidates = &scored[..candidate_count];
+
+    let distinct_albums: usize = candidates
+        .iter()
+        .map(|(_, _, row)| row.get::<String, _>("album_id"))
+        .collect::<std::collections::HashSet<_>>()
+        .len();
+    let distinct_artists: usize = candidates
+        .iter()
+        .map(|(_, _, row)| row.get::<String, _>("artist_id"))
+        .collect::<std::collections::HashSet<_>>()
+        .len();
+
+    let max_per_album = if distinct_albums <= 3 {
+        track_count // no cap
+    } else if distinct_albums <= 8 {
+        4
+    } else {
+        2
+    };
+    let max_per_artist = if distinct_artists <= 3 {
+        track_count // no cap
+    } else if distinct_artists <= 6 {
+        5
+    } else {
+        3
+    };
+
+    info!(
+        distinct_albums,
+        distinct_artists,
+        max_per_album,
+        max_per_artist,
+        "adaptive diversity caps"
+    );
 
     let mut selected = Vec::new();
     let mut album_count: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
@@ -337,10 +374,10 @@ pub async fn generate_playlist_from_prompt(
         let album_id: String = row.get("album_id");
         let artist_id: String = row.get("artist_id");
 
-        if album_count.get(&album_id).copied().unwrap_or(0) >= 2 {
+        if album_count.get(&album_id).copied().unwrap_or(0) >= max_per_album {
             continue;
         }
-        if artist_count.get(&artist_id).copied().unwrap_or(0) >= 3 {
+        if artist_count.get(&artist_id).copied().unwrap_or(0) >= max_per_artist {
             continue;
         }
 
@@ -442,7 +479,8 @@ async fn fetch_tracks_in_genres(
                 t.duration_seconds, t.bpm_analyzed, t.bpm_tag,
                 t.key_analyzed, t.loudness_lufs,
                 t.bliss_features, t.mood,
-                a.genre, a.style, a.year, a.moods
+                a.genre, a.style, a.year, a.moods,
+                ar.external_id as artist_external_id
          FROM tracks t
          JOIN albums a ON t.album_id = a.id
          JOIN artists ar ON a.artist_id = ar.id
@@ -476,11 +514,12 @@ async fn fetch_all_tracks(
                 t.duration_seconds, t.bpm_analyzed, t.bpm_tag,
                 t.key_analyzed, t.loudness_lufs,
                 t.bliss_features, t.mood,
-                a.genre, a.style, a.year, a.moods
+                a.genre, a.style, a.year, a.moods,
+                ar.external_id as artist_external_id
          FROM tracks t
          JOIN albums a ON t.album_id = a.id
          JOIN artists ar ON a.artist_id = ar.id
-         WHERE t.library_id IN (SELECT value FROM json_each(?))",
+         WHERE t.library_id IN (SELECT value FROM json_each(?1))",
     )
     .bind(library_ids_json)
     .fetch_all(pool)
@@ -517,4 +556,60 @@ fn auto_name_from_prompt(prompt: &str) -> String {
         let truncated = &trimmed[..trimmed.char_indices().take(37).last().map(|(i, c)| i + c.len_utf8()).unwrap_or(37)];
         format!("{}...", truncated)
     }
+}
+
+/// Load LB similar artist scores for a user's top-played artists.
+/// Returns a map of artist MBID → normalized score (0.0-1.0).
+async fn load_lb_scores_for_user(
+    pool: &SqlitePool,
+    user_id: &str,
+) -> anyhow::Result<std::collections::HashMap<String, f64>> {
+    // Get the user's top 10 most-played artists' MBIDs
+    let top_artist_mbids: Vec<(String,)> = sqlx::query_as(
+        "SELECT DISTINCT ar.external_id
+         FROM play_history ph
+         JOIN tracks t ON ph.track_id = t.id
+         JOIN albums a ON t.album_id = a.id
+         JOIN artists ar ON a.artist_id = ar.id
+         WHERE ph.user_id = ? AND ph.completed = 1
+           AND ar.external_id IS NOT NULL AND ar.external_id != ''
+         GROUP BY ar.id
+         ORDER BY COUNT(*) DESC
+         LIMIT 10",
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await?;
+
+    if top_artist_mbids.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+
+    let mut scores: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+
+    for (mbid,) in &top_artist_mbids {
+        let rows: Vec<(String, i32)> = sqlx::query_as(
+            "SELECT similar_artist_mbid, score FROM lb_similar_artists
+             WHERE artist_mbid = ?
+             ORDER BY score DESC",
+        )
+        .bind(mbid)
+        .fetch_all(pool)
+        .await?;
+
+        if rows.is_empty() {
+            continue;
+        }
+
+        let max_score = rows.iter().map(|(_, s)| *s).max().unwrap_or(1) as f64;
+        for (similar_mbid, score) in rows {
+            let normalized = score as f64 / max_score.max(1.0);
+            let entry = scores.entry(similar_mbid).or_insert(0.0);
+            if normalized > *entry {
+                *entry = normalized;
+            }
+        }
+    }
+
+    Ok(scores)
 }

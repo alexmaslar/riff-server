@@ -157,6 +157,7 @@ pub async fn generate(
         &criteria,
         track_count,
         &library_ids,
+        &claims.sub,
     )
     .await?;
 

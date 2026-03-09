@@ -5,6 +5,7 @@ pub mod daily_mixes;
 pub mod db;
 pub mod editorial;
 pub mod featured;
+pub mod listenbrainz;
 pub mod musicbrainz;
 pub mod deezer;
 pub mod mix_collage;

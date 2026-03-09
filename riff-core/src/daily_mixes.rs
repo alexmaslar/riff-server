@@ -17,20 +17,18 @@ const MIN_TRACKS_PER_MIX: usize = 20;
 const MAX_SEED_RETRIES: usize = 3;
 const SEED_ARTIST_TRACK_CAP: usize = 10;
 
-// Scoring weights
+// Scoring weights (simplified — LB similarity is primary signal)
+const SCORE_LB_ARTIST_MAX: f64 = 10.0;
+const SCORE_RATING_MAX: f64 = 5.0;
 const SCORE_FAV_TRACK: f64 = 3.0;
+const SCORE_FAV_ALBUM_ARTIST: f64 = 2.0;
 const SCORE_PLAY_FREQ_CAP: f64 = 2.0;
+const SCORE_GENRE_MATCH: f64 = 3.0;
 const SCORE_SKIP_MAX: f64 = 3.0;
-const SCORE_RECENCY_MAX: f64 = 2.0;
-const SCORE_RECENCY_DAYS: f64 = 7.0;
 const SCORE_COOLDOWN_PENALTY: f64 = 3.0;
 const SCORE_COOLDOWN_DAYS: i64 = 3;
-const SCORE_COMPILATION_PENALTY: f64 = 1.5;
-const SCORE_BLISS_MAX: f64 = 3.0;
-const SCORE_BLISS_SCALE: f64 = 0.6;
 
-// Flow ordering weights
-const FLOW_BLISS_WEIGHT: f64 = 0.8;
+// Flow ordering weights (no bliss — BPM + key + loudness only)
 const FLOW_MOOD_PENALTY: f64 = 0.3;
 const FLOW_LOUDNESS_ARC_WEIGHT: f64 = 0.15;
 
@@ -142,17 +140,6 @@ pub fn parse_bliss(row: &sqlx::sqlite::SqliteRow) -> Option<Vec<f64>> {
     json_str.and_then(|s| serde_json::from_str(&s).ok())
 }
 
-fn bliss_euclidean_distance(a: &[f64], b: &[f64]) -> f64 {
-    if a.len() != b.len() {
-        return f64::MAX;
-    }
-    a.iter()
-        .zip(b.iter())
-        .map(|(x, y)| (x - y).powi(2))
-        .sum::<f64>()
-        .sqrt()
-}
-
 /// Deterministic seed index from (user_id, date_str) — avoids annual cycle repeats
 /// and gives different users different seeds on the same day.
 fn seed_index(user_id: &str, date_str: &str, len: usize) -> usize {
@@ -164,33 +151,6 @@ fn seed_index(user_id: &str, date_str: &str, len: usize) -> usize {
     date_str.hash(&mut hasher);
     let h = hasher.finish();
     (h as usize) % len
-}
-
-fn compute_centroid(vectors: &[&[f64]]) -> Option<Vec<f64>> {
-    if vectors.is_empty() {
-        return None;
-    }
-    let dim = vectors[0].len();
-    if dim == 0 {
-        return None;
-    }
-    let mut centroid = vec![0.0; dim];
-    let mut count = 0usize;
-    for v in vectors {
-        if v.len() == dim {
-            for (i, val) in v.iter().enumerate() {
-                centroid[i] += val;
-            }
-            count += 1;
-        }
-    }
-    if count == 0 {
-        return None;
-    }
-    for val in &mut centroid {
-        *val /= count as f64;
-    }
-    Some(centroid)
 }
 
 /// Generate all 4 daily mixes for a single user within a library context.
@@ -544,7 +504,8 @@ async fn build_artist_mix_tracks(
                     t.key_analyzed, t.loudness_lufs,
                     t.bliss_features, t.mood,
                     COALESCE(a.rating, 5.0) as rating,
-                    a.play_count, a.is_compilation, a.moods
+                    a.play_count, a.moods,
+                    ar.external_id as artist_external_id, a.genre
              FROM tracks t
              JOIN albums a ON t.album_id = a.id
              JOIN artists ar ON a.artist_id = ar.id
@@ -567,7 +528,8 @@ async fn build_artist_mix_tracks(
                     t.key_analyzed, t.loudness_lufs,
                     t.bliss_features, t.mood,
                     COALESCE(a.rating, 5.0) as rating,
-                    a.play_count, a.is_compilation, a.moods
+                    a.play_count, a.moods,
+                    ar.external_id as artist_external_id, a.genre
              FROM tracks t
              JOIN albums a ON t.album_id = a.id
              JOIN artists ar ON a.artist_id = ar.id
@@ -593,16 +555,21 @@ async fn build_artist_mix_tracks(
         q.fetch_all(pool).await?
     };
 
-    let artist_centroid = compute_artist_bliss_centroid(pool, seed_artist_id).await?;
+    // Load LB similar artist scores for the seed artist
+    let lb_artist_scores = load_lb_artist_scores(pool, seed_artist_id).await?;
+
+    // Seed genres for genre-match scoring
+    let seed_genre_list: Vec<String> = genres.iter().map(|g| g.to_lowercase()).collect();
+
     let ctx = ScoringContext {
         pool,
         user_id,
         date_str,
         used_track_ids,
-        compilation_penalty: SCORE_COMPILATION_PENALTY,
-        bliss_centroid: artist_centroid.as_deref(),
         max_tracks_per_artist: MAX_TRACKS_PER_ARTIST,
         seed_artist_id: Some(seed_artist_id),
+        lb_artist_scores: &lb_artist_scores,
+        seed_genres: &seed_genre_list,
     };
     score_and_select(&candidate_tracks, &ctx).await
 }
@@ -684,7 +651,8 @@ async fn generate_genre_mix(
                     t.key_analyzed, t.loudness_lufs,
                     t.bliss_features, t.mood,
                     COALESCE(a.rating, 5.0) as rating,
-                    a.play_count, a.is_compilation, a.moods
+                    a.play_count, a.moods,
+                    ar.external_id as artist_external_id, a.genre
              FROM tracks t
              JOIN albums a ON t.album_id = a.id
              JOIN artists ar ON a.artist_id = ar.id
@@ -705,15 +673,17 @@ async fn generate_genre_mix(
         .fetch_all(pool)
         .await?;
 
+        let empty_lb = std::collections::HashMap::new();
+        let seed_genres_lower: Vec<String> = vec![seed_genre.to_lowercase()];
         let ctx = ScoringContext {
             pool,
             user_id,
             date_str,
             used_track_ids,
-            compilation_penalty: 0.0,
-            bliss_centroid: None,
             max_tracks_per_artist: MAX_TRACKS_PER_ARTIST,
             seed_artist_id: None,
+            lb_artist_scores: &empty_lb,
+            seed_genres: &seed_genres_lower,
         };
         let result = score_and_select(&candidate_tracks, &ctx).await?;
 
@@ -786,7 +756,8 @@ async fn generate_deep_cuts_mix(
     .fetch_all(pool)
     .await?;
 
-    let user_centroid = compute_user_bliss_centroid(pool, user_id).await?;
+    let empty_lb = std::collections::HashMap::new();
+    let empty_genres: Vec<String> = Vec::new();
 
     if candidate_tracks.is_empty() {
         // Fallback: rarely played tracks (scoped by library)
@@ -796,7 +767,8 @@ async fn generate_deep_cuts_mix(
                     t.key_analyzed, t.loudness_lufs,
                     t.bliss_features, t.mood,
                     COALESCE(a.rating, 5.0) as rating,
-                    a.play_count, a.is_compilation, a.moods
+                    a.play_count, a.moods,
+                    ar.external_id as artist_external_id, a.genre
              FROM tracks t
              JOIN albums a ON t.album_id = a.id
              JOIN artists ar ON a.artist_id = ar.id
@@ -814,10 +786,10 @@ async fn generate_deep_cuts_mix(
             user_id,
             date_str,
             used_track_ids,
-            compilation_penalty: 0.0,
-            bliss_centroid: user_centroid.as_deref(),
             max_tracks_per_artist: MAX_TRACKS_PER_ARTIST,
             seed_artist_id: None,
+            lb_artist_scores: &empty_lb,
+            seed_genres: &empty_genres,
         };
         let selected = score_and_select(&fallback, &ctx).await?;
         if selected.is_empty() {
@@ -840,10 +812,10 @@ async fn generate_deep_cuts_mix(
         user_id,
         date_str,
         used_track_ids,
-        compilation_penalty: 0.0,
-        bliss_centroid: user_centroid.as_deref(),
         max_tracks_per_artist: MAX_TRACKS_PER_ARTIST,
         seed_artist_id: None,
+        lb_artist_scores: &empty_lb,
+        seed_genres: &empty_genres,
     };
     let mut selected = score_and_select(&candidate_tracks, &ctx).await?;
 
@@ -855,7 +827,8 @@ async fn generate_deep_cuts_mix(
                     t.key_analyzed, t.loudness_lufs,
                     t.bliss_features, t.mood,
                     COALESCE(a.rating, 5.0) as rating,
-                    a.play_count, a.is_compilation, a.moods
+                    a.play_count, a.moods,
+                    ar.external_id as artist_external_id, a.genre
              FROM tracks t
              JOIN albums a ON t.album_id = a.id
              JOIN artists ar ON a.artist_id = ar.id
@@ -879,10 +852,10 @@ async fn generate_deep_cuts_mix(
                 user_id,
                 date_str,
                 used_track_ids: &extended_used,
-                compilation_penalty: 0.0,
-                bliss_centroid: user_centroid.as_deref(),
                 max_tracks_per_artist: MAX_TRACKS_PER_ARTIST,
                 seed_artist_id: None,
+                lb_artist_scores: &empty_lb,
+                seed_genres: &empty_genres,
             };
             let mut extra = score_and_select(&fallback, &ctx2).await?;
             extra.truncate(MAX_TRACKS_PER_MIX.saturating_sub(selected.len()));
@@ -972,7 +945,8 @@ async fn generate_decade_mix(
                     t.key_analyzed, t.loudness_lufs,
                     t.bliss_features, t.mood,
                     COALESCE(a.rating, 5.0) as rating,
-                    a.play_count, a.is_compilation, a.moods
+                    a.play_count, a.moods,
+                    ar.external_id as artist_external_id, a.genre
              FROM tracks t
              JOIN albums a ON t.album_id = a.id
              JOIN artists ar ON a.artist_id = ar.id
@@ -987,15 +961,17 @@ async fn generate_decade_mix(
         .fetch_all(pool)
         .await?;
 
+        let empty_lb = std::collections::HashMap::new();
+        let empty_genres: Vec<String> = Vec::new();
         let ctx = ScoringContext {
             pool,
             user_id,
             date_str,
             used_track_ids,
-            compilation_penalty: 0.0,
-            bliss_centroid: None,
             max_tracks_per_artist: MAX_TRACKS_PER_ARTIST,
             seed_artist_id: None,
+            lb_artist_scores: &empty_lb,
+            seed_genres: &empty_genres,
         };
         let result = score_and_select(&candidate_tracks, &ctx).await?;
 
@@ -1039,6 +1015,7 @@ struct ScoredTrack {
     id: String,
     album_id: String,
     artist_id: String,
+    artist_external_id: Option<String>,
     score: f64,
     bpm: Option<f64>,
     key: Option<String>,
@@ -1047,7 +1024,6 @@ struct ScoredTrack {
     duration_seconds: Option<i32>,
     mood: Option<String>,
     album_moods: Vec<String>,
-    is_compilation: bool,
 }
 
 pub struct ScoringContext<'a> {
@@ -1055,10 +1031,12 @@ pub struct ScoringContext<'a> {
     pub user_id: &'a str,
     pub date_str: &'a str,
     pub used_track_ids: &'a [String],
-    pub compilation_penalty: f64,
-    pub bliss_centroid: Option<&'a [f64]>,
     pub max_tracks_per_artist: usize,
     pub seed_artist_id: Option<&'a str>,
+    /// LB similar artist scores for the seed: (artist external_id → normalized score 0.0-1.0)
+    pub lb_artist_scores: &'a std::collections::HashMap<String, f64>,
+    /// Seed artist genres for genre-match scoring
+    pub seed_genres: &'a [String],
 }
 
 /// Per-track play statistics from play_history.
@@ -1161,17 +1139,13 @@ pub async fn score_and_select(
     let fav_track_set: HashSet<&str> = fav_tracks.iter().map(|s| s.as_str()).collect();
     let used_set: HashSet<&str> = ctx.used_track_ids.iter().map(|s| s.as_str()).collect();
 
-    let now = ctx.date_str.parse::<NaiveDate>()
-        .unwrap_or_else(|_| Utc::now().date_naive())
-        .and_hms_opt(0, 0, 0)
-        .unwrap_or_else(|| Utc::now().naive_utc());
-
     let mut scored: Vec<ScoredTrack> = candidate_rows
         .iter()
         .map(|row| {
             let id: String = row.get("id");
             let album_id: String = row.get("album_id");
             let artist_id: String = row.get("artist_id");
+            let artist_external_id: Option<String> = row.try_get("artist_external_id").ok().flatten();
             let rating: f64 = row.get("rating");
             let bpm_analyzed: Option<f64> = row.try_get("bpm_analyzed").ok().flatten();
             let bpm_tag: Option<f64> = row.try_get("bpm_tag").ok().flatten();
@@ -1183,48 +1157,53 @@ pub async fn score_and_select(
             let mood: Option<String> = row.try_get("mood").ok().flatten();
             let album_moods_json: String = row.try_get("moods").unwrap_or_default();
             let album_moods: Vec<String> = crate::db::decode_json_array(&album_moods_json);
-            let is_compilation: bool = row.try_get::<i32, _>("is_compilation")
-                .ok()
-                .map(|v| v != 0)
-                .unwrap_or(false);
 
-            // Base score from rating (0-10)
-            let mut score = rating;
+            let mut score = 0.0;
 
-            // Favorites bonuses
-            if fav_album_set.contains(album_id.as_str()) {
-                score += 2.0;
+            // LB artist similarity (0-10 pts) — primary signal
+            if let Some(ref ext_id) = artist_external_id {
+                if let Some(&lb_score) = ctx.lb_artist_scores.get(ext_id) {
+                    score += lb_score * SCORE_LB_ARTIST_MAX;
+                }
             }
-            if fav_artist_set.contains(artist_id.as_str()) {
-                score += 2.0;
-            }
+
+            // Album rating (0-5 pts)
+            score += (rating / 2.0).min(SCORE_RATING_MAX);
+
+            // User preference: favorites + play frequency (0-5 pts)
             if fav_track_set.contains(id.as_str()) {
                 score += SCORE_FAV_TRACK;
             }
-
-            // Play frequency & skip penalty
+            if fav_album_set.contains(album_id.as_str()) {
+                score += SCORE_FAV_ALBUM_ARTIST;
+            }
+            if fav_artist_set.contains(artist_id.as_str()) {
+                score += SCORE_FAV_ALBUM_ARTIST;
+            }
             if let Some(stats) = play_stats.get(&id) {
-                // Play frequency bonus: ln(1 + completed_plays), capped
                 let freq_bonus = (1.0 + stats.completed_plays as f64).ln().min(SCORE_PLAY_FREQ_CAP);
                 score += freq_bonus;
 
-                // Skip penalty: only if enough plays for meaningful signal
+                // Skip penalty (strong negative signal)
                 if stats.total_plays >= 3 {
                     let skip_rate = 1.0 - (stats.completed_plays as f64 / stats.total_plays as f64);
                     score -= skip_rate * SCORE_SKIP_MAX;
                 }
+            }
 
-                // Recency decay: linear penalty over SCORE_RECENCY_DAYS
-                if let Some(last) = stats.last_played {
-                    let days_ago = (now - last).num_days() as f64;
-                    if days_ago < SCORE_RECENCY_DAYS {
-                        let decay = (1.0 - days_ago / SCORE_RECENCY_DAYS) * SCORE_RECENCY_MAX;
-                        score -= decay;
-                    }
+            // Genre match with seed (0-3 pts)
+            if !ctx.seed_genres.is_empty() {
+                let genre_json: String = row.try_get("genre").unwrap_or_default();
+                let track_genres: Vec<String> = crate::db::decode_json_array(&genre_json)
+                    .into_iter()
+                    .map(|g| g.to_lowercase())
+                    .collect();
+                let overlap = ctx.seed_genres.iter()
+                    .filter(|sg| track_genres.iter().any(|tg| tg == sg.as_str()))
+                    .count();
+                if overlap > 0 {
+                    score += SCORE_GENRE_MATCH;
                 }
-            } else {
-                // Unplayed track bonus (discovery)
-                score += 1.0;
             }
 
             // Cooldown: was in a mix within the last N days
@@ -1237,21 +1216,9 @@ pub async fn score_and_select(
                 score -= 5.0;
             }
 
-            // Compilation penalty (artist mix only)
-            if is_compilation && ctx.compilation_penalty > 0.0 {
-                score -= ctx.compilation_penalty;
-            }
-
-            // Similarity bonus: bliss euclidean distance to centroid
-            if let (Some(centroid), Some(ref track_bliss)) = (ctx.bliss_centroid, &bliss) {
-                let dist = bliss_euclidean_distance(centroid, track_bliss);
-                let similarity = (SCORE_BLISS_MAX - dist / SCORE_BLISS_SCALE).clamp(0.0, SCORE_BLISS_MAX);
-                score += similarity;
-            }
-
             ScoredTrack {
-                id, album_id, artist_id, score, bpm, key, loudness,
-                bliss, duration_seconds, mood, album_moods, is_compilation,
+                id, album_id, artist_id, artist_external_id, score, bpm, key, loudness,
+                bliss, duration_seconds, mood, album_moods,
             }
         })
         .collect();
@@ -1262,10 +1229,37 @@ pub async fn score_and_select(
     // Log top few scores for debugging
     for track in scored.iter().take(3) {
         debug!(
-            "scored track {} = {:.2} (compilation={}, bliss={})",
-            track.id, track.score, track.is_compilation, track.bliss.is_some()
+            "scored track {} = {:.2} (lb_artist={}, bliss={})",
+            track.id, track.score, track.artist_external_id.is_some(), track.bliss.is_some()
         );
     }
+
+    // Adaptive diversity caps based on candidate pool diversity
+    let distinct_albums: usize = scored.iter().map(|t| &t.album_id).collect::<HashSet<_>>().len();
+    let distinct_artists: usize = scored.iter().map(|t| &t.artist_id).collect::<HashSet<_>>().len();
+
+    let adaptive_album_cap = if distinct_albums <= 3 {
+        MAX_TRACKS_PER_MIX // no cap
+    } else if distinct_albums <= 8 {
+        4
+    } else {
+        MAX_TRACKS_PER_ALBUM
+    };
+    let adaptive_artist_cap = if distinct_artists <= 3 {
+        MAX_TRACKS_PER_MIX // no cap
+    } else if distinct_artists <= 6 {
+        5
+    } else {
+        ctx.max_tracks_per_artist
+    };
+
+    debug!(
+        distinct_albums,
+        distinct_artists,
+        adaptive_album_cap,
+        adaptive_artist_cap,
+        "daily mix adaptive diversity caps"
+    );
 
     // Apply diversity constraints
     let mut selected: Vec<MixTrack> = Vec::new();
@@ -1279,7 +1273,7 @@ pub async fn score_and_select(
         }
 
         let ac = album_count.get(&track.album_id).copied().unwrap_or(0);
-        if ac >= MAX_TRACKS_PER_ALBUM {
+        if ac >= adaptive_album_cap {
             continue;
         }
 
@@ -1287,7 +1281,7 @@ pub async fn score_and_select(
         let artist_limit = if ctx.seed_artist_id == Some(track.artist_id.as_str()) {
             SEED_ARTIST_TRACK_CAP
         } else {
-            ctx.max_tracks_per_artist
+            adaptive_artist_cap
         };
         if arc >= artist_limit {
             continue;
@@ -1311,7 +1305,7 @@ pub async fn score_and_select(
         });
     }
 
-    // Backfill pass: if we didn't reach MAX_TRACKS_PER_MIX, retry with doubled artist limits
+    // Backfill pass: if we didn't reach MAX_TRACKS_PER_MIX, retry with doubled caps
     if selected.len() < MAX_TRACKS_PER_MIX {
         let selected_ids: HashSet<String> = selected.iter().map(|t| t.id.clone()).collect();
         for track in &scored {
@@ -1323,7 +1317,7 @@ pub async fn score_and_select(
             }
 
             let ac = album_count.get(&track.album_id).copied().unwrap_or(0);
-            if ac >= MAX_TRACKS_PER_ALBUM {
+            if ac >= adaptive_album_cap * 2 {
                 continue;
             }
 
@@ -1331,7 +1325,7 @@ pub async fn score_and_select(
             let base_limit = if ctx.seed_artist_id == Some(track.artist_id.as_str()) {
                 SEED_ARTIST_TRACK_CAP
             } else {
-                ctx.max_tracks_per_artist
+                adaptive_artist_cap
             };
             if arc >= base_limit * 2 {
                 continue;
@@ -1366,62 +1360,47 @@ pub async fn score_and_select(
     Ok(selected)
 }
 
-// ─── Bliss Centroid Functions ─────────────────────────────────────────────────
+// ─── ListenBrainz Similarity Lookup ──────────────────────────────────────────
 
-/// Mean bliss vector for all analyzed tracks by a given artist.
-pub async fn compute_artist_bliss_centroid(
+/// Load LB similar artist scores for a given library artist ID.
+/// Returns a map of similar artist external_id → normalized score (0.0-1.0).
+pub async fn load_lb_artist_scores(
     pool: &SqlitePool,
     artist_id: &str,
-) -> Result<Option<Vec<f64>>> {
-    let rows = sqlx::query_as::<_, (String,)>(
-        "SELECT t.bliss_features
-         FROM tracks t
-         JOIN albums a ON t.album_id = a.id
-         WHERE a.artist_id = ? AND t.bliss_features IS NOT NULL
-         LIMIT 200",
+) -> Result<HashMap<String, f64>> {
+    // Get the seed artist's external_id (MusicBrainz MBID)
+    let seed_mbid: Option<(String,)> = sqlx::query_as(
+        "SELECT external_id FROM artists WHERE id = ? AND external_id IS NOT NULL",
     )
     .bind(artist_id)
-    .fetch_all(pool)
+    .fetch_optional(pool)
     .await?;
 
-    let vectors: Vec<Vec<f64>> = rows
-        .iter()
-        .filter_map(|(json,)| serde_json::from_str(json).ok())
-        .collect();
+    let Some((mbid,)) = seed_mbid else {
+        return Ok(HashMap::new());
+    };
 
-    let refs: Vec<&[f64]> = vectors.iter().map(|v| v.as_slice()).collect();
-    Ok(compute_centroid(&refs))
-}
-
-/// Mean bliss vector of a user's top 50 most-completed tracks.
-pub async fn compute_user_bliss_centroid(
-    pool: &SqlitePool,
-    user_id: &str,
-) -> Result<Option<Vec<f64>>> {
-    let rows = sqlx::query_as::<_, (String,)>(
-        "SELECT t.bliss_features
-         FROM tracks t
-         JOIN (
-             SELECT track_id, SUM(completed) as plays
-             FROM play_history
-             WHERE user_id = ?
-             GROUP BY track_id
-             ORDER BY plays DESC
-             LIMIT 50
-         ) ph ON t.id = ph.track_id
-         WHERE t.bliss_features IS NOT NULL",
+    // Fetch LB similar artists and normalize scores
+    let rows: Vec<(String, i32)> = sqlx::query_as(
+        "SELECT similar_artist_mbid, score FROM lb_similar_artists
+         WHERE artist_mbid = ?
+         ORDER BY score DESC",
     )
-    .bind(user_id)
+    .bind(&mbid)
     .fetch_all(pool)
     .await?;
 
-    let vectors: Vec<Vec<f64>> = rows
-        .iter()
-        .filter_map(|(json,)| serde_json::from_str(json).ok())
+    if rows.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let max_score = rows.iter().map(|(_, s)| *s).max().unwrap_or(1) as f64;
+    let scores: HashMap<String, f64> = rows
+        .into_iter()
+        .map(|(mbid, score)| (mbid, score as f64 / max_score.max(1.0)))
         .collect();
 
-    let refs: Vec<&[f64]> = vectors.iter().map(|v| v.as_slice()).collect();
-    Ok(compute_centroid(&refs))
+    Ok(scores)
 }
 
 // ─── Flow Ordering (greedy nearest-neighbor) ─────────────────────────────────
@@ -1455,23 +1434,6 @@ pub fn order_for_flow(tracks: &mut Vec<MixTrack>) {
         let mut sorted = loudness_vals.clone();
         sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         sorted[sorted.len() / 2]
-    };
-
-    // Compute max bliss distance for normalization
-    let bliss_vecs: Vec<&Vec<f64>> = tracks.iter().filter_map(|t| t.bliss.as_ref()).collect();
-    let max_bliss_dist = if bliss_vecs.len() >= 2 {
-        let mut max_d = 0.0f64;
-        for i in 0..bliss_vecs.len().min(20) {
-            for j in (i + 1)..bliss_vecs.len().min(20) {
-                let d = bliss_euclidean_distance(bliss_vecs[i], bliss_vecs[j]);
-                if d > max_d && d < f64::MAX {
-                    max_d = d;
-                }
-            }
-        }
-        if max_d < f64::EPSILON { 1.0 } else { max_d }
-    } else {
-        1.0
     };
 
     // Find the starting track: closest to median BPM
@@ -1541,14 +1503,6 @@ pub fn order_for_flow(tracks: &mut Vec<MixTrack>) {
             // Loudness distance (weight 0.3)
             if let (Some(prev_lufs), Some(cand_lufs)) = (prev.loudness, candidate.loudness) {
                 cost += 0.3 * (prev_lufs - cand_lufs).abs() / 10.0;
-            }
-
-            // Timbral distance via bliss euclidean
-            if let (Some(ref prev_bliss), Some(ref cand_bliss)) = (&prev.bliss, &candidate.bliss) {
-                let dist = bliss_euclidean_distance(prev_bliss, cand_bliss);
-                if dist < f64::MAX {
-                    cost += FLOW_BLISS_WEIGHT * (dist / max_bliss_dist);
-                }
             }
 
             // Mood adjacency penalty (FLOW_MOOD_PENALTY)

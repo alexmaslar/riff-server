@@ -4,8 +4,7 @@ use axum::{
 };
 use riff_core::auth::Claims;
 use riff_core::daily_mixes::{
-    compute_artist_bliss_centroid, compute_user_bliss_centroid,
-    order_for_flow, score_and_select, ScoringContext,
+    load_lb_artist_scores, order_for_flow, score_and_select, ScoringContext,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -88,7 +87,8 @@ pub async fn get_autoqueue(
                     t.key_analyzed, t.loudness_lufs,
                     t.bliss_features, t.mood,
                     COALESCE(a.rating, 5.0) as rating,
-                    a.play_count, a.is_compilation
+                    a.play_count, a.moods,
+                    ar.external_id as artist_external_id, a.genre
              FROM tracks t
              JOIN albums a ON t.album_id = a.id
              JOIN artists ar ON a.artist_id = ar.id
@@ -113,7 +113,8 @@ pub async fn get_autoqueue(
                     t.key_analyzed, t.loudness_lufs,
                     t.bliss_features, t.mood,
                     COALESCE(a.rating, 5.0) as rating,
-                    a.play_count, a.is_compilation
+                    a.play_count, a.moods,
+                    ar.external_id as artist_external_id, a.genre
              FROM tracks t
              JOIN albums a ON t.album_id = a.id
              JOIN artists ar ON a.artist_id = ar.id
@@ -142,12 +143,11 @@ pub async fn get_autoqueue(
         return Ok(Json(json!({ "tracks": [] })));
     }
 
-    // Compute bliss centroid for similarity scoring
-    let bliss_centroid = if params.artist_id.is_some() {
-        compute_artist_bliss_centroid(&state.db, context_artist_id).await?
-    } else {
-        compute_user_bliss_centroid(&state.db, &claims.sub).await?
-    };
+    // Load LB similar artist scores for the context artist
+    let lb_artist_scores = load_lb_artist_scores(&state.db, context_artist_id)
+        .await
+        .unwrap_or_default();
+    let seed_genres_lower: Vec<String> = genres.iter().map(|g| g.to_lowercase()).collect();
 
     let today = chrono::Utc::now().date_naive().format("%Y-%m-%d").to_string();
     let ctx = ScoringContext {
@@ -155,10 +155,10 @@ pub async fn get_autoqueue(
         user_id: &claims.sub,
         date_str: &today,
         used_track_ids: &exclude_ids,
-        compilation_penalty: 0.0,
-        bliss_centroid: bliss_centroid.as_deref(),
         max_tracks_per_artist: 3,
         seed_artist_id: None,
+        lb_artist_scores: &lb_artist_scores,
+        seed_genres: &seed_genres_lower,
     };
 
     let mut selected = score_and_select(&candidate_tracks, &ctx).await?;

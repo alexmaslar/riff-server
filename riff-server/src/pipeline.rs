@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use riff_core::{analysis, daily_mixes, db, musicbrainz, plugin, scanner};
+use riff_core::{analysis, daily_mixes, db, listenbrainz, musicbrainz, plugin, scanner};
 use tracing::Instrument;
 
 use crate::routes;
@@ -124,6 +124,21 @@ async fn run_pipeline_iteration(state: &Arc<AppState>) {
                         vec![]
                     });
             artist_ids.extend(wiki_ids);
+        }
+
+        // Step 2e: ListenBrainz similarity (no API key needed)
+        if state.stage_manager.try_start("listenbrainz") {
+            match listenbrainz::enrich_similar_artists(&state.db).await {
+                Ok(r) => {
+                    tracing::info!(
+                        stage = "listenbrainz",
+                        artists_enriched = r.artists_enriched,
+                        "complete"
+                    );
+                }
+                Err(e) => tracing::warn!(stage = "listenbrainz", error = %e, "failed"),
+            }
+            state.stage_manager.finish("listenbrainz");
         }
 
         // Step 3: Analysis (always)

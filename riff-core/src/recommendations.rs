@@ -12,21 +12,19 @@ pub struct RecommendResult {
 struct AlbumFeatures {
     id: String,
     artist_id: String,
+    artist_external_id: Option<String>,
     genres: HashSet<String>,
     styles: HashSet<String>,
-    tags: HashSet<String>,
-    credits: HashSet<String>,
-    label: Option<String>,
-    year: Option<i32>,
 }
 
-/// Generate album recommendations using metadata similarity (no AI needed).
+/// Generate album recommendations (ListenBrainz collaborative filtering primary, genre/style fallback).
 /// Incremental: skips albums already in `album_recommendations`.
 pub async fn generate_recommendations(pool: &SqlitePool) -> Result<RecommendResult> {
     generate_partitioned(pool, false).await
 }
 
 /// Generate album recommendations for ALL albums (force regenerate).
+/// Uses ListenBrainz collaborative filtering as primary signal, genre/style Jaccard as fallback.
 pub async fn generate_recommendations_force(pool: &SqlitePool) -> Result<RecommendResult> {
     generate_partitioned(pool, true).await
 }
@@ -80,78 +78,35 @@ async fn load_album_features(
     where_clause: &str,
     bind_param: Option<&str>,
 ) -> Result<Vec<AlbumFeatures>> {
-    // Fetch album metadata
     let query_str = format!(
-        "SELECT a.id, a.artist_id, a.year, a.genre, a.style, a.label, \
-                a.moods, a.descriptors, a.keywords \
+        "SELECT a.id, a.artist_id, ar.external_id, a.genre, a.style \
          FROM albums a \
          JOIN libraries l ON a.library_id = l.id \
+         JOIN artists ar ON a.artist_id = ar.id \
          WHERE {where_clause}"
     );
 
-    let rows: Vec<(
-        String,
-        String,
-        Option<i32>,
-        String,
-        String,
-        Option<String>,
-        String,
-        String,
-        String,
-    )> = if let Some(param) = bind_param {
-        sqlx::query_as(&query_str)
-            .bind(param)
-            .fetch_all(pool)
-            .await?
-    } else {
-        sqlx::query_as(&query_str).fetch_all(pool).await?
-    };
-
-    // Collect album IDs for filtering credits
-    let album_id_set: HashSet<&str> = rows.iter().map(|(id, ..)| id.as_str()).collect();
-    let album_ids_json = serde_json::to_string(
-        &album_id_set.iter().collect::<Vec<_>>()
-    )?;
-
-    // Fetch credits only for albums in this partition
-    let credits_rows: Vec<(String, String)> = sqlx::query_as(
-        "SELECT album_id, LOWER(artist_name) FROM album_credits \
-         WHERE album_id IN (SELECT value FROM json_each(?))",
-    )
-    .bind(&album_ids_json)
-    .fetch_all(pool)
-    .await?;
-    let mut credits_map: HashMap<String, HashSet<String>> = HashMap::new();
-    for (album_id, name) in credits_rows {
-        credits_map.entry(album_id).or_default().insert(name);
-    }
+    let rows: Vec<(String, String, Option<String>, String, String)> =
+        if let Some(param) = bind_param {
+            sqlx::query_as(&query_str)
+                .bind(param)
+                .fetch_all(pool)
+                .await?
+        } else {
+            sqlx::query_as(&query_str).fetch_all(pool).await?
+        };
 
     let mut albums = Vec::with_capacity(rows.len());
-    for (id, artist_id, year, genre_json, style_json, label, moods_json, descriptors_json, keywords_json) in rows
-    {
+    for (id, artist_id, artist_external_id, genre_json, style_json) in rows {
         let genres = parse_json_set(&genre_json);
         let styles = parse_json_set(&style_json);
-
-        let moods = parse_json_set(&moods_json);
-        let descriptors = parse_json_set(&descriptors_json);
-        let keywords = parse_json_set(&keywords_json);
-        let mut tags = HashSet::new();
-        tags.extend(moods);
-        tags.extend(descriptors);
-        tags.extend(keywords);
-
-        let credits = credits_map.remove(&id).unwrap_or_default();
 
         albums.push(AlbumFeatures {
             id,
             artist_id,
+            artist_external_id,
             genres,
             styles,
-            tags,
-            credits,
-            label: label.filter(|l| !l.is_empty()),
-            year,
         });
     }
 
@@ -201,15 +156,31 @@ async fn generate_inner(
     }
 
     info!(
-        "generating metadata-based recommendations for {} of {} albums",
+        "generating album recommendations for {} of {} albums",
         target_ids.len(),
         albums.len()
     );
 
-    // Build a genre->album index for pre-filtering
+    // Build lookup structures
+    // artist external_id (MBID) → album indices whose artist has that MBID
+    let mut ext_id_to_artist_idx: HashMap<&str, Vec<usize>> = HashMap::new();
+    // artist_id → album indices
+    let mut artist_id_to_album_idxs: HashMap<&str, Vec<usize>> = HashMap::new();
+    // Genre/style indexes for fallback
     let mut genre_index: HashMap<&str, Vec<usize>> = HashMap::new();
     let mut style_index: HashMap<&str, Vec<usize>> = HashMap::new();
+
     for (i, album) in albums.iter().enumerate() {
+        if let Some(ref ext_id) = album.artist_external_id {
+            ext_id_to_artist_idx
+                .entry(ext_id.as_str())
+                .or_default()
+                .push(i);
+        }
+        artist_id_to_album_idxs
+            .entry(album.artist_id.as_str())
+            .or_default()
+            .push(i);
         for g in &album.genres {
             genre_index.entry(g.as_str()).or_default().push(i);
         }
@@ -232,39 +203,72 @@ async fn generate_inner(
             continue;
         }
 
-        // Pre-filter: find candidate albums that share at least one genre or style
-        let mut candidates: HashSet<usize> = HashSet::new();
-        for g in &album.genres {
-            if let Some(idxs) = genre_index.get(g.as_str()) {
-                candidates.extend(idxs);
-            }
-        }
-        for s in &album.styles {
-            if let Some(idxs) = style_index.get(s.as_str()) {
-                candidates.extend(idxs);
-            }
-        }
-        // If no genre/style overlap at all, compare against all albums as fallback
-        if candidates.is_empty() {
-            candidates.extend(0..albums.len());
-        }
-        candidates.remove(&i); // remove self
-
-        // Score each candidate
         let mut scored: Vec<(f64, String, usize)> = Vec::new();
-        for &j in &candidates {
-            let other = &albums[j];
-            // Skip same artist
-            if album.artist_id == other.artist_id {
-                continue;
-            }
-            let (score, reason) = compute_similarity(album, other);
-            if score >= 0.15 {
-                scored.push((score, reason, j));
+
+        // Primary path: LB similar artists → find their albums
+        if let Some(ref ext_id) = album.artist_external_id {
+            let lb_rows: Vec<(String, String, i32)> = sqlx::query_as(
+                "SELECT similar_artist_mbid, COALESCE(similar_artist_name, ''), score \
+                 FROM lb_similar_artists WHERE artist_mbid = ? ORDER BY score DESC LIMIT 20",
+            )
+            .bind(ext_id)
+            .fetch_all(pool)
+            .await
+            .unwrap_or_default();
+
+            for (similar_mbid, _similar_name, lb_score) in &lb_rows {
+                // Find albums in library by artists with this MBID
+                if let Some(album_idxs) = ext_id_to_artist_idx.get(similar_mbid.as_str()) {
+                    let normalized = *lb_score as f64 / 100.0;
+                    for &j in album_idxs {
+                        if j == i { continue; }
+                        // Skip same artist
+                        if albums[j].artist_id == album.artist_id { continue; }
+                        let reason = "Listeners also enjoy".to_string();
+                        scored.push((normalized, reason, j));
+                    }
+                }
             }
         }
 
-        // Sort by score descending, take top 6
+        // Fallback: genre/style overlap if LB yielded < 3 results
+        if scored.len() < 3 {
+            let mut candidates: HashSet<usize> = HashSet::new();
+            for g in &album.genres {
+                if let Some(idxs) = genre_index.get(g.as_str()) {
+                    candidates.extend(idxs);
+                }
+            }
+            for s in &album.styles {
+                if let Some(idxs) = style_index.get(s.as_str()) {
+                    candidates.extend(idxs);
+                }
+            }
+            candidates.remove(&i);
+
+            let lb_indices: HashSet<usize> = scored.iter().map(|(_, _, j)| *j).collect();
+            for &j in &candidates {
+                if lb_indices.contains(&j) { continue; }
+                let other = &albums[j];
+                if album.artist_id == other.artist_id { continue; }
+                let score = jaccard(&album.genres, &other.genres) * 0.5
+                    + jaccard(&album.styles, &other.styles) * 0.5;
+                if score >= 0.15 {
+                    let shared: Vec<&String> = album.genres.intersection(&other.genres)
+                        .chain(album.styles.intersection(&other.styles))
+                        .take(3)
+                        .collect();
+                    let names: Vec<&str> = shared.iter().map(|s| s.as_str()).collect();
+                    let reason = if names.is_empty() {
+                        "Similar style".to_string()
+                    } else {
+                        format!("Shares {}", names.join(", "))
+                    };
+                    scored.push((score, reason, j));
+                }
+            }
+        }
+
         scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
         scored.truncate(6);
 
@@ -299,7 +303,7 @@ async fn generate_inner(
     }
 
     info!(
-        "recommendations complete: {} albums, {} recommendations",
+        "album recommendations complete: {} albums, {} recommendations",
         albums_with_recs, total_recs
     );
 
@@ -307,101 +311,6 @@ async fn generate_inner(
         albums_processed: albums_with_recs,
         recommendations_generated: total_recs,
     })
-}
-
-/// Compute similarity score and reason between two albums.
-/// Returns (score, reason) where score is 0.0-1.0.
-fn compute_similarity(a: &AlbumFeatures, b: &AlbumFeatures) -> (f64, String) {
-    let style_sim = jaccard(&a.styles, &b.styles);
-    let genre_sim = jaccard(&a.genres, &b.genres);
-    let tag_sim = jaccard(&a.tags, &b.tags);
-
-    // Shared credits
-    let credits_sim = if a.credits.is_empty() && b.credits.is_empty() {
-        0.0
-    } else {
-        let shared: Vec<&String> = a.credits.intersection(&b.credits).collect();
-        // Normalize: more shared credits = higher score, cap at 1.0
-        (shared.len() as f64 / 3.0).min(1.0)
-    };
-    let shared_credits: Vec<&String> = a.credits.intersection(&b.credits).collect();
-
-    // Year proximity
-    let year_sim = match (a.year, b.year) {
-        (Some(ya), Some(yb)) => (-(ya - yb).abs() as f64 / 10.0).exp(),
-        _ => 0.0,
-    };
-
-    // Label match
-    let label_sim = match (&a.label, &b.label) {
-        (Some(la), Some(lb)) if la.to_lowercase() == lb.to_lowercase() => 1.0,
-        _ => 0.0,
-    };
-
-    // Weighted score
-    let score = (style_sim * 0.35
-        + genre_sim * 0.20
-        + tag_sim * 0.15
-        + credits_sim * 0.15
-        + year_sim * 0.10
-        + label_sim * 0.05)
-        .clamp(0.0, 1.0);
-
-    // Build reason from top contributing signals
-    let mut contributions: Vec<(f64, String)> = Vec::new();
-
-    if style_sim > 0.0 {
-        let shared: Vec<&String> = a.styles.intersection(&b.styles).collect();
-        let names: Vec<&str> = shared.iter().map(|s| s.as_str()).take(3).collect();
-        contributions.push((
-            style_sim * 0.35,
-            format!("Shares {} styles", names.join(", ")),
-        ));
-    }
-    if genre_sim > 0.0 {
-        let shared: Vec<&String> = a.genres.intersection(&b.genres).collect();
-        let names: Vec<&str> = shared.iter().map(|s| s.as_str()).take(3).collect();
-        contributions.push((
-            genre_sim * 0.20,
-            format!("Both {} genre", names.join(", ")),
-        ));
-    }
-    if !shared_credits.is_empty() {
-        let names: Vec<&str> = shared_credits.iter().map(|s| s.as_str()).take(2).collect();
-        contributions.push((
-            credits_sim * 0.15,
-            format!("Common personnel: {}", names.join(", ")),
-        ));
-    }
-    if label_sim > 0.0 {
-        let label = a.label.as_deref().unwrap_or("");
-        let era = match (a.year, b.year) {
-            (Some(ya), Some(yb)) if (ya / 10) == (yb / 10) => {
-                format!(" from the {}0s", ya / 10)
-            }
-            _ => String::new(),
-        };
-        contributions.push((label_sim * 0.05, format!("Both on {label}{era}")));
-    }
-    if tag_sim > 0.0 {
-        contributions.push((tag_sim * 0.15, "Similar mood and sonic character".into()));
-    }
-
-    contributions.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-
-    let reason = if contributions.is_empty() {
-        "Related album".into()
-    } else {
-        // Take the top 1-2 reasons
-        contributions
-            .iter()
-            .take(2)
-            .map(|(_, desc)| desc.as_str())
-            .collect::<Vec<_>>()
-            .join("; ")
-    };
-
-    (score, reason)
 }
 
 fn jaccard(a: &HashSet<String>, b: &HashSet<String>) -> f64 {
@@ -421,15 +330,12 @@ fn jaccard(a: &HashSet<String>, b: &HashSet<String>) -> f64 {
 
 struct ArtistFeatures {
     id: String,
+    external_id: Option<String>,
     genres: HashSet<String>,
     styles: HashSet<String>,
-    tags: HashSet<String>,
-    credits: HashSet<String>,
-    labels: HashSet<String>,
-    year_range: Option<(i32, i32)>,
 }
 
-/// Generate artist recommendations using metadata similarity (no AI needed).
+/// Generate artist recommendations (ListenBrainz collaborative filtering primary, genre/style fallback).
 /// Incremental: skips artists already in `artist_recommendations`.
 pub async fn generate_artist_recommendations(pool: &SqlitePool) -> Result<RecommendResult> {
     generate_artist_partitioned(pool, false).await
@@ -492,15 +398,16 @@ async fn load_artist_features(
     where_clause: &str,
     bind_param: Option<&str>,
 ) -> Result<Vec<ArtistFeatures>> {
-    // Get distinct artists from qualifying albums
+    // Get distinct artists with their external_ids from qualifying albums
     let artist_query = format!(
-        "SELECT DISTINCT a.artist_id \
+        "SELECT DISTINCT a.artist_id, ar.external_id \
          FROM albums a \
          JOIN libraries l ON a.library_id = l.id \
+         JOIN artists ar ON a.artist_id = ar.id \
          WHERE {where_clause}"
     );
 
-    let artist_ids: Vec<(String,)> = if let Some(param) = bind_param {
+    let artist_ids: Vec<(String, Option<String>)> = if let Some(param) = bind_param {
         sqlx::query_as(&artist_query)
             .bind(param)
             .fetch_all(pool)
@@ -509,21 +416,15 @@ async fn load_artist_features(
         sqlx::query_as(&artist_query).fetch_all(pool).await?
     };
 
-    // Build a JSON array of qualifying artist IDs for filtering related queries
-    let artist_id_set: HashSet<&str> = artist_ids.iter().map(|(id,)| id.as_str()).collect();
-    let artist_ids_json = serde_json::to_string(
-        &artist_id_set.iter().collect::<Vec<_>>()
-    )?;
-
     // Fetch album metadata only for qualifying artists (filtered by library partition)
     let album_query = format!(
-        "SELECT a.artist_id, a.genre, a.style, a.label, a.year, a.moods, a.descriptors, a.keywords \
+        "SELECT a.artist_id, a.genre, a.style \
          FROM albums a \
          JOIN libraries l ON a.library_id = l.id \
          WHERE {where_clause}"
     );
 
-    let album_rows: Vec<(String, String, String, Option<String>, Option<i32>, String, String, String)> =
+    let album_rows: Vec<(String, String, String)> =
         if let Some(param) = bind_param {
             sqlx::query_as(&album_query)
                 .bind(param)
@@ -535,85 +436,25 @@ async fn load_artist_features(
 
     let mut artist_genres: HashMap<String, HashSet<String>> = HashMap::new();
     let mut artist_styles: HashMap<String, HashSet<String>> = HashMap::new();
-    let mut artist_tags: HashMap<String, HashSet<String>> = HashMap::new();
-    let mut artist_labels: HashMap<String, HashSet<String>> = HashMap::new();
-    let mut artist_years: HashMap<String, Vec<i32>> = HashMap::new();
 
-    for (artist_id, genre_json, style_json, label, year, moods_json, descriptors_json, keywords_json) in &album_rows {
+    for (artist_id, genre_json, style_json) in &album_rows {
         let genres = parse_json_set(genre_json);
         let styles = parse_json_set(style_json);
-        let moods = parse_json_set(moods_json);
-        let descriptors = parse_json_set(descriptors_json);
-        let keywords = parse_json_set(keywords_json);
 
         artist_genres.entry(artist_id.clone()).or_default().extend(genres);
         artist_styles.entry(artist_id.clone()).or_default().extend(styles);
-
-        let entry = artist_tags.entry(artist_id.clone()).or_default();
-        entry.extend(moods);
-        entry.extend(descriptors);
-        entry.extend(keywords);
-
-        if let Some(l) = label {
-            if !l.is_empty() {
-                artist_labels
-                    .entry(artist_id.clone())
-                    .or_default()
-                    .insert(l.to_lowercase());
-            }
-        }
-        if let Some(y) = year {
-            artist_years.entry(artist_id.clone()).or_default().push(*y);
-        }
     }
-
-    // Fetch credits only for qualifying artists
-    let credits_rows: Vec<(String, String)> = sqlx::query_as(
-        "SELECT a.artist_id, LOWER(c.artist_name) \
-         FROM album_credits c \
-         JOIN albums a ON c.album_id = a.id \
-         WHERE a.artist_id IN (SELECT value FROM json_each(?))",
-    )
-    .bind(&artist_ids_json)
-    .fetch_all(pool)
-    .await?;
-
-    let mut artist_credits: HashMap<String, HashSet<String>> = HashMap::new();
-    for (artist_id, credit_name) in credits_rows {
-        artist_credits
-            .entry(artist_id)
-            .or_default()
-            .insert(credit_name);
-    }
-
-    let target_ids: HashSet<&str> = artist_ids.iter().map(|(id,)| id.as_str()).collect();
 
     let mut artists = Vec::with_capacity(artist_ids.len());
-    for (artist_id,) in &artist_ids {
-        if !target_ids.contains(artist_id.as_str()) {
-            continue;
-        }
-
+    for (artist_id, external_id) in &artist_ids {
         let genres = artist_genres.remove(artist_id).unwrap_or_default();
         let styles = artist_styles.remove(artist_id).unwrap_or_default();
-        let tags = artist_tags.remove(artist_id).unwrap_or_default();
-        let credits = artist_credits.remove(artist_id).unwrap_or_default();
-        let labels = artist_labels.remove(artist_id).unwrap_or_default();
-
-        let year_range = artist_years.remove(artist_id).and_then(|years| {
-            let min = years.iter().copied().min()?;
-            let max = years.iter().copied().max()?;
-            Some((min, max))
-        });
 
         artists.push(ArtistFeatures {
             id: artist_id.clone(),
+            external_id: external_id.clone(),
             genres,
             styles,
-            tags,
-            credits,
-            labels,
-            year_range,
         });
     }
 
@@ -654,12 +495,19 @@ async fn generate_artist_inner(
     }
 
     info!(
-        "generating metadata-based artist recommendations for {} of {} artists",
+        "generating artist recommendations for {} of {} artists",
         target_ids.len(),
         artists.len()
     );
 
-    // Build genre->artist index for pre-filtering
+    // Build external_id → index lookup for matching LB results to library artists
+    let ext_id_to_idx: HashMap<&str, usize> = artists
+        .iter()
+        .enumerate()
+        .filter_map(|(i, a)| a.external_id.as_deref().map(|e| (e, i)))
+        .collect();
+
+    // Build genre->artist index for fallback pre-filtering
     let mut genre_index: HashMap<&str, Vec<usize>> = HashMap::new();
     let mut style_index: HashMap<&str, Vec<usize>> = HashMap::new();
     for (i, artist) in artists.iter().enumerate() {
@@ -685,29 +533,65 @@ async fn generate_artist_inner(
             continue;
         }
 
-        // Pre-filter: find candidate artists that share at least one genre or style
-        let mut candidates: HashSet<usize> = HashSet::new();
-        for g in &artist.genres {
-            if let Some(idxs) = genre_index.get(g.as_str()) {
-                candidates.extend(idxs);
-            }
-        }
-        for s in &artist.styles {
-            if let Some(idxs) = style_index.get(s.as_str()) {
-                candidates.extend(idxs);
-            }
-        }
-        if candidates.is_empty() {
-            candidates.extend(0..artists.len());
-        }
-        candidates.remove(&i);
-
         let mut scored: Vec<(f64, String, usize)> = Vec::new();
-        for &j in &candidates {
-            let other = &artists[j];
-            let (score, reason) = compute_artist_similarity(artist, other);
-            if score >= 0.15 {
-                scored.push((score, reason, j));
+
+        // Primary path: use LB similar artists
+        if let Some(ref ext_id) = artist.external_id {
+            let lb_rows: Vec<(String, String, i32)> = sqlx::query_as(
+                "SELECT similar_artist_mbid, COALESCE(similar_artist_name, ''), score \
+                 FROM lb_similar_artists WHERE artist_mbid = ? ORDER BY score DESC LIMIT 20",
+            )
+            .bind(ext_id)
+            .fetch_all(pool)
+            .await
+            .unwrap_or_default();
+
+            for (similar_mbid, _similar_name, lb_score) in &lb_rows {
+                // Match to library artist by external_id
+                if let Some(&j) = ext_id_to_idx.get(similar_mbid.as_str()) {
+                    if j == i { continue; }
+                    let normalized = *lb_score as f64 / 100.0;
+                    let reason = "Listeners also enjoy".to_string();
+                    scored.push((normalized, reason, j));
+                }
+            }
+        }
+
+        // Fallback: simple genre/style overlap if LB yielded < 3 results
+        if scored.len() < 3 {
+            let mut candidates: HashSet<usize> = HashSet::new();
+            for g in &artist.genres {
+                if let Some(idxs) = genre_index.get(g.as_str()) {
+                    candidates.extend(idxs);
+                }
+            }
+            for s in &artist.styles {
+                if let Some(idxs) = style_index.get(s.as_str()) {
+                    candidates.extend(idxs);
+                }
+            }
+            candidates.remove(&i);
+
+            // Exclude artists already scored via LB
+            let lb_indices: HashSet<usize> = scored.iter().map(|(_, _, j)| *j).collect();
+            for &j in &candidates {
+                if lb_indices.contains(&j) { continue; }
+                let other = &artists[j];
+                let score = jaccard(&artist.genres, &other.genres) * 0.5
+                    + jaccard(&artist.styles, &other.styles) * 0.5;
+                if score >= 0.15 {
+                    let shared: Vec<&String> = artist.genres.intersection(&other.genres)
+                        .chain(artist.styles.intersection(&other.styles))
+                        .take(3)
+                        .collect();
+                    let names: Vec<&str> = shared.iter().map(|s| s.as_str()).collect();
+                    let reason = if names.is_empty() {
+                        "Similar style".to_string()
+                    } else {
+                        format!("Shares {}", names.join(", "))
+                    };
+                    scored.push((score, reason, j));
+                }
             }
         }
 
@@ -753,96 +637,4 @@ async fn generate_artist_inner(
         albums_processed: artists_with_recs,
         recommendations_generated: total_recs,
     })
-}
-
-/// Compute similarity between two artists using aggregated metadata from their albums.
-fn compute_artist_similarity(a: &ArtistFeatures, b: &ArtistFeatures) -> (f64, String) {
-    let style_sim = jaccard(&a.styles, &b.styles);
-    let genre_sim = jaccard(&a.genres, &b.genres);
-    let tag_sim = jaccard(&a.tags, &b.tags);
-
-    // Shared credits (collaborators that appear on both artists' albums)
-    let credits_sim = if a.credits.is_empty() && b.credits.is_empty() {
-        0.0
-    } else {
-        let shared: Vec<&String> = a.credits.intersection(&b.credits).collect();
-        (shared.len() as f64 / 3.0).min(1.0)
-    };
-    let shared_credits: Vec<&String> = a.credits.intersection(&b.credits).collect();
-
-    // Era overlap: how much their active periods overlap
-    let era_sim = match (&a.year_range, &b.year_range) {
-        (Some((a_min, a_max)), Some((b_min, b_max))) => {
-            let overlap_start = (*a_min).max(*b_min);
-            let overlap_end = (*a_max).min(*b_max);
-            let overlap = (overlap_end - overlap_start + 1).max(0) as f64;
-            let span = ((*a_max).max(*b_max) - (*a_min).min(*b_min) + 1).max(1) as f64;
-            (overlap / span).min(1.0)
-        }
-        _ => 0.0,
-    };
-
-    // Label overlap
-    let label_sim = jaccard(&a.labels, &b.labels);
-
-    let score = (style_sim * 0.35
-        + genre_sim * 0.20
-        + tag_sim * 0.15
-        + credits_sim * 0.15
-        + era_sim * 0.10
-        + label_sim * 0.05)
-        .clamp(0.0, 1.0);
-
-    // Build reason
-    let mut contributions: Vec<(f64, String)> = Vec::new();
-
-    if style_sim > 0.0 {
-        let shared: Vec<&String> = a.styles.intersection(&b.styles).collect();
-        let names: Vec<&str> = shared.iter().map(|s| s.as_str()).take(3).collect();
-        contributions.push((
-            style_sim * 0.35,
-            format!("Shares {} styles", names.join(", ")),
-        ));
-    }
-    if genre_sim > 0.0 {
-        let shared: Vec<&String> = a.genres.intersection(&b.genres).collect();
-        let names: Vec<&str> = shared.iter().map(|s| s.as_str()).take(3).collect();
-        contributions.push((
-            genre_sim * 0.20,
-            format!("Both {} genre", names.join(", ")),
-        ));
-    }
-    if !shared_credits.is_empty() {
-        let names: Vec<&str> = shared_credits.iter().map(|s| s.as_str()).take(2).collect();
-        contributions.push((
-            credits_sim * 0.15,
-            format!("Shared collaborators: {}", names.join(", ")),
-        ));
-    }
-    if label_sim > 0.0 {
-        let shared: Vec<&String> = a.labels.intersection(&b.labels).collect();
-        let names: Vec<&str> = shared.iter().map(|s| s.as_str()).take(2).collect();
-        contributions.push((label_sim * 0.05, format!("Both on {}", names.join(", "))));
-    }
-    if era_sim > 0.5 {
-        contributions.push((era_sim * 0.10, "Active in the same era".into()));
-    }
-    if tag_sim > 0.0 {
-        contributions.push((tag_sim * 0.15, "Similar mood and sonic character".into()));
-    }
-
-    contributions.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-
-    let reason = if contributions.is_empty() {
-        "Related artist".into()
-    } else {
-        contributions
-            .iter()
-            .take(2)
-            .map(|(_, desc)| desc.as_str())
-            .collect::<Vec<_>>()
-            .join("; ")
-    };
-
-    (score, reason)
 }
