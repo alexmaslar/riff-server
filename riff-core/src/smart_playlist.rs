@@ -181,7 +181,7 @@ pub async fn generate_playlist_from_prompt(
 
     let query_genres: Vec<String> = criteria.genres.iter().map(|g| g.to_lowercase()).collect();
     let query_moods: Vec<String> = criteria.moods.iter().map(|m| m.to_lowercase()).collect();
-    let query_decade = criteria.era.as_ref().and_then(|e| parse_decade(e));
+    let era_filter = criteria.era.as_ref().and_then(|e| parse_era(e));
 
     let target_loudness: f64 = match criteria.energy {
         1 => -25.0,
@@ -198,7 +198,7 @@ pub async fn generate_playlist_from_prompt(
 
     let rows = if !family_genres.is_empty() {
         // Try genre-family-filtered query first
-        let filtered = fetch_tracks_in_genres(pool, library_ids_json, &family_genres).await?;
+        let filtered = fetch_tracks_in_genres(pool, library_ids_json, &family_genres, era_filter).await?;
         if filtered.len() >= min_candidates {
             info!(
                 family_size = family_genres.len(),
@@ -213,11 +213,11 @@ pub async fn generate_playlist_from_prompt(
                 "genre family too small, falling back to full library with genre threshold"
             );
             in_fallback_mode = true;
-            fetch_all_tracks(pool, library_ids_json).await?
+            fetch_all_tracks(pool, library_ids_json, era_filter).await?
         }
     } else {
         // No genres specified — fetch everything
-        fetch_all_tracks(pool, library_ids_json).await?
+        fetch_all_tracks(pool, library_ids_json, era_filter).await?
     };
 
     if rows.is_empty() {
@@ -283,18 +283,6 @@ pub async fn generate_playlist_from_prompt(
             if let Ok(Some(loudness)) = row.try_get::<Option<f64>, _>("loudness_lufs") {
                 let diff = (loudness - target_loudness).abs();
                 score += (10.0 - (diff as f32 * 1.0)).max(0.0);
-            }
-
-            // Decade matching (0-5 points)
-            if let Some(target_decade) = query_decade {
-                if let Ok(Some(year)) = row.try_get::<Option<i32>, _>("year") {
-                    let track_decade = (year / 10) * 10;
-                    if track_decade == target_decade {
-                        score += 5.0;
-                    } else if (track_decade - target_decade).abs() <= 10 {
-                        score += 2.5;
-                    }
-                }
             }
 
             // Mood matching (0-5 points)
@@ -397,7 +385,6 @@ pub async fn generate_playlist_from_prompt(
             bpm: bpm_analyzed.or(bpm_tag),
             key: row.try_get("key_analyzed").ok().flatten(),
             loudness: row.try_get("loudness_lufs").ok().flatten(),
-            bliss: crate::daily_mixes::parse_bliss(row),
             duration_seconds: row.try_get("duration_seconds").ok().flatten(),
             mood: row.try_get("mood").ok().flatten(),
             album_moods: {
@@ -426,6 +413,7 @@ pub async fn generate_playlist_from_prompt(
         prompt = criteria.prompt,
         genres = ?criteria.genres,
         energy = criteria.energy,
+        era = ?era_filter,
         tracks = track_ids.len(),
         total_candidates = rows.len(),
         scored_candidates = scored.len(),
@@ -461,24 +449,42 @@ fn expand_to_family(query_genres: &[String]) -> Vec<String> {
     family_set.into_iter().collect()
 }
 
+/// Build a SQL year/era clause and its bind value from an EraFilter.
+fn era_clause(era: Option<EraFilter>, param_idx: i32) -> (String, Option<i32>, Option<i32>) {
+    match era {
+        Some(EraFilter::Year(y)) => (
+            format!(" AND a.year = ?{}", param_idx),
+            Some(y),
+            None,
+        ),
+        Some(EraFilter::Decade(d)) => (
+            format!(" AND a.year >= ?{} AND a.year < ?{}", param_idx, param_idx + 1),
+            Some(d),
+            Some(d + 10),
+        ),
+        None => (String::new(), None, None),
+    }
+}
+
 /// Fetch only tracks whose album genre or style overlaps with the given genre set.
 async fn fetch_tracks_in_genres(
     pool: &SqlitePool,
     library_ids_json: &str,
     genres: &[String],
+    era: Option<EraFilter>,
 ) -> Result<Vec<sqlx::sqlite::SqliteRow>> {
     if genres.is_empty() {
         return Ok(vec![]);
     }
 
-    // Build a JSON array of the genre family for use with json_each
     let genres_json = serde_json::to_string(genres)?;
+    let (era_sql, era_bind1, era_bind2) = era_clause(era, 3);
 
-    let rows = sqlx::query(
+    let sql = format!(
         "SELECT t.id, t.title, t.album_id, a.artist_id, ar.name as artist_name,
                 t.duration_seconds, t.bpm_analyzed, t.bpm_tag,
                 t.key_analyzed, t.loudness_lufs,
-                t.bliss_features, t.mood,
+                t.mood,
                 a.genre, a.style, a.year, a.moods,
                 ar.external_id as artist_external_id
          FROM tracks t
@@ -494,48 +500,81 @@ async fn fetch_tracks_in_genres(
                    SELECT 1 FROM json_each(a.style) as2, json_each(?2) fg2
                    WHERE LOWER(as2.value) = LOWER(fg2.value)
                )
-           )",
-    )
-    .bind(library_ids_json)
-    .bind(&genres_json)
-    .fetch_all(pool)
-    .await?;
+           ){}",
+        era_sql
+    );
 
-    Ok(rows)
+    let mut query = sqlx::query(&sql)
+        .bind(library_ids_json)
+        .bind(&genres_json);
+    if let Some(v) = era_bind1 { query = query.bind(v); }
+    if let Some(v) = era_bind2 { query = query.bind(v); }
+
+    Ok(query.fetch_all(pool).await?)
 }
 
 /// Fetch all tracks in the library (fallback path).
 async fn fetch_all_tracks(
     pool: &SqlitePool,
     library_ids_json: &str,
+    era: Option<EraFilter>,
 ) -> Result<Vec<sqlx::sqlite::SqliteRow>> {
-    let rows = sqlx::query(
+    let (era_sql, era_bind1, era_bind2) = era_clause(era, 2);
+
+    let sql = format!(
         "SELECT t.id, t.title, t.album_id, a.artist_id, ar.name as artist_name,
                 t.duration_seconds, t.bpm_analyzed, t.bpm_tag,
                 t.key_analyzed, t.loudness_lufs,
-                t.bliss_features, t.mood,
+                t.mood,
                 a.genre, a.style, a.year, a.moods,
                 ar.external_id as artist_external_id
          FROM tracks t
          JOIN albums a ON t.album_id = a.id
          JOIN artists ar ON a.artist_id = ar.id
-         WHERE t.library_id IN (SELECT value FROM json_each(?1))",
-    )
-    .bind(library_ids_json)
-    .fetch_all(pool)
-    .await?;
+         WHERE t.library_id IN (SELECT value FROM json_each(?1)){}",
+        era_sql
+    );
 
-    Ok(rows)
+    let mut query = sqlx::query(&sql)
+        .bind(library_ids_json);
+    if let Some(v) = era_bind1 { query = query.bind(v); }
+    if let Some(v) = era_bind2 { query = query.bind(v); }
+
+    Ok(query.fetch_all(pool).await?)
 }
 
-/// Parse a decade from era strings like "1990s", "90s", "2010s"
-fn parse_decade(era: &str) -> Option<i32> {
-    let digits: String = era.chars().filter(|c| c.is_ascii_digit()).collect();
+/// Parsed era: either a specific year or a decade range.
+#[derive(Debug, Clone, Copy)]
+enum EraFilter {
+    /// Exact year (e.g., "2010" → only albums from 2010)
+    Year(i32),
+    /// Decade (e.g., "2010s" → albums from 2010-2019)
+    Decade(i32),
+}
+
+/// Parse an era string into either a specific year or a decade.
+/// "2010" → Year(2010), "2010s" → Decade(2010), "90s" → Decade(1990)
+fn parse_era(era: &str) -> Option<EraFilter> {
+    let trimmed = era.trim();
+    let has_s_suffix = trimmed.ends_with('s') || trimmed.ends_with('S');
+    let digits: String = trimmed.chars().filter(|c| c.is_ascii_digit()).collect();
     match digits.len() {
-        4 => digits.parse::<i32>().ok().map(|y| (y / 10) * 10),
+        4 => {
+            let year: i32 = digits.parse().ok()?;
+            if has_s_suffix {
+                Some(EraFilter::Decade((year / 10) * 10))
+            } else {
+                Some(EraFilter::Year(year))
+            }
+        }
         2 => {
             let short: i32 = digits.parse().ok()?;
-            if short >= 50 { Some(1900 + short) } else { Some(2000 + short) }
+            let full = if short >= 50 { 1900 + short } else { 2000 + short };
+            if has_s_suffix {
+                Some(EraFilter::Decade(full))
+            } else {
+                Some(EraFilter::Year(full))
+            }
         }
         _ => None,
     }
