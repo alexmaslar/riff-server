@@ -224,7 +224,7 @@ pub async fn save_mix_as_playlist(
 ) -> Result<Json<Value>, AppError> {
     // Verify the mix belongs to this user
     let mix = sqlx::query(
-        "SELECT id, title, description FROM daily_mixes WHERE id = ? AND user_id = ?",
+        "SELECT id, title, description, cover_path FROM daily_mixes WHERE id = ? AND user_id = ?",
     )
     .bind(&id)
     .bind(&claims.sub)
@@ -238,9 +238,34 @@ pub async fn save_mix_as_playlist(
 
     let mix_title: String = mix.get("title");
     let mix_description: Option<String> = mix.get("description");
+    let mix_cover_path: Option<String> = mix.get("cover_path");
 
     // Create a new playlist
     let playlist_id = Uuid::new_v4().to_string();
+
+    // Copy mix cover to playlist cover
+    let playlist_cover_path = if let Some(ref src) = mix_cover_path {
+        let src_path = std::path::Path::new(src);
+        if src_path.exists() {
+            let covers_dir = dirs::data_dir()
+                .unwrap_or_else(|| std::path::PathBuf::from("."))
+                .join("riff")
+                .join("playlist_covers");
+            let _ = std::fs::create_dir_all(&covers_dir);
+            let dest = covers_dir.join(format!("{playlist_id}.jpg"));
+            match std::fs::copy(src_path, &dest) {
+                Ok(_) => Some(dest.to_string_lossy().to_string()),
+                Err(e) => {
+                    tracing::warn!("failed to copy mix cover to playlist: {e}");
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
 
     // Copy tracks from the mix to the playlist
     let mix_tracks = sqlx::query_as::<_, (String, i64)>(
@@ -254,12 +279,13 @@ pub async fn save_mix_as_playlist(
     let mut tx = state.db.begin().await?;
 
     sqlx::query(
-        "INSERT INTO playlists (id, user_id, name, description) VALUES (?, ?, ?, ?)",
+        "INSERT INTO playlists (id, user_id, name, description, cover_path) VALUES (?, ?, ?, ?, ?)",
     )
     .bind(&playlist_id)
     .bind(&claims.sub)
     .bind(&mix_title)
     .bind(&mix_description)
+    .bind(&playlist_cover_path)
     .execute(&mut *tx)
     .await?;
 
@@ -282,7 +308,8 @@ pub async fn save_mix_as_playlist(
         "id": playlist_id,
         "name": mix_title,
         "description": mix_description,
-        "trackCount": mix_tracks.len(),
+        "track_count": mix_tracks.len(),
+        "has_cover": playlist_cover_path.is_some(),
     })))
 }
 

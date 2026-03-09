@@ -82,16 +82,10 @@ async fn run_pipeline_iteration(state: &Arc<AppState>) {
         })
         .await;
 
-        // Step 2b: Spotify artist images + streaming provider fallback
+        // Step 2b: Spotify artist images
         {
             let db = state.db.clone();
-            let providers = state
-                .plugin_registry
-                .read()
-                .await
-                .streaming_providers()
-                .to_vec();
-            match musicbrainz::enrich_artist_images_spotify(&db, &providers).await {
+            match musicbrainz::enrich_artist_images_spotify(&db).await {
                 Ok(ids) if !ids.is_empty() => {
                     tracing::info!(artists_updated = ids.len(), "artist images enriched");
                     artist_ids.extend(ids);

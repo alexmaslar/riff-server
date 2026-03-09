@@ -2,91 +2,20 @@ use axum::{
     extract::{Path, State},
     Json,
 };
-use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
 use crate::error::AppError;
 use crate::AppState;
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AddDownloadRequest {
-    pub provider: String,
-    pub provider_album_id: String,
-    pub quality: Option<String>,
-    pub library_id: Option<String>,
-}
-
-/// POST /downloads — queue an album for download from a streaming provider
+/// POST /downloads — streaming provider downloads are no longer supported
 pub async fn add_download(
-    State(state): State<Arc<AppState>>,
-    Json(body): Json<AddDownloadRequest>,
+    State(_state): State<Arc<AppState>>,
+    Json(_body): Json<Value>,
 ) -> Result<Json<Value>, AppError> {
-    // Validate quality if provided
-    if let Some(ref quality) = body.quality {
-        if !matches!(quality.as_str(), "lossless" | "high" | "normal" | "low" | "hires" | "hi_res") {
-            return Err(AppError::BadRequest(format!(
-                "Invalid quality '{}'. Must be one of: lossless, high, normal, low, hires, hi_res",
-                quality
-            )));
-        }
-    }
-
-    tracing::info!(
-        provider = %body.provider,
-        album_id = %body.provider_album_id,
-        quality = ?body.quality,
-        library_id = ?body.library_id,
-        "add download",
-    );
-    let registry = state.plugin_registry.read().await;
-    let streaming = registry
-        .streaming_providers()
-        .iter()
-        .find(|p| p.provider_name() == body.provider)
-        .ok_or_else(|| {
-            AppError::NotFound(format!(
-                "streaming provider '{}' not found",
-                body.provider
-            ))
-        })?
-        .clone();
-    drop(registry);
-
-    // Fetch album metadata so we can populate the queue entry
-    let detail = streaming
-        .get_album(&body.provider_album_id)
-        .await
-        .map_err(|e| AppError::Internal(format!("failed to fetch album from provider: {e}")))?;
-
-    let id = uuid::Uuid::new_v4().to_string();
-    let quality = body.quality.clone().unwrap_or_else(|| "lossless".to_string());
-
-    sqlx::query(
-        "INSERT INTO download_queue (id, provider, provider_album_id, album_title, artist_name, cover_art_url, quality, library_id, status, tracks_total)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?)
-         ON CONFLICT (provider, provider_album_id) DO UPDATE SET status = 'queued', quality = excluded.quality, library_id = excluded.library_id, error = NULL"
-    )
-    .bind(&id)
-    .bind(&body.provider)
-    .bind(&body.provider_album_id)
-    .bind(&detail.album.title)
-    .bind(&detail.album.artist.name)
-    .bind(&detail.album.cover_url)
-    .bind(&quality)
-    .bind(&body.library_id)
-    .bind(detail.tracks.len() as i64)
-    .execute(&state.db)
-    .await?;
-
-    Ok(Json(json!({
-        "id": id,
-        "status": "queued",
-        "album_title": detail.album.title,
-        "artist_name": detail.album.artist.name,
-        "tracks_total": detail.tracks.len(),
-    })))
+    Err(AppError::BadRequest(
+        "streaming provider downloads are not available".to_string(),
+    ))
 }
 
 /// GET /downloads — list download queue

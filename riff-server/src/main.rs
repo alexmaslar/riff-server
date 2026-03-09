@@ -2,7 +2,6 @@ pub mod error;
 mod discovery;
 mod middleware;
 pub mod pipeline;
-mod plugin_reload;
 mod routes;
 mod relay;
 mod relay_protocol;
@@ -17,13 +16,11 @@ use axum::{
     routing::{delete, get, post, put},
     BoxError, Json, Router,
 };
-use riff_core::plugin::catalog::RemotePluginEntry;
-use riff_core::{auth, config::Config, db, musicbrainz, plugin, scanner::{self, metadata::{detect_library_convention, build_album_dir, build_track_filename, write_flac_tags}}};
+use riff_core::{auth, config::Config, db, plugin, scanner};
 use serde_json::{json, Value};
 use socket2::{Domain, Protocol, Socket, TcpKeepalive, Type};
 use sqlx::SqlitePool;
 use std::net::SocketAddr;
-use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -114,12 +111,9 @@ pub struct AppState {
     pub hls_generating: tokio::sync::Mutex<std::collections::HashSet<String>>,
     pub login_guard: tokio::sync::Mutex<routes::auth::LoginGuard>,
     pub plugin_registry: RwLock<plugin::registry::PluginRegistry>,
-    pub remote_catalog: RwLock<Vec<RemotePluginEntry>>,
     pub event_bus: plugin::events::EventBus,
     /// Wakes the background pipeline when new content arrives (scan, download, manual trigger).
     pub pipeline_notify: Notify,
-    /// Names of plugins loaded from dev_plugins config (invisible to non-admin users).
-    pub dev_plugin_names: RwLock<std::collections::HashSet<String>>,
     /// Cache for resolved library IDs (invalidated on library add/remove/modify).
     pub library_ids_cache: RwLock<Option<Vec<String>>>,
     /// TLS certificate fingerprint (SHA-256, base64).
@@ -253,10 +247,14 @@ async fn main() -> Result<()> {
 
     let max_transcodes = config.streaming.max_transcode_processes;
     let event_bus = plugin::events::EventBus::new(512);
-    let plugin_registry = plugin::registry::PluginRegistry::new();
 
-    // Fetch community plugin catalog (non-blocking, empty on failure)
-    let remote_catalog = plugin::catalog::fetch_remote_catalog().await;
+    // Register built-in editorial providers
+    let mut plugin_registry = plugin::registry::PluginRegistry::new();
+    plugin_registry.register_editorial(Arc::new(riff_core::editorial::PitchforkProvider::new()));
+    plugin_registry.register_editorial(Arc::new(riff_core::editorial::AllMusicProvider::new()));
+    plugin_registry.register_editorial(Arc::new(riff_core::editorial::NorthernTransmissionsProvider::new()));
+    plugin_registry.register_editorial(Arc::new(riff_core::editorial::TheLineOfBestFitProvider::new()));
+    tracing::info!("registered {} editorial providers", plugin_registry.editorial_providers().len());
 
     let http_client = reqwest::Client::builder().build().expect("reqwest client build with default config");
 
@@ -273,42 +271,12 @@ async fn main() -> Result<()> {
         hls_generating: tokio::sync::Mutex::new(std::collections::HashSet::new()),
         login_guard: tokio::sync::Mutex::new(routes::auth::LoginGuard::new()),
         plugin_registry: RwLock::new(plugin_registry),
-        remote_catalog: RwLock::new(remote_catalog),
         event_bus,
         pipeline_notify: Notify::new(),
-        dev_plugin_names: RwLock::new(std::collections::HashSet::new()),
         library_ids_cache: RwLock::new(None),
         cert_fingerprint: cert_fingerprint.clone(),
         relay_connected: AtomicBool::new(false),
     });
-
-
-    // Download and load enabled WASM plugins from the remote catalog
-    let plugin_results = plugin_reload::reload_wasm_plugins(&state).await;
-    for (name, result) in &plugin_results {
-        if !result.healthy {
-            tracing::warn!(
-                plugin = %name,
-                error = result.message.as_deref().unwrap_or("unknown error"),
-                "plugin unhealthy",
-            );
-        }
-    }
-
-    // Load dev plugins from local paths
-    let (dev_results, dev_names) = plugin_reload::reload_dev_plugins(&state).await;
-    for (name, result) in &dev_results {
-        if result.loaded {
-            tracing::info!(plugin = %name, healthy = result.healthy, "dev plugin loaded");
-        } else {
-            tracing::warn!(
-                plugin = %name,
-                error = result.message.as_deref().unwrap_or("failed to load"),
-                "dev plugin failed",
-            );
-        }
-    }
-    *state.dev_plugin_names.write().await = dev_names;
 
     // Background pipeline: enrich → recommend → analyze → daily mixes
     {
@@ -331,26 +299,6 @@ async fn main() -> Result<()> {
         let daily_state = state.clone();
         tokio::spawn(async move {
             run_daily_refresh(daily_state).await;
-        });
-    }
-
-    // Download queue processor (streaming provider downloads)
-    {
-        let dl_state = state.clone();
-        tokio::spawn(async move {
-            run_download_processor(dl_state).await;
-        });
-    }
-
-    // Periodic remote catalog refresh (every 6 hours)
-    {
-        let catalog_state = state.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_secs(6 * 3600)).await;
-                let entries = plugin::catalog::fetch_remote_catalog().await;
-                *catalog_state.remote_catalog.write().await = entries;
-            }
         });
     }
 
@@ -385,6 +333,7 @@ async fn main() -> Result<()> {
         .route("/auth/refresh", post(routes::auth::refresh))
         .route("/albums/{id}/cover", get(routes::albums::get_cover))
         .route("/mixes/daily/{id}/cover", get(routes::daily_mixes::get_mix_cover))
+        .route("/playlists/{id}/cover", get(routes::playlists::get_cover))
         .route("/plugins/{name}/icon", get(routes::plugins::get_plugin_icon));
 
     // SSE event stream — no timeout (long-lived), no gzip, auth required
@@ -403,8 +352,6 @@ async fn main() -> Result<()> {
         .route("/tracks/{id}/hls/playlist.m3u8", get(routes::hls::master_playlist))
         .route("/tracks/{id}/hls/{variant}/playlist.m3u8", get(routes::hls::variant_playlist))
         .route("/tracks/{id}/hls/{variant}/{segment}", get(routes::hls::serve_segment))
-        // Streaming provider proxy (Tidal/Qobuz CDN)
-        .route("/streaming/tracks/{provider}/{id}/stream", get(routes::streaming::stream_track))
         .route_layer(axum_mw::from_fn_with_state(
             state.clone(),
             middleware::require_auth,
@@ -463,10 +410,6 @@ async fn main() -> Result<()> {
         .route("/mixes/daily", get(routes::daily_mixes::list_daily_mixes))
         .route("/mixes/daily/{id}", get(routes::daily_mixes::get_daily_mix))
         .route("/mixes/daily/{id}/save", post(routes::daily_mixes::save_mix_as_playlist))
-        // Streaming providers (Tidal/Qobuz)
-        .route("/streaming/search", get(routes::streaming::search))
-        .route("/streaming/albums/{provider}/{id}", get(routes::streaming::get_album))
-        .route("/streaming/artists/{provider}/{id}/albums", get(routes::streaming::get_artist_albums))
         // Downloads
         .route("/downloads", get(routes::downloads::list_downloads).post(routes::downloads::add_download))
         .route("/downloads/{id}", delete(routes::downloads::cancel_download))
@@ -501,7 +444,6 @@ async fn main() -> Result<()> {
         .route("/config", get(routes::config::get_config).put(routes::config::update_config))
         .route("/plugins/catalog", get(routes::plugins::catalog))
         .route("/plugins/status", get(routes::plugins::status))
-        .route("/plugins/{name}/reload", post(routes::plugins::reload_dev_plugin))
         .route("/users", get(routes::users::list_users))
         .route("/users", post(routes::users::create_user))
         .route("/users/{id}", delete(routes::users::delete_user))
@@ -639,442 +581,6 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
-}
-
-async fn cleanup_cancelled_download(db: &SqlitePool, album_dir: &Path, local_album_id: Option<&str>) {
-    // Delete album directory from disk
-    if album_dir.exists() {
-        if let Err(e) = tokio::fs::remove_dir_all(album_dir).await {
-            tracing::warn!("cleanup: failed to delete {}: {e}", album_dir.display());
-        }
-    }
-    // Delete DB records if album was already scanned
-    if let Some(album_id) = local_album_id {
-        let artist: Option<(String,)> =
-            sqlx::query_as("SELECT artist_id FROM albums WHERE id = ?")
-                .bind(album_id)
-                .fetch_optional(db)
-                .await
-                .unwrap_or(None);
-
-        let track_ids: Vec<(String,)> =
-            sqlx::query_as("SELECT id FROM tracks WHERE album_id = ?")
-                .bind(album_id)
-                .fetch_all(db)
-                .await
-                .unwrap_or_default();
-
-        // Delete track-referencing rows
-        for (tid,) in &track_ids {
-            sqlx::query("DELETE FROM play_history WHERE track_id = ?")
-                .bind(tid).execute(db).await.ok();
-            sqlx::query("DELETE FROM playlist_tracks WHERE track_id = ?")
-                .bind(tid).execute(db).await.ok();
-            sqlx::query("DELETE FROM daily_mix_tracks WHERE track_id = ?")
-                .bind(tid).execute(db).await.ok();
-            sqlx::query("DELETE FROM favorites WHERE entity_type = 'track' AND entity_id = ?")
-                .bind(tid).execute(db).await.ok();
-        }
-
-        // Delete album-referencing rows (FK cascades not enforced without PRAGMA foreign_keys)
-        sqlx::query("DELETE FROM album_credits WHERE album_id = ?")
-            .bind(album_id).execute(db).await.ok();
-        sqlx::query("DELETE FROM album_recommendations WHERE album_id = ? OR recommended_album_id = ?")
-            .bind(album_id).bind(album_id).execute(db).await.ok();
-        sqlx::query("DELETE FROM favorites WHERE entity_type = 'album' AND entity_id = ?")
-            .bind(album_id).execute(db).await.ok();
-
-        sqlx::query("DELETE FROM tracks WHERE album_id = ?")
-            .bind(album_id).execute(db).await.ok();
-        sqlx::query("DELETE FROM albums WHERE id = ?")
-            .bind(album_id).execute(db).await.ok();
-
-        // Delete artist if orphaned (no remaining albums)
-        if let Some((artist_id,)) = artist {
-            let count: Option<(i64,)> =
-                sqlx::query_as("SELECT COUNT(*) FROM albums WHERE artist_id = ?")
-                    .bind(&artist_id)
-                    .fetch_optional(db)
-                    .await
-                    .unwrap_or(None);
-            if count.map(|c| c.0).unwrap_or(0) == 0 {
-                sqlx::query("DELETE FROM artist_recommendations WHERE artist_id = ? OR recommended_artist_id = ?")
-                    .bind(&artist_id).bind(&artist_id).execute(db).await.ok();
-                sqlx::query("DELETE FROM artist_top_tracks WHERE artist_id = ?")
-                    .bind(&artist_id).execute(db).await.ok();
-                sqlx::query("DELETE FROM favorites WHERE entity_type = 'artist' AND entity_id = ?")
-                    .bind(&artist_id).execute(db).await.ok();
-                sqlx::query("DELETE FROM artists WHERE id = ?")
-                    .bind(&artist_id).execute(db).await.ok();
-            }
-        }
-    }
-}
-
-async fn run_download_processor(state: Arc<AppState>) {
-    loop {
-        tokio::time::sleep(Duration::from_secs(10)).await;
-
-        // Reset stuck processing items (>30 min without completing)
-        let _ = sqlx::query(
-            "UPDATE download_queue SET status = 'completed', processing_stage = 'complete', completed_at = datetime('now') \
-             WHERE status = 'processing' AND completed_at IS NULL AND created_at < datetime('now', '-30 minutes')"
-        )
-        .execute(&state.db)
-        .await;
-
-        // Re-queue downloads stuck in 'downloading' for >10 min (e.g. server crashed mid-download)
-        let recovered = sqlx::query(
-            "UPDATE download_queue SET status = 'queued', tracks_completed = 0, current_track = NULL, error = NULL \
-             WHERE status = 'downloading' AND created_at < datetime('now', '-10 minutes')"
-        )
-        .execute(&state.db)
-        .await;
-        if let Ok(r) = recovered {
-            if r.rows_affected() > 0 {
-                tracing::info!(count = r.rows_affected(), "re-queued interrupted downloads");
-            }
-        }
-
-        // Fetch next queued download
-        let row: Option<(String, String, String, String, Option<String>)> = sqlx::query_as(
-            "SELECT id, provider, provider_album_id, quality, library_id FROM download_queue WHERE status = 'queued' ORDER BY created_at ASC LIMIT 1"
-        )
-        .fetch_optional(&state.db)
-        .await
-        .unwrap_or(None);
-
-        let Some((dl_id, provider_name, album_id, quality, library_id)) = row else {
-            continue;
-        };
-
-        // Mark as downloading
-        let _ = sqlx::query("UPDATE download_queue SET status = 'downloading' WHERE id = ?")
-            .bind(&dl_id)
-            .execute(&state.db)
-            .await;
-
-        // Find the provider
-        let registry = state.plugin_registry.read().await;
-        let provider = registry
-            .streaming_providers()
-            .iter()
-            .find(|p| p.provider_name() == provider_name)
-            .cloned();
-        drop(registry);
-
-        let Some(provider) = provider else {
-            let _ = sqlx::query("UPDATE download_queue SET status = 'failed', error = ? WHERE id = ?")
-                .bind(format!("provider '{provider_name}' not loaded"))
-                .bind(&dl_id)
-                .execute(&state.db)
-                .await;
-            continue;
-        };
-
-        // Fetch album detail
-        let detail = match provider.get_album(&album_id).await {
-            Ok(d) => d,
-            Err(e) => {
-                let _ = sqlx::query("UPDATE download_queue SET status = 'failed', error = ? WHERE id = ?")
-                    .bind(format!("album fetch failed: {e}"))
-                    .bind(&dl_id)
-                    .execute(&state.db)
-                    .await;
-                continue;
-            }
-        };
-
-        // Determine library (id, path) — use the requested library, fall back to largest
-        let resolved_lib: Option<(String, String)> = if let Some(ref lib_id) = library_id {
-            sqlx::query_as::<_, (String, String)>("SELECT id, path FROM libraries WHERE id = ?")
-                .bind(lib_id)
-                .fetch_optional(&state.db)
-                .await
-                .ok()
-                .flatten()
-        } else {
-            None
-        };
-        let (resolved_library_id, library_path) = match resolved_lib {
-            Some((id, path)) => (id, path),
-            None => {
-                sqlx::query_as::<_, (String, String)>(
-                    "SELECT l.id, l.path FROM libraries l
-                     LEFT JOIN albums a ON a.library_id = l.id
-                     GROUP BY l.id ORDER BY COUNT(a.id) DESC LIMIT 1"
-                )
-                .fetch_optional(&state.db)
-                .await
-                .ok()
-                .flatten()
-                .unwrap_or_else(|| ("".to_string(), "/tmp/riff-downloads".to_string()))
-            }
-        };
-
-        let streaming_quality = match quality.to_lowercase().as_str() {
-            "hires" | "hi_res" | "hi_res_lossless" | "27" => riff_core::plugin::capabilities::StreamingQuality::HiRes,
-            "lossless" | "6" => riff_core::plugin::capabilities::StreamingQuality::Lossless,
-            "high" | "5" => riff_core::plugin::capabilities::StreamingQuality::High,
-            _ => riff_core::plugin::capabilities::StreamingQuality::Lossless,
-        };
-
-        let lib_path = std::path::Path::new(&library_path);
-        let convention = detect_library_convention(lib_path);
-        let album_dir = build_album_dir(lib_path, &detail.album.artist.name, &detail.album.title, convention);
-
-        let mut completed = 0i64;
-        let mut failed = false;
-
-        for track in &detail.tracks {
-            // Check if cancelled
-            let status: Option<(String,)> =
-                sqlx::query_as("SELECT status FROM download_queue WHERE id = ?")
-                    .bind(&dl_id)
-                    .fetch_optional(&state.db)
-                    .await
-                    .unwrap_or(None);
-            if status.as_ref().map(|s| s.0.as_str()) == Some("cancelled") {
-                break;
-            }
-
-            let filename = build_track_filename(
-                &detail.album.artist.name,
-                &detail.album.title,
-                track.track_number as i32,
-                &track.title,
-                "flac",
-                convention,
-            );
-            let dest = album_dir.join(&filename);
-
-            // Update current track
-            let _ = sqlx::query("UPDATE download_queue SET current_track = ? WHERE id = ?")
-                .bind(&track.title)
-                .bind(&dl_id)
-                .execute(&state.db)
-                .await;
-
-            match provider.download_track(&track.provider_id, streaming_quality, &dest).await {
-                Ok(()) => {
-                    // Write metadata tags so the scanner reads proper title/track numbers
-                    if let Err(e) = write_flac_tags(
-                        &dest,
-                        &detail.album.artist.name,
-                        &detail.album.title,
-                        &track.title,
-                        track.track_number,
-                        track.disc_number,
-                        detail.album.year,
-                    ) {
-                        tracing::warn!(track = %track.title, error = %e, "failed to write tags");
-                    }
-                    completed += 1;
-                    let _ = sqlx::query("UPDATE download_queue SET tracks_completed = ? WHERE id = ?")
-                        .bind(completed)
-                        .bind(&dl_id)
-                        .execute(&state.db)
-                        .await;
-                }
-                Err(e) => {
-                    tracing::warn!(track = %track.title, error = %e, "download track failed");
-                    let _ = sqlx::query("UPDATE download_queue SET status = 'failed', error = ? WHERE id = ?")
-                        .bind(format!("track '{}' failed: {e}", track.title))
-                        .bind(&dl_id)
-                        .execute(&state.db)
-                        .await;
-                    failed = true;
-                    break;
-                }
-            }
-        }
-
-        if failed {
-            continue;
-        }
-
-        // Check if cancelled during track downloads
-        let was_cancelled = {
-            let st: Option<(String,)> =
-                sqlx::query_as("SELECT status FROM download_queue WHERE id = ?")
-                    .bind(&dl_id)
-                    .fetch_optional(&state.db)
-                    .await
-                    .unwrap_or(None);
-            st.as_ref().map(|s| s.0.as_str()) == Some("cancelled")
-        };
-        if was_cancelled {
-            tracing::info!(download_id = %dl_id, tracks = completed, "download cancelled, cleaning up");
-            cleanup_cancelled_download(&state.db, &album_dir, None).await;
-            continue;
-        }
-
-        // Download cover art
-        if let Some(ref cover_url) = detail.album.cover_url {
-            let cover_dest = album_dir.join("cover.jpg");
-            if let Ok(resp) = state.http_client.get(cover_url).send().await {
-                if let Ok(bytes) = resp.bytes().await {
-                    let _ = tokio::fs::create_dir_all(&album_dir).await;
-                    let _ = tokio::fs::write(&cover_dest, &bytes).await;
-                }
-            }
-        }
-
-        // Mark as processing → scanning stage
-        let _ = sqlx::query(
-            "UPDATE download_queue SET status = 'processing', processing_stage = 'scanning', current_track = NULL WHERE id = ?"
-        )
-        .bind(&dl_id)
-        .execute(&state.db)
-        .await;
-
-        tracing::info!(
-            artist = %detail.album.artist.name,
-            album = %detail.album.title,
-            tracks = completed,
-            "download complete, starting post-processing",
-        );
-
-        // Scan library so the new album appears in the DB immediately
-        let mut new_album: Option<(String,)> = None;
-        if !resolved_library_id.is_empty() {
-            match scanner::scan_library(&state.db, &library_path, &resolved_library_id).await {
-                Ok(result) => {
-                    tracing::info!(
-                        artists_added = result.artists_added,
-                        albums_added = result.albums_added,
-                        tracks_added = result.tracks_added,
-                        "post-download scan complete",
-                    );
-                    state.event_bus.emit(plugin::events::ServerEvent::ScanCompleted {
-                        library_id: resolved_library_id.clone(),
-                        tracks_added: result.tracks_added,
-                        tracks_removed: result.tracks_removed,
-                    });
-
-                    // Find the newly created album
-                    new_album = sqlx::query_as(
-                        "SELECT a.id FROM albums a JOIN artists ar ON a.artist_id = ar.id \
-                         WHERE LOWER(ar.name) = LOWER(?) AND LOWER(a.title) = LOWER(?) \
-                         AND a.library_id = ? ORDER BY a.added_at DESC LIMIT 1"
-                    )
-                    .bind(&detail.album.artist.name)
-                    .bind(&detail.album.title)
-                    .bind(&resolved_library_id)
-                    .fetch_optional(&state.db)
-                    .await
-                    .unwrap_or(None);
-
-                    if let Some((ref local_album_id,)) = new_album {
-                        // Update local_album_id on the download queue entry
-                        let _ = sqlx::query("UPDATE download_queue SET local_album_id = ? WHERE id = ?")
-                            .bind(local_album_id)
-                            .bind(&dl_id)
-                            .execute(&state.db)
-                            .await;
-
-                        // Set provider info on the album
-                        let _ = sqlx::query("UPDATE albums SET provider = ?, provider_album_id = ? WHERE id = ?")
-                            .bind(&provider_name)
-                            .bind(&album_id)
-                            .bind(local_album_id)
-                            .execute(&state.db)
-                            .await;
-                    }
-                }
-                Err(e) => tracing::warn!(error = %e, "post-download scan failed"),
-            }
-        }
-
-        // Run post-download enrichment if we found the album
-        if let Some((ref local_album_id,)) = new_album {
-            // MusicBrainz enrichment
-            let status: Option<(String,)> = sqlx::query_as("SELECT status FROM download_queue WHERE id = ?")
-                .bind(&dl_id).fetch_optional(&state.db).await.unwrap_or(None);
-            if status.as_ref().map(|s| s.0.as_str()) != Some("cancelled") {
-                let _ = sqlx::query("UPDATE download_queue SET processing_stage = 'enriching' WHERE id = ?")
-                    .bind(&dl_id).execute(&state.db).await;
-                if let Err(e) = musicbrainz::enrichment::enrich_album(&state.db, local_album_id).await {
-                    tracing::warn!(album_id = %local_album_id, error = %e, "post-download enrichment failed");
-                }
-            }
-
-            // Editorial review enrichment
-            let status: Option<(String,)> = sqlx::query_as("SELECT status FROM download_queue WHERE id = ?")
-                .bind(&dl_id).fetch_optional(&state.db).await.unwrap_or(None);
-            if status.as_ref().map(|s| s.0.as_str()) != Some("cancelled") {
-                let editorial_providers = state.plugin_registry.read().await
-                    .editorial_providers().to_vec();
-                if !editorial_providers.is_empty() {
-                    let _ = sqlx::query("UPDATE download_queue SET processing_stage = 'editorial' WHERE id = ?")
-                        .bind(&dl_id).execute(&state.db).await;
-
-                    // Re-fetch album metadata (MusicBrainz may have updated title/artist)
-                    let album_meta: Option<(String, String, Option<String>)> = sqlx::query_as(
-                        "SELECT a.title, ar.name, a.release_date FROM albums a \
-                         JOIN artists ar ON a.artist_id = ar.id WHERE a.id = ?"
-                    )
-                    .bind(local_album_id)
-                    .fetch_optional(&state.db)
-                    .await
-                    .unwrap_or(None);
-
-                    if let Some((title, artist_name, release_date)) = &album_meta {
-                        match riff_core::editorial::enrich_album(
-                            &state.db,
-                            &editorial_providers,
-                            local_album_id,
-                            title,
-                            artist_name,
-                            release_date.as_deref(),
-                        ).await {
-                            Ok(count) => tracing::info!(album_id = %local_album_id, reviews = count, "post-download editorial complete"),
-                            Err(e) => tracing::warn!(album_id = %local_album_id, error = %e, "post-download editorial failed"),
-                        }
-                    }
-                }
-            }
-
-            // Emit immediate enrichment event for this album
-            state.event_bus.emit(plugin::events::ServerEvent::EnrichmentCompleted {
-                album_ids: vec![local_album_id.clone()],
-                artist_ids: Vec::new(),
-            });
-
-            // Trigger full pipeline for recommendations, artist images, and analysis
-            state.pipeline_notify.notify_one();
-        }
-
-        // Check if cancelled during post-processing
-        let was_cancelled = {
-            let st: Option<(String,)> =
-                sqlx::query_as("SELECT status FROM download_queue WHERE id = ?")
-                    .bind(&dl_id)
-                    .fetch_optional(&state.db)
-                    .await
-                    .unwrap_or(None);
-            st.as_ref().map(|s| s.0.as_str()) == Some("cancelled")
-        };
-        if was_cancelled {
-            tracing::info!(download_id = %dl_id, "download cancelled during processing, cleaning up");
-            cleanup_cancelled_download(
-                &state.db,
-                &album_dir,
-                new_album.as_ref().map(|(id,)| id.as_str()),
-            )
-            .await;
-            continue;
-        }
-
-        // Mark fully completed (guard against race with cancellation)
-        let _ = sqlx::query(
-            "UPDATE download_queue SET status = 'completed', processing_stage = 'complete', completed_at = datetime('now') \
-             WHERE id = ? AND status != 'cancelled'"
-        )
-        .bind(&dl_id)
-        .execute(&state.db)
-        .await;
-    }
 }
 
 async fn health(State(_state): State<Arc<AppState>>) -> Json<Value> {

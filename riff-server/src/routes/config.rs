@@ -1,32 +1,17 @@
 use axum::{extract::State, http::header, Extension, Json};
 use riff_core::auth::Claims;
-use riff_core::plugin::catalog::RemotePluginEntry;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::error::AppError;
 use crate::middleware::ClientIp;
 use crate::AppState;
 
-fn mask_secret(s: &str) -> String {
-    if s.len() <= 6 {
-        "*".repeat(s.len())
-    } else {
-        format!("{}...{}", &s[..3], &s[s.len() - 3..])
-    }
-}
-
 pub async fn get_config(
     State(state): State<Arc<AppState>>,
 ) -> Result<([(header::HeaderName, &'static str); 1], Json<Value>), AppError> {
     let config = state.config.read().await;
-    let remote_catalog = state.remote_catalog.read().await;
-    let dev_names: Vec<&str> = config.dev_plugins.keys().map(|k| k.as_str()).collect();
-
-    // Build plugins JSON with secret masking
-    let plugins_json = build_plugins_json(&config.plugins, &remote_catalog, &dev_names);
 
     Ok((
         [(header::CACHE_CONTROL, "private, max-age=3600")],
@@ -43,60 +28,9 @@ pub async fn get_config(
                 "remote_format": config.streaming.remote_format,
                 "ffmpeg_available": state.ffmpeg_available,
             },
-            "plugins": plugins_json,
+            "plugins": {},
         })),
     ))
-}
-
-/// Build plugins JSON from config, masking secret fields using the remote catalog.
-/// API format nests settings under a "settings" key (unlike the flat YAML format).
-fn build_plugins_json(
-    plugins: &HashMap<String, riff_core::config::PluginConfig>,
-    remote_catalog: &[RemotePluginEntry],
-    dev_plugin_names: &[&str],
-) -> Value {
-    // Build lookup: plugin_name -> set of secret field keys
-    let secret_keys: HashMap<&str, Vec<String>> = remote_catalog
-        .iter()
-        .map(|entry| (entry.name.as_str(), entry.secret_keys()))
-        .collect();
-
-    // Only include plugins that exist in the catalog or are dev plugins (skip stale config entries)
-    let mut catalog_names: HashSet<&str> = remote_catalog.iter().map(|e| e.name.as_str()).collect();
-    catalog_names.extend(dev_plugin_names);
-
-    let mut result = serde_json::Map::new();
-    for (name, plugin_cfg) in plugins {
-        if !catalog_names.contains(name.as_str()) {
-            continue;
-        }
-        let mut settings = serde_json::Map::new();
-        let is_secret_field = |key: &str| -> bool {
-            secret_keys
-                .get(name.as_str())
-                .map(|keys| keys.iter().any(|k| k == key))
-                .unwrap_or(false)
-        };
-        for (key, value) in &plugin_cfg.settings {
-            if is_secret_field(key) {
-                if let Some(s) = value.as_str() {
-                    if !s.is_empty() {
-                        settings.insert(key.clone(), Value::String(mask_secret(s)));
-                    }
-                }
-            } else {
-                settings.insert(key.clone(), value.clone());
-            }
-        }
-        result.insert(
-            name.clone(),
-            json!({
-                "enabled": plugin_cfg.enabled,
-                "settings": settings,
-            }),
-        );
-    }
-    Value::Object(result)
 }
 
 #[derive(Debug, Deserialize)]
@@ -104,13 +38,6 @@ pub struct ConfigUpdate {
     pub server: Option<ServerUpdate>,
     pub library: Option<LibraryUpdate>,
     pub streaming: Option<StreamingUpdate>,
-    pub plugins: Option<HashMap<String, PluginUpdate>>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct PluginUpdate {
-    pub enabled: Option<bool>,
-    pub settings: Option<HashMap<String, serde_json::Value>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -136,8 +63,7 @@ pub async fn update_config(
     Extension(client_ip): Extension<ClientIp>,
     Json(update): Json<ConfigUpdate>,
 ) -> Result<Json<Value>, AppError> {
-    // Clone config under write lock, apply mutations, then drop lock before disk I/O
-    let (config_snapshot, https_port_changed, plugins_changed) = {
+    let (config_snapshot, https_port_changed) = {
         let mut config = state.config.write().await;
 
         let mut https_port_changed = false;
@@ -159,38 +85,6 @@ pub async fn update_config(
             }
         }
 
-        // Plugins
-        let mut plugins_changed = false;
-        if let Some(plugin_updates) = update.plugins {
-            for (name, pu) in plugin_updates {
-                let entry = config.plugins.entry(name).or_insert_with(|| {
-                    riff_core::config::PluginConfig {
-                        enabled: false,
-                        settings: HashMap::new(),
-                    }
-                });
-                if let Some(enabled) = pu.enabled {
-                    if enabled != entry.enabled {
-                        entry.enabled = enabled;
-                        plugins_changed = true;
-                    }
-                }
-                if let Some(new_settings) = pu.settings {
-                    for (key, value) in new_settings {
-                        // Empty string removes the key
-                        if value.as_str() == Some("") {
-                            if entry.settings.remove(&key).is_some() {
-                                plugins_changed = true;
-                            }
-                        } else if entry.settings.get(&key) != Some(&value) {
-                            entry.settings.insert(key, value);
-                            plugins_changed = true;
-                        }
-                    }
-                }
-            }
-        }
-
         if let Some(streaming) = update.streaming {
             if let Some(bitrate) = streaming.remote_bitrate {
                 config.streaming.remote_bitrate = bitrate.clamp(64, 320);
@@ -203,25 +97,17 @@ pub async fn update_config(
         }
 
         let snapshot = config.clone();
-        (snapshot, https_port_changed, plugins_changed)
-    }; // write lock dropped before disk I/O
+        (snapshot, https_port_changed)
+    };
 
-    // Save to disk outside the lock
     config_snapshot.save().map_err(|e| AppError::Internal(format!("failed to save config: {e}")))?;
 
     // Audit log
     {
-        let mut changed = Vec::new();
-        if https_port_changed {
-            changed.push(format!("https_port={}", config_snapshot.server.https_port));
-        }
-        if plugins_changed {
-            changed.push("plugins".to_string());
-        }
-        let details = if changed.is_empty() {
-            "config updated".to_string()
+        let details = if https_port_changed {
+            format!("config updated: https_port={}", config_snapshot.server.https_port)
         } else {
-            format!("config updated: {}", changed.join(", "))
+            "config updated".to_string()
         };
         super::audit::log(
             &state.db,
@@ -236,30 +122,12 @@ pub async fn update_config(
 
     if https_port_changed {
         tracing::info!(port = config_snapshot.server.https_port, "HTTPS port changed, restarting server");
-        // Signal restart after a short delay so the response flushes first
         let restart_state = state.clone();
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             restart_state.restart.notify_one();
         });
     }
-
-    let remote_catalog = state.remote_catalog.read().await;
-    let dev_names: Vec<&str> = config_snapshot.dev_plugins.keys().map(|k| k.as_str()).collect();
-    let plugins_json = build_plugins_json(&config_snapshot.plugins, &remote_catalog, &dev_names);
-    drop(remote_catalog);
-
-    // Reload plugins synchronously so we can report health in the response
-    let plugin_results = if plugins_changed {
-        let mut results = crate::plugin_reload::reload_wasm_plugins(&state).await;
-        // Also reload dev plugins when plugin config changes
-        let (dev_results, dev_names) = crate::plugin_reload::reload_dev_plugins(&state).await;
-        *state.dev_plugin_names.write().await = dev_names;
-        results.extend(dev_results);
-        Some(results)
-    } else {
-        None
-    };
 
     let response = json!({
         "restarting": https_port_changed,
@@ -275,8 +143,7 @@ pub async fn update_config(
             "remote_format": config_snapshot.streaming.remote_format,
             "ffmpeg_available": state.ffmpeg_available,
         },
-        "plugins": plugins_json,
-        "plugin_health": plugin_results,
+        "plugins": {},
     });
 
     Ok(Json(response))

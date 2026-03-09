@@ -1,6 +1,4 @@
-use bliss_audio::decoder::symphonia::SymphoniaDecoder;
-use bliss_audio::decoder::Decoder;
-use bliss_audio::AnalysisIndex;
+use rustfft::{FftPlanner, num_complex::Complex};
 use sqlx::SqlitePool;
 use std::path::Path;
 use std::sync::Arc;
@@ -17,7 +15,7 @@ pub struct AnalysisResult {
 }
 
 /// Analyze all pending tracks in the library.
-/// Runs bliss-audio for tempo/chroma features and ebur128 for loudness.
+/// Extracts BPM, key (via STFT + chroma), and loudness (ebur128).
 pub async fn analyze_library(pool: &SqlitePool) -> anyhow::Result<AnalysisResult> {
     let mut result = AnalysisResult {
         tracks_analyzed: 0,
@@ -91,14 +89,12 @@ pub async fn analyze_library(pool: &SqlitePool) -> anyhow::Result<AnalysisResult
             Ok((track_id, file_path, analysis)) => {
                 match analysis {
                     Ok(Ok(data)) => {
-                        let features_json = serde_json::to_string(&data.bliss_features)?;
                         sqlx::query(
-                            "UPDATE tracks SET bpm_analyzed = ?, key_analyzed = ?, loudness_lufs = ?, bliss_features = ?, analysis_status = 'complete', analyzed_at = datetime('now') WHERE id = ?",
+                            "UPDATE tracks SET bpm_analyzed = ?, key_analyzed = ?, loudness_lufs = ?, bliss_features = NULL, analysis_status = 'complete', analyzed_at = datetime('now') WHERE id = ?",
                         )
                         .bind(data.bpm)
                         .bind(&data.key)
                         .bind(data.loudness_lufs)
-                        .bind(&features_json)
                         .bind(&track_id)
                         .execute(pool)
                         .await?;
@@ -140,7 +136,7 @@ pub async fn analyze_library(pool: &SqlitePool) -> anyhow::Result<AnalysisResult
         analyzed = result.tracks_analyzed,
         failed = result.tracks_failed,
         skipped = result.tracks_skipped,
-        "bliss analysis complete",
+        "audio analysis complete",
     );
 
     // Collect unique album IDs from analyzed tracks
@@ -163,25 +159,35 @@ struct TrackAnalysis {
     bpm: Option<f64>,
     key: Option<String>,
     loudness_lufs: Option<f64>,
-    bliss_features: Vec<f64>,
 }
 
-/// Run bliss-audio and ebur128 analysis on a single track (blocking).
+/// Analyze a single track: BPM (spectral flux autocorrelation), key (chroma), loudness (ebur128).
 fn analyze_track(file_path: &str) -> anyhow::Result<TrackAnalysis> {
-    // Run bliss-audio analysis using Symphonia decoder
-    let song = SymphoniaDecoder::song_from_path(file_path)
-        .map_err(|e| anyhow::anyhow!("bliss analysis failed: {}", e))?;
+    let (samples, sample_rate, channels) = decode_audio(file_path)?;
 
-    let features: Vec<f64> = song.analysis.as_vec().iter().map(|&v| v as f64).collect();
+    // Mix to mono
+    let mono: Vec<f32> = if channels > 1 {
+        samples
+            .chunks(channels as usize)
+            .map(|frame| frame.iter().sum::<f32>() / channels as f32)
+            .collect()
+    } else {
+        samples
+    };
 
-    // Extract BPM from bliss tempo feature
-    let bpm = features
-        .get(AnalysisIndex::Tempo as usize)
-        .copied()
-        .filter(|&b| b > 0.0 && b <= 500.0);
+    // Compute STFT
+    let fft_size = 4096;
+    let hop_size = 512;
+    let spectral_frames = compute_stft(&mono, fft_size, hop_size);
 
-    // Estimate key from chroma features using Krumhansl-Schmuckler
-    let key = estimate_key_from_chroma(&features);
+    // Extract chroma from spectral frames
+    let chroma = extract_chroma(&spectral_frames, sample_rate, fft_size);
+
+    // Estimate key from averaged chroma
+    let key = estimate_key_from_chroma(&chroma);
+
+    // Detect BPM via spectral flux onset strength + autocorrelation
+    let bpm = detect_bpm(&spectral_frames, sample_rate as f64, hop_size);
 
     // Measure loudness via ebur128
     let loudness_lufs = measure_lufs(file_path).ok();
@@ -190,17 +196,158 @@ fn analyze_track(file_path: &str) -> anyhow::Result<TrackAnalysis> {
         bpm,
         key,
         loudness_lufs,
-        bliss_features: features,
     })
 }
 
-/// Estimate musical key from bliss chroma features using the Krumhansl-Schmuckler algorithm.
-fn estimate_key_from_chroma(features: &[f64]) -> Option<String> {
-    let chroma_start = AnalysisIndex::Chroma1 as usize;
-    if features.len() < chroma_start + 12 {
+// ─── Audio Decoding ──────────────────────────────────────────────────────────
+
+/// Decode audio file to interleaved f32 samples using symphonia.
+fn decode_audio(file_path: &str) -> anyhow::Result<(Vec<f32>, u32, u16)> {
+    use symphonia::core::audio::SampleBuffer;
+    use symphonia::core::codecs::DecoderOptions;
+    use symphonia::core::formats::FormatOptions;
+    use symphonia::core::io::MediaSourceStream;
+    use symphonia::core::meta::MetadataOptions;
+    use symphonia::core::probe::Hint;
+
+    let file = std::fs::File::open(file_path)?;
+    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+
+    let mut hint = Hint::new();
+    if let Some(ext) = Path::new(file_path).extension().and_then(|e| e.to_str()) {
+        hint.with_extension(ext);
+    }
+
+    let probed = symphonia::default::get_probe().format(
+        &hint,
+        mss,
+        &FormatOptions::default(),
+        &MetadataOptions::default(),
+    )?;
+
+    let mut format = probed.format;
+    let track = format
+        .default_track()
+        .ok_or_else(|| anyhow::anyhow!("no default track"))?;
+
+    let sample_rate = track
+        .codec_params
+        .sample_rate
+        .ok_or_else(|| anyhow::anyhow!("no sample rate"))?;
+    let channels = track
+        .codec_params
+        .channels
+        .map(|c| c.count() as u16)
+        .unwrap_or(2);
+    let track_id = track.id;
+
+    let mut decoder =
+        symphonia::default::get_codecs().make(&track.codec_params, &DecoderOptions::default())?;
+
+    let mut all_samples = Vec::new();
+
+    loop {
+        let packet = match format.next_packet() {
+            Ok(p) => p,
+            Err(symphonia::core::errors::Error::IoError(ref e))
+                if e.kind() == std::io::ErrorKind::UnexpectedEof =>
+            {
+                break;
+            }
+            Err(_) => break,
+        };
+
+        if packet.track_id() != track_id {
+            continue;
+        }
+
+        let decoded = match decoder.decode(&packet) {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+
+        let spec = *decoded.spec();
+        let duration = decoded.capacity();
+        let mut sample_buf = SampleBuffer::<f32>::new(duration as u64, spec);
+        sample_buf.copy_interleaved_ref(decoded);
+        all_samples.extend_from_slice(sample_buf.samples());
+    }
+
+    Ok((all_samples, sample_rate, channels))
+}
+
+// ─── STFT ────────────────────────────────────────────────────────────────────
+
+fn compute_stft(mono: &[f32], fft_size: usize, hop_size: usize) -> Vec<Vec<f64>> {
+    let mut planner = FftPlanner::<f64>::new();
+    let fft = planner.plan_fft_forward(fft_size);
+
+    let half = fft_size / 2 + 1;
+    let mut frames = Vec::new();
+
+    // Precompute Hann window
+    let window: Vec<f64> = (0..fft_size)
+        .map(|i| 0.5 * (1.0 - (2.0 * std::f64::consts::PI * i as f64 / fft_size as f64).cos()))
+        .collect();
+
+    let mut pos = 0;
+    while pos + fft_size <= mono.len() {
+        let mut buffer: Vec<Complex<f64>> = mono[pos..pos + fft_size]
+            .iter()
+            .enumerate()
+            .map(|(i, &s)| Complex::new(s as f64 * window[i], 0.0))
+            .collect();
+
+        fft.process(&mut buffer);
+
+        let magnitudes: Vec<f64> = buffer[..half]
+            .iter()
+            .map(|c| c.norm())
+            .collect();
+
+        frames.push(magnitudes);
+        pos += hop_size;
+    }
+
+    frames
+}
+
+// ─── Chroma Extraction ───────────────────────────────────────────────────────
+
+fn extract_chroma(spectral_frames: &[Vec<f64>], sample_rate: u32, fft_size: usize) -> Vec<f64> {
+    let mut chroma = [0.0f64; 12];
+
+    for frame in spectral_frames {
+        for (bin, &mag) in frame.iter().enumerate().skip(1) {
+            let freq = bin as f64 * sample_rate as f64 / fft_size as f64;
+            if freq < 20.0 || freq > 5000.0 {
+                continue;
+            }
+            // Map frequency to pitch class (0 = C, 1 = C#, ..., 11 = B)
+            let midi = 12.0 * (freq / 440.0).log2() + 69.0;
+            let pitch_class = ((midi.round() as i32 % 12) + 12) % 12;
+            chroma[pitch_class as usize] += mag * mag; // energy
+        }
+    }
+
+    // Normalize
+    let max = chroma.iter().copied().fold(0.0f64, f64::max);
+    if max > 0.0 {
+        for c in &mut chroma {
+            *c /= max;
+        }
+    }
+
+    chroma.to_vec()
+}
+
+// ─── Key Detection ───────────────────────────────────────────────────────────
+
+/// Estimate musical key from chroma vector using the Krumhansl-Schmuckler algorithm.
+fn estimate_key_from_chroma(chroma: &[f64]) -> Option<String> {
+    if chroma.len() < 12 {
         return None;
     }
-    let chroma: Vec<f64> = features[chroma_start..chroma_start + 12].to_vec();
 
     // Krumhansl-Schmuckler key profiles
     let major_profile: [f64; 12] = [
@@ -264,8 +411,76 @@ fn pearson_correlation(x: &[f64], y: &[f64]) -> f64 {
     num / denom
 }
 
+// ─── BPM Detection ───────────────────────────────────────────────────────────
+
+/// Detect BPM via spectral flux onset strength → autocorrelation → peak picking.
+fn detect_bpm(spectral_frames: &[Vec<f64>], sample_rate: f64, hop_size: usize) -> Option<f64> {
+    if spectral_frames.len() < 2 {
+        return None;
+    }
+
+    let mut onset_strength: Vec<f64> = Vec::with_capacity(spectral_frames.len() - 1);
+    for i in 1..spectral_frames.len() {
+        let flux: f64 = spectral_frames[i]
+            .iter()
+            .zip(spectral_frames[i - 1].iter())
+            .map(|(&curr, &prev)| (curr - prev).max(0.0))
+            .sum();
+        onset_strength.push(flux);
+    }
+
+    if onset_strength.is_empty() {
+        return None;
+    }
+
+    // Normalize onset strength
+    let max_onset = onset_strength.iter().copied().fold(0.0f64, f64::max);
+    if max_onset > 0.0 {
+        for v in &mut onset_strength {
+            *v /= max_onset;
+        }
+    }
+
+    // Autocorrelation over BPM range 60-200
+    let frames_per_sec = sample_rate / hop_size as f64;
+    let min_lag = (frames_per_sec * 60.0 / 200.0) as usize; // 200 BPM
+    let max_lag = (frames_per_sec * 60.0 / 60.0) as usize;  // 60 BPM
+    let max_lag = max_lag.min(onset_strength.len() - 1);
+
+    if min_lag >= max_lag {
+        return None;
+    }
+
+    let mut best_lag = min_lag;
+    let mut best_corr = f64::NEG_INFINITY;
+
+    for lag in min_lag..=max_lag {
+        let mut corr = 0.0;
+        let n = onset_strength.len() - lag;
+        for i in 0..n {
+            corr += onset_strength[i] * onset_strength[i + lag];
+        }
+        corr /= n as f64;
+
+        if corr > best_corr {
+            best_corr = corr;
+            best_lag = lag;
+        }
+    }
+
+    let bpm = 60.0 * frames_per_sec / best_lag as f64;
+
+    // Validate BPM range
+    if bpm >= 60.0 && bpm <= 200.0 {
+        Some((bpm * 10.0).round() / 10.0)
+    } else {
+        None
+    }
+}
+
+// ─── Loudness Measurement ────────────────────────────────────────────────────
+
 /// Measure integrated loudness in LUFS using ebur128.
-/// Decodes the audio file with Symphonia and feeds samples to the ebur128 crate.
 fn measure_lufs(file_path: &str) -> anyhow::Result<f64> {
     use symphonia::core::audio::SampleBuffer;
     use symphonia::core::codecs::DecoderOptions;

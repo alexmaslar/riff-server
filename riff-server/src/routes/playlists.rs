@@ -1,5 +1,8 @@
 use axum::{
+    body::Body,
     extract::{Path, Query, State},
+    http::{header, StatusCode},
+    response::{IntoResponse, Response},
     Extension, Json,
 };
 use riff_core::auth::Claims;
@@ -7,9 +10,11 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::{Acquire, QueryBuilder, Row, Sqlite};
 use std::sync::Arc;
+use tokio::fs::File;
 use uuid::Uuid;
 
 use crate::error::AppError;
+use crate::routes::albums::CoverParams;
 use crate::AppState;
 
 #[derive(Debug, Deserialize)]
@@ -53,6 +58,7 @@ pub async fn list_playlists(
                 COUNT(pt.id) as track_count,
                 COALESCE(SUM(t.duration_seconds), 0) as total_duration,
                 p.created_at, p.updated_at,
+                p.cover_path,
                 COUNT(*) OVER() as total_count
          FROM playlists p
          LEFT JOIN playlist_tracks pt ON p.id = pt.playlist_id
@@ -81,6 +87,7 @@ pub async fn list_playlists(
                 "total_duration": row.get::<i64, _>("total_duration"),
                 "created_at": row.get::<String, _>("created_at"),
                 "updated_at": row.get::<String, _>("updated_at"),
+                "has_cover": row.get::<Option<String>, _>("cover_path").is_some(),
             })
         })
         .collect();
@@ -95,8 +102,8 @@ pub async fn get_playlist(
     Extension(claims): Extension<Claims>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, AppError> {
-    let playlist = sqlx::query_as::<_, (String, String, Option<String>, String, String)>(
-        "SELECT id, name, description, created_at, updated_at
+    let playlist = sqlx::query_as::<_, (String, String, Option<String>, String, String, Option<String>)>(
+        "SELECT id, name, description, created_at, updated_at, cover_path
          FROM playlists WHERE id = ? AND user_id = ?",
     )
     .bind(&id)
@@ -150,6 +157,7 @@ pub async fn get_playlist(
         "tracks": track_list,
         "created_at": playlist.3,
         "updated_at": playlist.4,
+        "has_cover": playlist.5.is_some(),
     })))
 }
 
@@ -348,4 +356,56 @@ pub async fn reorder_tracks(
     tx.commit().await?;
 
     Ok(Json(json!({ "ok": true })))
+}
+
+/// GET /playlists/:id/cover — Serve playlist cover art
+pub async fn get_cover(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(params): Query<CoverParams>,
+) -> Response {
+    let row = sqlx::query_as::<_, (Option<String>,)>(
+        "SELECT cover_path FROM playlists WHERE id = ?",
+    )
+    .bind(&id)
+    .fetch_optional(&state.db)
+    .await;
+
+    let cover_path = match row {
+        Ok(Some((Some(path),))) => path,
+        Ok(Some((None,))) | Ok(None) => {
+            return (StatusCode::NOT_FOUND, Json(json!({ "error": "no cover art" })))
+                .into_response()
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response()
+        }
+    };
+
+    if let Some(w) = params.w {
+        let w = w.clamp(50, 2000);
+        return crate::routes::albums::serve_thumbnail(&cover_path, &id, w).await;
+    }
+
+    let file = match File::open(&cover_path).await {
+        Ok(f) => f,
+        Err(_) => {
+            return (StatusCode::NOT_FOUND, Json(json!({ "error": "cover file missing" })))
+                .into_response()
+        }
+    };
+
+    let file_size = file.metadata().await.map(|m| m.len()).unwrap_or(0);
+    let stream = tokio_util::io::ReaderStream::new(file);
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "image/jpeg")
+        .header(header::CONTENT_LENGTH, file_size)
+        .header(header::CACHE_CONTROL, "public, max-age=31536000, immutable")
+        .body(Body::from_stream(stream))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }

@@ -19,6 +19,5 @@ pub mod playlists;
 pub mod relay;
 pub mod podcasts;
 pub mod smart_playlist;
-pub mod streaming;
 pub mod tracks;
 pub mod users;

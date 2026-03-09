@@ -127,18 +127,12 @@ pub struct MixTrack {
     pub bpm: Option<f64>,
     pub key: Option<String>,
     pub loudness: Option<f64>,
-    pub bliss: Option<Vec<f64>>,
     pub duration_seconds: Option<i32>,
     pub mood: Option<String>,
     pub album_moods: Vec<String>,
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
-
-pub fn parse_bliss(row: &sqlx::sqlite::SqliteRow) -> Option<Vec<f64>> {
-    let json_str: Option<String> = row.try_get("bliss_features").ok().flatten();
-    json_str.and_then(|s| serde_json::from_str(&s).ok())
-}
 
 /// Deterministic seed index from (user_id, date_str) — avoids annual cycle repeats
 /// and gives different users different seeds on the same day.
@@ -502,7 +496,7 @@ async fn build_artist_mix_tracks(
             "SELECT t.id, t.title, t.album_id, a.artist_id, ar.name as artist_name,
                     t.duration_seconds, t.bpm_analyzed, t.bpm_tag,
                     t.key_analyzed, t.loudness_lufs,
-                    t.bliss_features, t.mood,
+                    t.mood,
                     COALESCE(a.rating, 5.0) as rating,
                     a.play_count, a.moods,
                     ar.external_id as artist_external_id, a.genre
@@ -526,7 +520,7 @@ async fn build_artist_mix_tracks(
             "SELECT t.id, t.title, t.album_id, a.artist_id, ar.name as artist_name,
                     t.duration_seconds, t.bpm_analyzed, t.bpm_tag,
                     t.key_analyzed, t.loudness_lufs,
-                    t.bliss_features, t.mood,
+                    t.mood,
                     COALESCE(a.rating, 5.0) as rating,
                     a.play_count, a.moods,
                     ar.external_id as artist_external_id, a.genre
@@ -649,7 +643,7 @@ async fn generate_genre_mix(
             "SELECT t.id, t.title, t.album_id, a.artist_id, ar.name as artist_name,
                     t.duration_seconds, t.bpm_analyzed, t.bpm_tag,
                     t.key_analyzed, t.loudness_lufs,
-                    t.bliss_features, t.mood,
+                    t.mood,
                     COALESCE(a.rating, 5.0) as rating,
                     a.play_count, a.moods,
                     ar.external_id as artist_external_id, a.genre
@@ -736,7 +730,7 @@ async fn generate_deep_cuts_mix(
         "SELECT t.id, t.title, t.album_id, a.artist_id, ar.name as artist_name,
                 t.duration_seconds, t.bpm_analyzed, t.bpm_tag,
                 t.key_analyzed, t.loudness_lufs,
-                t.bliss_features, t.mood,
+                t.mood,
                 COALESCE(a.rating, 5.0) as rating,
                 a.play_count, a.is_compilation, a.moods
          FROM tracks t
@@ -765,7 +759,7 @@ async fn generate_deep_cuts_mix(
             "SELECT t.id, t.title, t.album_id, a.artist_id, ar.name as artist_name,
                     t.duration_seconds, t.bpm_analyzed, t.bpm_tag,
                     t.key_analyzed, t.loudness_lufs,
-                    t.bliss_features, t.mood,
+                    t.mood,
                     COALESCE(a.rating, 5.0) as rating,
                     a.play_count, a.moods,
                     ar.external_id as artist_external_id, a.genre
@@ -825,7 +819,7 @@ async fn generate_deep_cuts_mix(
             "SELECT t.id, t.title, t.album_id, a.artist_id, ar.name as artist_name,
                     t.duration_seconds, t.bpm_analyzed, t.bpm_tag,
                     t.key_analyzed, t.loudness_lufs,
-                    t.bliss_features, t.mood,
+                    t.mood,
                     COALESCE(a.rating, 5.0) as rating,
                     a.play_count, a.moods,
                     ar.external_id as artist_external_id, a.genre
@@ -943,7 +937,7 @@ async fn generate_decade_mix(
             "SELECT t.id, t.title, t.album_id, a.artist_id, ar.name as artist_name,
                     t.duration_seconds, t.bpm_analyzed, t.bpm_tag,
                     t.key_analyzed, t.loudness_lufs,
-                    t.bliss_features, t.mood,
+                    t.mood,
                     COALESCE(a.rating, 5.0) as rating,
                     a.play_count, a.moods,
                     ar.external_id as artist_external_id, a.genre
@@ -1020,7 +1014,6 @@ struct ScoredTrack {
     bpm: Option<f64>,
     key: Option<String>,
     loudness: Option<f64>,
-    bliss: Option<Vec<f64>>,
     duration_seconds: Option<i32>,
     mood: Option<String>,
     album_moods: Vec<String>,
@@ -1152,7 +1145,6 @@ pub async fn score_and_select(
             let bpm = bpm_analyzed.or(bpm_tag);
             let key: Option<String> = row.try_get("key_analyzed").ok().flatten();
             let loudness: Option<f64> = row.try_get("loudness_lufs").ok().flatten();
-            let bliss = parse_bliss(row);
             let duration_seconds: Option<i32> = row.try_get("duration_seconds").ok().flatten();
             let mood: Option<String> = row.try_get("mood").ok().flatten();
             let album_moods_json: String = row.try_get("moods").unwrap_or_default();
@@ -1218,7 +1210,7 @@ pub async fn score_and_select(
 
             ScoredTrack {
                 id, album_id, artist_id, artist_external_id, score, bpm, key, loudness,
-                bliss, duration_seconds, mood, album_moods,
+                duration_seconds, mood, album_moods,
             }
         })
         .collect();
@@ -1229,8 +1221,8 @@ pub async fn score_and_select(
     // Log top few scores for debugging
     for track in scored.iter().take(3) {
         debug!(
-            "scored track {} = {:.2} (lb_artist={}, bliss={})",
-            track.id, track.score, track.artist_external_id.is_some(), track.bliss.is_some()
+            "scored track {} = {:.2} (lb_artist={})",
+            track.id, track.score, track.artist_external_id.is_some()
         );
     }
 
@@ -1298,7 +1290,7 @@ pub async fn score_and_select(
             bpm: track.bpm,
             key: track.key.clone(),
             loudness: track.loudness,
-            bliss: track.bliss.clone(),
+
             duration_seconds: track.duration_seconds,
             mood: track.mood.clone(),
             album_moods: track.album_moods.clone(),
@@ -1342,7 +1334,7 @@ pub async fn score_and_select(
                 bpm: track.bpm,
                 key: track.key.clone(),
                 loudness: track.loudness,
-                bliss: track.bliss.clone(),
+    
                 duration_seconds: track.duration_seconds,
                 mood: track.mood.clone(),
                 album_moods: track.album_moods.clone(),

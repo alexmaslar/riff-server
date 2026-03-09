@@ -8,7 +8,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::SqlitePool;
 use std::sync::Arc;
-use unicode_normalization::UnicodeNormalization;
 
 use crate::error::AppError;
 use crate::AppState;
@@ -206,129 +205,12 @@ pub async fn artist_stories(
     Ok(Json(json!({ "artists": artists })))
 }
 
-#[derive(Debug, Deserialize)]
-pub struct StreamingAlbumsParams {
-    pub provider: Option<String>,
-}
-
+/// GET /artists/{id}/streaming-albums — no streaming providers available
 pub async fn get_streaming_albums(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-    Query(params): Query<StreamingAlbumsParams>,
+    State(_state): State<Arc<AppState>>,
+    Path(_id): Path<String>,
 ) -> Result<Json<Value>, AppError> {
-    let provider_name = params.provider.unwrap_or_else(|| "tidal".to_string());
-
-    // Look up artist name from DB
-    let artist_row = sqlx::query_as::<_, (String,)>(
-        "SELECT name FROM artists WHERE id = ?",
-    )
-    .bind(&id)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or_else(|| AppError::NotFound("artist not found".to_string()))?;
-    let artist_name = artist_row.0;
-
-    // Find the provider
-    let registry = state.plugin_registry.read().await;
-    let provider = registry
-        .streaming_providers()
-        .iter()
-        .find(|p| p.provider_name() == provider_name)
-        .cloned();
-    drop(registry);
-
-    let Some(provider) = provider else {
-        return Err(AppError::NotFound(format!(
-            "streaming provider '{}' not configured",
-            provider_name
-        )));
-    };
-
-    // Search for artist on the provider
-    let search_results = provider
-        .search(&artist_name, 5)
-        .await
-        .map_err(|e| AppError::Internal(format!("provider search failed: {e}")))?;
-
-    // Find matching artist (case-insensitive exact match)
-    let artist_name_lower = artist_name.to_lowercase();
-    let streaming_artist = search_results
-        .artists
-        .into_iter()
-        .find(|a| a.name.to_lowercase() == artist_name_lower);
-
-    let Some(streaming_artist) = streaming_artist else {
-        return Ok(Json(json!({
-            "provider": provider_name,
-            "albums": [],
-        })));
-    };
-
-    // Get artist albums from provider
-    let streaming_albums = provider
-        .get_artist_albums(&streaming_artist.provider_id)
-        .await
-        .map_err(|e| AppError::Internal(format!("album fetch failed: {e}")))?;
-
-    // Get library albums for this artist
-    let library_albums = sqlx::query_as::<_, (String, String, Option<i32>)>(
-        "SELECT id, title, year FROM albums WHERE artist_id = ?",
-    )
-    .bind(&id)
-    .fetch_all(&state.db)
-    .await?;
-
-    // Normalize: NFKD decompose (splits accents from base chars), lowercase, ASCII alphanumeric only.
-    // This ensures "DeBÍ" matches regardless of whether Í is NFC (U+00CD) or NFD (I + combining accent).
-    fn normalize(s: &str) -> String {
-        s.nfkd().collect::<String>().to_lowercase().chars().filter(|c| c.is_ascii_alphanumeric()).collect()
-    }
-
-    // Build merged album list
-    let albums: Vec<Value> = streaming_albums
-        .into_iter()
-        .map(|album| {
-            let match_result = library_albums.iter().find(|(_, lib_title, lib_year)| {
-                let titles_match = normalize(&album.title) == normalize(lib_title);
-                let years_match = match (album.year, *lib_year) {
-                    (Some(sy), Some(ly)) => (sy - ly).abs() <= 1,
-                    _ => true,
-                };
-                titles_match && years_match
-            });
-
-            let in_library = match_result.is_some();
-            let library_album_id = match_result.map(|(lid, _, _)| lid.clone());
-            let qualities: Vec<String> = album
-                .available_qualities
-                .iter()
-                .filter_map(|q| serde_json::to_value(q).ok())
-                .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                .collect();
-
-            json!({
-                "provider_id": album.provider_id,
-                "title": album.title,
-                "artist": {
-                    "provider_id": album.artist.provider_id,
-                    "name": album.artist.name,
-                    "image_url": album.artist.image_url,
-                },
-                "year": album.year,
-                "cover_url": album.cover_url,
-                "track_count": album.track_count,
-                "available_qualities": qualities,
-                "in_library": in_library,
-                "library_album_id": library_album_id,
-                "album_type": album.album_type,
-            })
-        })
-        .collect();
-
-    Ok(Json(json!({
-        "provider": provider_name,
-        "albums": albums,
-    })))
+    Ok(Json(json!({ "albums": [] })))
 }
 
 pub async fn build_artist_detail(

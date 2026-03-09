@@ -85,7 +85,7 @@ pub async fn get_autoqueue(
             "SELECT t.id, t.title, t.album_id, a.artist_id, ar.name as artist_name,
                     t.duration_seconds, t.bpm_analyzed, t.bpm_tag,
                     t.key_analyzed, t.loudness_lufs,
-                    t.bliss_features, t.mood,
+                    t.mood,
                     COALESCE(a.rating, 5.0) as rating,
                     a.play_count, a.moods,
                     ar.external_id as artist_external_id, a.genre
@@ -111,7 +111,7 @@ pub async fn get_autoqueue(
             "SELECT t.id, t.title, t.album_id, a.artist_id, ar.name as artist_name,
                     t.duration_seconds, t.bpm_analyzed, t.bpm_tag,
                     t.key_analyzed, t.loudness_lufs,
-                    t.bliss_features, t.mood,
+                    t.mood,
                     COALESCE(a.rating, 5.0) as rating,
                     a.play_count, a.moods,
                     ar.external_id as artist_external_id, a.genre

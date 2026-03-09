@@ -1,3 +1,15 @@
+mod allmusic;
+mod html;
+mod northern_transmissions;
+mod pitchfork;
+mod thelineofbestfit;
+mod util;
+
+pub use allmusic::AllMusicProvider;
+pub use northern_transmissions::NorthernTransmissionsProvider;
+pub use pitchfork::PitchforkProvider;
+pub use thelineofbestfit::TheLineOfBestFitProvider;
+
 use std::sync::Arc;
 
 use crate::plugin::capabilities::EditorialProvider;

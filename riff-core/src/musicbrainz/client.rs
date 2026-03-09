@@ -1,18 +1,16 @@
-use std::num::NonZeroU32;
 use std::sync::Arc;
 
-use governor::{Quota, RateLimiter, clock::DefaultClock, state::{InMemoryState, NotKeyed}};
 use reqwest::header::{HeaderMap, HeaderValue, USER_AGENT};
+use tokio::sync::Mutex;
+use tokio::time::Instant;
 
 use super::types::*;
 
 const BASE_URL: &str = "https://musicbrainz.org/ws/2";
 
-type Limiter = RateLimiter<NotKeyed, InMemoryState, DefaultClock>;
-
 pub struct MusicBrainzClient {
     http: reqwest::Client,
-    limiter: Arc<Limiter>,
+    last_request: Arc<Mutex<Instant>>,
 }
 
 impl MusicBrainzClient {
@@ -29,11 +27,21 @@ impl MusicBrainzClient {
             .connect_timeout(std::time::Duration::from_secs(10))
             .build()?;
 
-        // MusicBrainz allows 1 request/second
-        let quota = Quota::per_second(NonZeroU32::new(1).unwrap());
-        let limiter = Arc::new(RateLimiter::direct(quota));
+        // Start in the past so the first request fires immediately
+        let last_request = Arc::new(Mutex::new(Instant::now() - std::time::Duration::from_secs(2)));
 
-        Ok(Self { http, limiter })
+        Ok(Self { http, last_request })
+    }
+
+    /// Wait until at least 1 second has passed since the last request.
+    async fn rate_limit(&self) {
+        let mut last = self.last_request.lock().await;
+        let elapsed = last.elapsed();
+        let interval = std::time::Duration::from_secs(1);
+        if elapsed < interval {
+            tokio::time::sleep(interval - elapsed).await;
+        }
+        *last = Instant::now();
     }
 
     pub async fn search_release(
@@ -42,7 +50,7 @@ impl MusicBrainzClient {
         title: &str,
         year: Option<i32>,
     ) -> anyhow::Result<Vec<MBSearchResult>> {
-        self.limiter.until_ready().await;
+        self.rate_limit().await;
 
         let mut query = format!("release:\"{}\" AND artist:\"{}\"", escape_lucene(title), escape_lucene(artist));
         if let Some(y) = year {
@@ -67,7 +75,7 @@ impl MusicBrainzClient {
     }
 
     pub async fn get_release(&self, mbid: &str) -> anyhow::Result<MBReleaseDetail> {
-        self.limiter.until_ready().await;
+        self.rate_limit().await;
 
         let url = format!(
             "{}/release/{}?inc=artist-credits+labels+genres+tags+annotation+artist-rels+recordings+isrcs&fmt=json",
@@ -85,7 +93,7 @@ impl MusicBrainzClient {
     }
 
     pub async fn get_artist(&self, mbid: &str) -> anyhow::Result<MBArtistDetail> {
-        self.limiter.until_ready().await;
+        self.rate_limit().await;
 
         let url = format!(
             "{}/artist/{}?inc=url-rels+genres&fmt=json",
@@ -103,7 +111,7 @@ impl MusicBrainzClient {
     }
 
     pub async fn get_release_group(&self, mbid: &str) -> anyhow::Result<MBReleaseGroup> {
-        self.limiter.until_ready().await;
+        self.rate_limit().await;
 
         let url = format!(
             "{}/release-group/{}?inc=genres&fmt=json",

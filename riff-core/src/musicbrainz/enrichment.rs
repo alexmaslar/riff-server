@@ -4,10 +4,8 @@ use sqlx::SqlitePool;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
-use std::sync::Arc;
 
 use crate::deezer;
-use crate::plugin::capabilities::StreamingProvider;
 use super::client::MusicBrainzClient;
 use super::matching;
 
@@ -371,12 +369,10 @@ async fn download_cover(
     Ok(true)
 }
 
-/// Fetch artist images from Spotify via MusicBrainz URL relations, with streaming provider fallback.
-/// Phase 1: MusicBrainz → Spotify artist link → oEmbed → 640px image (no auth needed).
-/// Phase 2: For remaining artists, search registered streaming providers by name.
+/// Fetch artist images from Spotify via MusicBrainz URL relations.
+/// MusicBrainz → Spotify artist link → oEmbed → 640px image (no auth needed).
 pub async fn enrich_artist_images_spotify(
     pool: &SqlitePool,
-    streaming_providers: &[Arc<dyn StreamingProvider>],
 ) -> anyhow::Result<Vec<String>> {
     let http_client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
@@ -385,7 +381,6 @@ pub async fn enrich_artist_images_spotify(
     let mb_client = MusicBrainzClient::new()?;
     let mut enriched_ids: Vec<String> = Vec::new();
 
-    // Phase 1: Spotify via MusicBrainz links
     let rows: Vec<(String, String, String)> = sqlx::query_as(
         "SELECT id, name, external_id FROM artists \
          WHERE image_url IS NULL AND external_id IS NOT NULL"
@@ -425,52 +420,6 @@ pub async fn enrich_artist_images_spotify(
         }
 
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-    }
-
-    // Phase 2: Streaming provider fallback for remaining artists
-    if !streaming_providers.is_empty() {
-        let remaining: Vec<(String, String)> = sqlx::query_as(
-            "SELECT id, name FROM artists WHERE image_url IS NULL"
-        )
-        .fetch_all(pool)
-        .await?;
-
-        if !remaining.is_empty() {
-            info!(count = remaining.len(), "streaming provider image fallback: artists remaining");
-        }
-
-        for (artist_id, artist_name) in &remaining {
-            let mut found = false;
-            for provider in streaming_providers {
-                match provider.search(artist_name, 1).await {
-                    Ok(results) => {
-                        if let Some(artist) = results.artists.iter().find(|a| {
-                            a.name.eq_ignore_ascii_case(artist_name)
-                        }) {
-                            if let Some(ref url) = artist.image_url {
-                                sqlx::query("UPDATE artists SET image_url = ? WHERE id = ? AND image_url IS NULL")
-                                    .bind(url)
-                                    .bind(artist_id)
-                                    .execute(pool)
-                                    .await?;
-                                enriched_ids.push(artist_id.clone());
-                                debug!(artist = %artist_name, provider = %provider.provider_name(), "streaming provider image found");
-                                found = true;
-                                break;
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        debug!(provider = %provider.provider_name(), artist = %artist_name, error = %e, "streaming provider search failed");
-                    }
-                }
-            }
-            if !found {
-                debug!(artist = %artist_name, "no streaming provider image");
-            }
-
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        }
     }
 
     if !enriched_ids.is_empty() {

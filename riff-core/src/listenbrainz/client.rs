@@ -1,9 +1,9 @@
-use std::num::NonZeroU32;
 use std::sync::Arc;
 
-use governor::{Quota, RateLimiter, clock::DefaultClock, state::{InMemoryState, NotKeyed}};
 use reqwest::header::{HeaderMap, HeaderValue, USER_AGENT};
 use serde_json::json;
+use tokio::sync::Mutex;
+use tokio::time::Instant;
 
 use super::types::*;
 
@@ -11,11 +11,9 @@ const LABS_BASE_URL: &str = "https://labs.api.listenbrainz.org";
 const ARTIST_ALGORITHM: &str = "session_based_days_7500_session_300_contribution_3_threshold_10_limit_100_filter_True_skip_30";
 const RECORDING_ALGORITHM: &str = "session_based_days_7500_session_300_contribution_5_threshold_15_limit_50_skip_30";
 
-type Limiter = RateLimiter<NotKeyed, InMemoryState, DefaultClock>;
-
 pub struct ListenBrainzLabsClient {
     http: reqwest::Client,
-    limiter: Arc<Limiter>,
+    last_request: Arc<Mutex<Instant>>,
 }
 
 impl ListenBrainzLabsClient {
@@ -32,17 +30,25 @@ impl ListenBrainzLabsClient {
             .connect_timeout(std::time::Duration::from_secs(10))
             .build()?;
 
-        // Conservative: 1 request/second
-        let quota = Quota::per_second(NonZeroU32::new(1).unwrap());
-        let limiter = Arc::new(RateLimiter::direct(quota));
+        let last_request = Arc::new(Mutex::new(Instant::now() - std::time::Duration::from_secs(2)));
 
-        Ok(Self { http, limiter })
+        Ok(Self { http, last_request })
+    }
+
+    async fn rate_limit(&self) {
+        let mut last = self.last_request.lock().await;
+        let elapsed = last.elapsed();
+        let interval = std::time::Duration::from_secs(1);
+        if elapsed < interval {
+            tokio::time::sleep(interval - elapsed).await;
+        }
+        *last = Instant::now();
     }
 
     /// Fetch similar artists for a given artist MBID.
     /// Returns up to ~100 similar artists with scores.
     pub async fn similar_artists(&self, artist_mbid: &str) -> anyhow::Result<Vec<LBSimilarArtist>> {
-        self.limiter.until_ready().await;
+        self.rate_limit().await;
 
         let body = json!([{
             "artist_mbids": [artist_mbid],
@@ -69,7 +75,7 @@ impl ListenBrainzLabsClient {
     /// Fetch similar recordings for a given recording MBID.
     /// Returns up to ~100 similar recordings with scores.
     pub async fn similar_recordings(&self, recording_mbid: &str) -> anyhow::Result<Vec<LBSimilarRecording>> {
-        self.limiter.until_ready().await;
+        self.rate_limit().await;
 
         let body = json!([{
             "recording_mbids": [recording_mbid],
